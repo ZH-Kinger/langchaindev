@@ -1,0 +1,11 @@
+"__pycache__/" 
+"*.pyc" 
+".env" 
+"node_modules/" 
+
+# 忽略任何路径下的 model_cache 文件夹
+**/model_cache/
+
+# 忽略所有编译缓存
+**/__pycache__/
+*.pyc
