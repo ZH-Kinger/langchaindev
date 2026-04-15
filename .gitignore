@@ -1,11 +1,57 @@
-"__pycache__/" 
-"*.pyc" 
-".env" 
-"node_modules/" 
+# ===== 敏感配置 =====
+.env
+*.key
+*.pem
+*.p12
+secrets/
 
-# 忽略任何路径下的 model_cache 文件夹
-**/model_cache/
-
-# 忽略所有编译缓存
+# ===== Python =====
+__pycache__/
 **/__pycache__/
-*.pyc
+*.py[cod]
+*.pyo
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# ===== 模型与向量数据库 =====
+**/model_cache/
+models/
+vector_db/
+*.bin
+*.safetensors
+*.gguf
+*.onnx
+*.pt
+*.pth
+
+# ===== 数据库文件 =====
+*.sqlite3
+*.db
+
+# ===== 会话历史 =====
+sessions/
+
+# ===== 测试数据（大文件）=====
+data/*.csv
+data/*.xlsx
+data/*.json
+data/*.xls
+
+# ===== IDE / 工具 =====
+.idea/
+.vscode/
+.claude/
+*.iml
+
+# ===== 日志 =====
+*.log
+data/logs/
+
+# ===== 系统文件 =====
+.DS_Store
+Thumbs.db

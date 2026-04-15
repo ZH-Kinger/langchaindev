@@ -1,19 +1,11 @@
 from langchain.tools import tool
-from langchain_openai import ChatOpenAI
-from config.settings import settings  # 统一从 settings 引入
+from utils.llm_factory import get_cloud_llm
 from core.chains import create_rag_chain
 from utils.vector_store import get_retriever
 from core.prompts import aiops_prompt
 
-# --- 第一步：直接在本地实例化零件 ---
-
-# 1. 实例化 LLM (替代掉原来的 get_qwen_model)
-llm = ChatOpenAI(
-    model=settings.MODEL_NAME,
-    api_key=settings.API_KEY,
-    base_url=settings.BASE_URL,
-    temperature=settings.TEMPERATURE,
-)
+# --- 初始化 RAG 所需零件 ---
+llm = get_cloud_llm()
 
 # 2. 获取检索器和 Prompt
 retriever = get_retriever()

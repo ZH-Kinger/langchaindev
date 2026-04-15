@@ -1,9 +1,19 @@
 # tools/__init__.py
-from .system_tool import get_system_health
+from .system_tool import system_stats_tool
 from .rag_tool import query_knowledge
+from .analysis_skills import alarm_reduction_tool
+from .ops_skills import k8s_restart_tool
+from .monitor_skills import cpu_analyzer_tool
+from .prometheus_tool import prometheus_tool
+from .feishu_tool import feishu_tool
 
-# 统一暴露给 Agent 的工具箱
-ops_tools = [
-    get_system_health,
-    query_knowledge
+# Agent 可直接导入的完整工具列表
+ALL_TOOLS = [
+    system_stats_tool,
+    query_knowledge,
+    alarm_reduction_tool,
+    k8s_restart_tool,
+    cpu_analyzer_tool,
+    prometheus_tool,
+    feishu_tool,
 ]

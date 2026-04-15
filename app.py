@@ -1,9 +1,9 @@
 import os
-from langchain_openai import ChatOpenAI
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_community.chat_message_histories import FileChatMessageHistory
 
 from config.settings import settings
+from utils.llm_factory import get_cloud_llm
 from utils.vector_store import get_retriever
 from core.prompts import aiops_prompt
 from core.chains import create_rag_chain
@@ -18,12 +18,7 @@ def get_session_history(session_id: str):
 
 def chat():
     # 初始化 LLM 和 检索器
-    llm = ChatOpenAI(
-        model=settings.MODEL_NAME,
-        api_key=settings.API_KEY,
-        base_url=settings.BASE_URL,
-        temperature=settings.TEMPERATURE,
-    )
+    llm = get_cloud_llm()
     retriever = get_retriever()
 
     # 组装基础 Chain
