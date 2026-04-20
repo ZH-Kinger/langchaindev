@@ -1,15 +1,16 @@
 """
 阿里云 PAI DSW 实例管理工具。
-通过调用 pai-dsw-cli.js（Node.js CLI）实现 DSW 实例的查询、启停与资源发现。
-CLI 路径由环境变量 PAI_DSW_CLI_PATH 指定。
+使用 alibabacloud-pai-dsw20220101 Python SDK 直接调用 API，无 Node.js 依赖。
 """
 import json
-import os
-import subprocess
-import tempfile
+from functools import lru_cache
 
 from pydantic import BaseModel, Field
 from langchain.tools import StructuredTool
+
+from alibabacloud_pai_dsw20220101.client import Client
+from alibabacloud_pai_dsw20220101 import models as dsw_models
+from alibabacloud_tea_openapi import models as open_api_models
 
 from config.settings import settings
 
@@ -36,7 +37,7 @@ class PAIDSWSchema(BaseModel):
     )
     workspace_id: str = Field(
         default="",
-        description="工作空间 ID，用于 list/discover 过滤，留空则查全部。"
+        description="工作空间 ID，用于 list/discover 过滤，留空则用 .env 默认值。"
     )
     instance_name: str = Field(
         default="",
@@ -48,7 +49,7 @@ class PAIDSWSchema(BaseModel):
     )
     resource_id: str = Field(
         default="",
-        description="资源组 ID，用于 list/discover 过滤，留空则查全部。"
+        description="资源组 ID，用于 list/discover 过滤，留空则用 .env 默认值。"
     )
     save_image: bool = Field(
         default=False,
@@ -62,60 +63,33 @@ class PAIDSWSchema(BaseModel):
         default="",
         description=(
             "create_json 操作时使用的实例配置 JSON 字符串。"
-            "字段参考 pai-dsw-create.example.json：instanceName, workspaceId, "
-            "resourceId, imageUrl, requestedResource(CPU/GPU/GPUType/memory), "
-            "datasets, userVpc, priority, accessibility 等。"
+            "字段：instanceName, workspaceId, resourceId, imageUrl, "
+            "requestedResource(cpu/gpu/gputype/memory), datasets, userVpc, "
+            "priority, accessibility 等。"
         )
     )
 
 
-# ── 内部工具函数 ───────────────────────────────────────────────────────────────
+# ── SDK 客户端（缓存，相同凭证复用同一实例）──────────────────────────────────────
 
-def _cli_path() -> str:
-    path = settings.PAI_DSW_CLI_PATH
-    if not path:
-        return ""
-    return path
-
-
-def _run_cli(args: list[str]) -> str:
-    cli = _cli_path()
-    if not cli:
-        return "❌ PAI_DSW_CLI_PATH 未配置，请在 .env 中设置 CLI 脚本路径。"
-
-    env = os.environ.copy()
-    # 将 settings 中的阿里云密钥透传给 Node.js 进程
-    if settings.PAI_DSW_ACCESS_KEY_ID:
-        env["ALIBABA_CLOUD_ACCESS_KEY_ID"] = settings.PAI_DSW_ACCESS_KEY_ID
-    if settings.PAI_DSW_ACCESS_KEY_SECRET:
-        env["ALIBABA_CLOUD_ACCESS_KEY_SECRET"] = settings.PAI_DSW_ACCESS_KEY_SECRET
-    if settings.PAI_DSW_REGION_ID:
-        env["ALIBABA_CLOUD_REGION_ID"] = settings.PAI_DSW_REGION_ID
-
-    cmd = ["node", cli] + args
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            env=env,
-            timeout=30,
-        )
-        stdout = result.stdout.decode("utf-8", errors="replace") if result.stdout else ""
-        stderr = result.stderr.decode("utf-8", errors="replace") if result.stderr else ""
-        if result.returncode != 0:
-            err = stderr.strip() or stdout.strip()
-            return f"❌ CLI 执行失败（exit {result.returncode}）：{err}"
-        return stdout.strip()
-    except FileNotFoundError:
-        return "❌ 未找到 node 命令，请确认 Node.js 已安装并在 PATH 中。"
-    except subprocess.TimeoutExpired:
-        return "❌ CLI 执行超时（>30s），请检查网络或阿里云 API 连通性。"
-    except Exception as e:
-        return f"❌ 执行异常：{e}"
+@lru_cache(maxsize=4)
+def _get_client(region: str, ak: str, sk: str) -> Client:
+    config = open_api_models.Config(
+        access_key_id=ak,
+        access_key_secret=sk,
+        region_id=region,
+        endpoint=f"pai-dsw.{region}.aliyuncs.com",
+    )
+    return Client(config)
 
 
-def _arg(val: str) -> str:
-    return val if val else "-"
+def _client() -> Client | None:
+    ak = settings.PAI_DSW_ACCESS_KEY_ID
+    sk = settings.PAI_DSW_ACCESS_KEY_SECRET
+    region = settings.PAI_DSW_REGION_ID or "cn-hangzhou"
+    if not ak or not sk:
+        return None
+    return _get_client(region, ak, sk)
 
 
 # ── 主函数 ────────────────────────────────────────────────────────────────────
@@ -132,178 +106,242 @@ def manage_pai_dsw(
     create_config_json: str = "",
 ) -> str:
     """管理阿里云 PAI DSW 实例：查询、启动、停止、删除、创建、资源发现。"""
-    action = action.strip().lower()
+    client = _client()
+    if client is None:
+        return "❌ PAI_DSW_ACCESS_KEY_ID / PAI_DSW_ACCESS_KEY_SECRET 未配置，请在 .env 中设置。"
 
-    if action == "list":
-        ws = workspace_id or settings.PAI_DSW_WORKSPACE_ID
-        rs = resource_id or settings.PAI_DSW_RESOURCE_ID
-        raw = _run_cli([
-            "picklist",
-            _arg(ws),
-            _arg(user_id),
-            _arg(rs),
-        ])
-        try:
-            data = json.loads(raw)
-            instances = data.get("items") or data.get("instances") or []
+    action = action.strip().lower()
+    ws = workspace_id or settings.PAI_DSW_WORKSPACE_ID
+    rs = resource_id or settings.PAI_DSW_RESOURCE_ID
+
+    try:
+        # ── list ──────────────────────────────────────────────────────────────
+        if action == "list":
+            req = dsw_models.ListInstancesRequest(
+                page_size=100,
+                page_number=1,
+                workspace_id=ws or None,
+                instance_name=instance_name or None,
+                create_user_id=user_id or None,
+                resource_id=rs or None,
+            )
+            resp = client.list_instances(req)
+            instances = resp.body.instances or []
             if not instances:
-                return f"当前没有 DSW 实例。（API 原始响应：{raw[:300]}）"
+                return "当前没有 DSW 实例。"
             lines = ["## PAI DSW 实例列表\n"]
             for i, inst in enumerate(instances, 1):
-                rr = inst.get("requestedResource") or {}
+                rr = inst.requested_resource
+                cpu = rr.cpu if rr else "-"
+                gpu = rr.gpu if rr else "-"
+                mem = rr.memory if rr else "-"
                 lines.append(
-                    f"{i}. **{inst.get('instanceName')}** | {inst.get('status')} | "
-                    f"{inst.get('acceleratorType')} | "
-                    f"CPU {rr.get('CPU', '-')} GPU {rr.get('GPU', '-')} MEM {rr.get('memory', '-')} | "
-                    f"`{inst.get('instanceId')}`"
+                    f"{i}. **{inst.instance_name}** | {inst.status} | "
+                    f"{inst.accelerator_type} | "
+                    f"CPU {cpu} GPU {gpu} MEM {mem} | "
+                    f"`{inst.instance_id}`"
                 )
-            lines.append(f"\n共 {data.get('totalCount', len(instances))} 个实例。")
+            lines.append(f"\n共 {resp.body.total_count or len(instances)} 个实例。")
             return "\n".join(lines)
-        except Exception:
-            return raw
 
-    if action == "get":
-        if not instance_id:
-            return "❌ get 操作需要提供 instance_id。"
-        raw = _run_cli(["instance", instance_id])
-        try:
-            data = json.loads(raw)
-            inst = data
-            rr = inst.get("requestedResource") or {}
+        # ── get ───────────────────────────────────────────────────────────────
+        if action == "get":
+            if not instance_id:
+                return "❌ get 操作需要提供 instance_id。"
+            req = dsw_models.GetInstanceRequest()
+            resp = client.get_instance(instance_id, req)
+            inst = resp.body
+            rr = inst.requested_resource
             lines = [
-                f"## 实例详情：{inst.get('instanceName')}",
-                f"- **状态**：{inst.get('status')}",
-                f"- **ID**：{inst.get('instanceId')}",
-                f"- **加速类型**：{inst.get('acceleratorType')}",
-                f"- **规格**：CPU {rr.get('CPU', '-')} | GPU {rr.get('GPU', '-')} | 内存 {rr.get('memory', '-')}",
-                f"- **镜像**：{inst.get('imageName', inst.get('imageUrl', '-'))}",
-                f"- **工作空间**：{inst.get('workspaceName')} ({inst.get('workspaceId')})",
-                f"- **资源组**：{inst.get('resourceName')} ({inst.get('resourceId')})",
-                f"- **创建时间**：{inst.get('gmtCreateTime', '-')}",
+                f"## 实例详情：{inst.instance_name}",
+                f"- **状态**：{inst.status}",
+                f"- **ID**：{inst.instance_id}",
+                f"- **加速类型**：{inst.accelerator_type}",
+                f"- **规格**：CPU {rr.cpu if rr else '-'} | GPU {rr.gpu if rr else '-'} | 内存 {rr.memory if rr else '-'}",
+                f"- **镜像**：{inst.image_name or inst.image_url or '-'}",
+                f"- **工作空间**：{inst.workspace_name} ({inst.workspace_id})",
+                f"- **资源组**：{inst.resource_name} ({inst.resource_id})",
+                f"- **创建时间**：{inst.gmt_create_time or '-'}",
             ]
             return "\n".join(lines)
-        except Exception:
-            return raw
 
-    if action == "start":
-        if not instance_id:
-            return "❌ start 操作需要提供 instance_id。"
-        raw = _run_cli(["start", instance_id])
-        try:
-            data = json.loads(raw)
-            if data.get("success") or data.get("instanceId"):
-                return f"✅ 实例 {instance_id} 启动请求已提交（requestId: {data.get('requestId', '-')}）。"
-            return f"⚠️ 响应：{raw}"
-        except Exception:
-            return raw
+        # ── start ─────────────────────────────────────────────────────────────
+        if action == "start":
+            if not instance_id:
+                return "❌ start 操作需要提供 instance_id。"
+            resp = client.start_instance(instance_id)
+            return f"✅ 实例 {instance_id} 启动请求已提交（requestId: {resp.body.request_id or '-'}）。"
 
-    if action == "stop":
-        if not instance_id:
-            return "❌ stop 操作需要提供 instance_id。"
-        raw = _run_cli(["stop", instance_id, "true" if save_image else "false"])
-        try:
-            data = json.loads(raw)
+        # ── stop ──────────────────────────────────────────────────────────────
+        if action == "stop":
+            if not instance_id:
+                return "❌ stop 操作需要提供 instance_id。"
+            req = dsw_models.StopInstanceRequest(save_image=save_image)
+            resp = client.stop_instance(instance_id, req)
             img_note = "（已保存镜像）" if save_image else ""
-            if data.get("success") or data.get("instanceId"):
-                return f"✅ 实例 {instance_id} 停止请求已提交{img_note}（requestId: {data.get('requestId', '-')}）。"
-            return f"⚠️ 响应：{raw}"
-        except Exception:
-            return raw
+            return f"✅ 实例 {instance_id} 停止请求已提交{img_note}（requestId: {resp.body.request_id or '-'}）。"
 
-    if action == "delete":
-        if not instance_id:
-            return "❌ delete 操作需要提供 instance_id。"
-        raw = _run_cli(["delete", instance_id])
-        try:
-            data = json.loads(raw)
-            if data.get("success"):
-                return f"✅ 实例 {instance_id} 已删除（requestId: {data.get('requestId', '-')}）。"
-            return f"⚠️ 响应：{raw}"
-        except Exception:
-            return raw
+        # ── delete ────────────────────────────────────────────────────────────
+        if action == "delete":
+            if not instance_id:
+                return "❌ delete 操作需要提供 instance_id。"
+            # 只允许删除 Stopped 状态的实例，防止误删运行中的实例
+            check_req = dsw_models.GetInstanceRequest()
+            check_resp = client.get_instance(instance_id, check_req)
+            current_status = check_resp.body.status or ""
+            if current_status.upper() not in ("STOPPED", "FAILED", "DELETED"):
+                return (
+                    f"⚠️ 拒绝删除：实例 {instance_id} 当前状态为 {current_status}，"
+                    "只允许删除 Stopped/Failed 状态的实例，请先停止后再删除。"
+                )
+            resp = client.delete_instance(instance_id)
+            return f"✅ 实例 {instance_id} 已删除（requestId: {resp.body.request_id or '-'}）。"
 
-    if action == "discover":
-        ws = workspace_id or settings.PAI_DSW_WORKSPACE_ID
-        rs = resource_id or settings.PAI_DSW_RESOURCE_ID
-        raw = _run_cli([
-            "discover",
-            _arg(ws),
-            _arg(user_id),
-            _arg(rs),
-        ])
-        try:
-            data = json.loads(raw)
+        # ── discover ──────────────────────────────────────────────────────────
+        if action == "discover":
+            req = dsw_models.ListInstancesRequest(
+                page_size=100,
+                page_number=1,
+                workspace_id=ws or None,
+                create_user_id=user_id or None,
+                resource_id=rs or None,
+            )
+            resp = client.list_instances(req)
+            instances = resp.body.instances or []
+
+            def uniq(lst):
+                seen, out = set(), []
+                for x in lst:
+                    if x and x not in seen:
+                        seen.add(x); out.append(x)
+                return out
+
+            workspace_map = {i.workspace_id: i.workspace_name for i in instances if i.workspace_id}
+            resource_map  = {i.resource_id:  i.resource_name  for i in instances if i.resource_id}
+            image_catalog = [
+                {"instanceName": i.instance_name, "imageName": i.image_name,
+                 "acceleratorType": i.accelerator_type,
+                 "cpu": i.requested_resource.cpu if i.requested_resource else "-",
+                 "gpu": i.requested_resource.gpu if i.requested_resource else "-"}
+                for i in instances
+            ]
+            dataset_candidates, seen_ds = [], set()
+            for inst in instances:
+                for ds in inst.datasets or []:
+                    key = ds.uri or ""
+                    if key and key not in seen_ds:
+                        seen_ds.add(key)
+                        dataset_candidates.append({
+                            "uri": ds.uri, "mountPath": ds.mount_path,
+                            "mountAccess": ds.mount_access, "from": inst.instance_name,
+                        })
+
             lines = [
-                f"## PAI DSW 资源配置发现（共 {data.get('totalCount', 0)} 个实例）\n",
+                f"## PAI DSW 资源配置发现（共 {resp.body.total_count or len(instances)} 个实例）\n",
                 "### 工作空间",
             ]
-            for w in data.get("workspaceCandidates", []):
-                lines.append(f"- {w.get('workspaceName')} (`{w.get('workspaceId')}`)")
+            for wid, wname in workspace_map.items():
+                lines.append(f"- {wname} (`{wid}`)")
             lines.append("\n### 资源组")
-            for r in data.get("resourceCandidates", []):
-                lines.append(f"- {r.get('resourceName')} (`{r.get('resourceId')}`)")
-            lines.append("\n### 镜像（最近使用）")
-            for img in data.get("imageCandidates", [])[:5]:
-                lines.append(f"- [{img.get('acceleratorType')}] {img.get('imageName')} — {img.get('instanceName')}")
-            if data.get("datasetCandidates"):
+            for rid, rname in resource_map.items():
+                lines.append(f"- {rname} (`{rid}`)")
+            lines.append("\n### 镜像（最近使用前 5 个）")
+            for img in image_catalog[:5]:
+                lines.append(
+                    f"- [{img['acceleratorType']}] {img['imageName']} "
+                    f"CPU {img['cpu']} GPU {img['gpu']} — {img['instanceName']}"
+                )
+            if dataset_candidates:
                 lines.append("\n### 数据集挂载")
-                seen = set()
-                for ds in data["datasetCandidates"]:
-                    key = ds.get("uri", "")
-                    if key not in seen:
-                        seen.add(key)
-                        lines.append(f"- `{ds.get('uri')}` → `{ds.get('mountPath')}` ({ds.get('mountAccess', 'RW')})")
+                for ds in dataset_candidates:
+                    lines.append(f"- `{ds['uri']}` → `{ds['mountPath']}` ({ds['mountAccess']})")
             return "\n".join(lines)
-        except Exception:
-            return raw
 
-    if action == "specs":
-        raw = _run_cli(["specs", accelerator_type.upper()])
-        try:
-            data = json.loads(raw)
-            specs = data.get("specs", data.get("ecsSpecs", []))
+        # ── specs ─────────────────────────────────────────────────────────────
+        if action == "specs":
+            req = dsw_models.ListEcsSpecsRequest(
+                page_size=20, page_number=1,
+                accelerator_type=accelerator_type.upper(),
+            )
+            resp = client.list_ecs_specs(req)
+            specs = resp.body.ecs_specs or []
             if not specs:
-                return f"未找到 {accelerator_type} 类型规格，原始响应：{raw[:500]}"
+                return f"未找到 {accelerator_type} 类型规格。"
             lines = [f"## PAI DSW 可用规格（{accelerator_type}）\n"]
             for s in specs[:20]:
                 lines.append(
-                    f"- **{s.get('resourceType', s.get('instanceType', '-'))}**："
-                    f"CPU {s.get('cpu', '-')} | GPU {s.get('gpu', '-')} | 内存 {s.get('memory', '-')}"
+                    f"- **{s.instance_type or '-'}**："
+                    f"CPU {s.cpu or '-'} | GPU {s.gpu or '-'} ({s.gputype or '-'}) | 内存 {s.memory or '-'}"
                 )
             return "\n".join(lines)
-        except Exception:
-            return raw
 
-    if action == "create_json":
-        if not create_config_json.strip():
-            return "❌ create_json 操作需要提供 create_config_json（JSON 字符串）。"
-        try:
-            json.loads(create_config_json)
-        except json.JSONDecodeError as e:
-            return f"❌ create_config_json 不是合法 JSON：{e}"
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False, encoding="utf-8"
-        ) as f:
-            f.write(create_config_json)
-            tmp_path = f.name
-        try:
-            raw = _run_cli(["create", "--file", tmp_path])
-        finally:
+        # ── create_json ───────────────────────────────────────────────────────
+        if action == "create_json":
+            if not create_config_json.strip():
+                return "❌ create_json 操作需要提供 create_config_json（JSON 字符串）。"
             try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-        try:
-            data = json.loads(raw)
-            if data.get("success") or data.get("instanceId"):
+                cfg = json.loads(create_config_json)
+            except json.JSONDecodeError as e:
+                return f"❌ create_config_json 不是合法 JSON：{e}"
+
+            rr_cfg = cfg.get("requestedResource") or cfg.get("requested_resource") or {}
+            requested_resource = dsw_models.CreateInstanceRequestRequestedResource(
+                cpu=str(rr_cfg["cpu"]) if rr_cfg.get("cpu") is not None else None,
+                gpu=str(rr_cfg["gpu"]) if rr_cfg.get("gpu") is not None else None,
+                gputype=rr_cfg.get("gputype") or rr_cfg.get("GPUType"),
+                memory=str(rr_cfg["memory"]) if rr_cfg.get("memory") else None,
+                shared_memory=str(rr_cfg.get("sharedMemory") or rr_cfg.get("shared_memory") or rr_cfg.get("memory") or ""),
+            ) if rr_cfg else None
+
+            datasets = []
+            for ds in cfg.get("datasets", []):
+                datasets.append(dsw_models.CreateInstanceRequestDatasets(
+                    uri=ds.get("uri"),
+                    mount_path=ds.get("mountPath") or ds.get("mount_path"),
+                    mount_access=ds.get("mountAccess", "RW"),
+                    dynamic=ds.get("dynamic", False),
+                ))
+
+            vpc_cfg = cfg.get("userVpc") or cfg.get("user_vpc")
+            user_vpc = None
+            if vpc_cfg:
+                user_vpc = dsw_models.CreateInstanceRequestUserVpc(
+                    vpc_id=vpc_cfg.get("vpcId") or vpc_cfg.get("vpc_id"),
+                    v_switch_id=vpc_cfg.get("vSwitchId") or vpc_cfg.get("v_switch_id"),
+                    security_group_id=vpc_cfg.get("securityGroupId") or vpc_cfg.get("security_group_id"),
+                    default_route=vpc_cfg.get("defaultRoute", "eth0"),
+                )
+
+            req = dsw_models.CreateInstanceRequest(
+                accessibility=cfg.get("accessibility", "PRIVATE"),
+                instance_name=cfg.get("instanceName") or cfg.get("instance_name"),
+                workspace_id=str(cfg["workspaceId"]) if cfg.get("workspaceId") else str(cfg.get("workspace_id", "")),
+                resource_id=cfg.get("resourceId") or cfg.get("resource_id"),
+                image_url=cfg.get("imageUrl") or cfg.get("image_url"),
+                image_id=cfg.get("imageId") or cfg.get("image_id"),
+                priority=cfg.get("priority"),
+                requested_resource=requested_resource,
+                datasets=datasets or None,
+                user_vpc=user_vpc,
+                environment_variables=cfg.get("environmentVariables") or cfg.get("environment_variables"),
+            )
+            resp = client.create_instance(req)
+            body = resp.body
+            if body.instance_id:
                 return (
                     f"✅ 实例创建成功！\n"
-                    f"- **实例 ID**：{data.get('instanceId', '-')}\n"
-                    f"- **requestId**：{data.get('requestId', '-')}"
+                    f"- **实例 ID**：{body.instance_id}\n"
+                    f"- **requestId**：{body.request_id or '-'}"
                 )
-            return f"⚠️ 响应：{raw}"
-        except Exception:
-            return raw
+            return f"⚠️ 创建响应：{body.to_map()}"
+
+    except Exception as e:
+        err_msg = str(e)
+        if hasattr(e, "message"):
+            err_msg = e.message
+        elif hasattr(e, "data") and e.data:
+            err_msg = f"{e} | {e.data}"
+        return f"❌ API 调用失败：{err_msg}"
 
     return (
         f"❓ 未知操作：{action}\n"

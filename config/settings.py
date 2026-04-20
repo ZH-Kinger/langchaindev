@@ -31,11 +31,10 @@ class Config:
     FEISHU_CHAT_ID           = os.environ.get("FEISHU_CHAT_ID", "")
     FEISHU_VERIFICATION_TOKEN = os.environ.get("FEISHU_VERIFICATION_TOKEN", "")
 
-    # 阿里云 PAI DSW CLI
-    PAI_DSW_CLI_PATH          = os.environ.get("PAI_DSW_CLI_PATH", "")          # pai-dsw-cli.js 绝对路径
+    # 阿里云 PAI DSW（Python SDK，无需 Node.js）
     PAI_DSW_ACCESS_KEY_ID     = os.environ.get("PAI_DSW_ACCESS_KEY_ID", "")
     PAI_DSW_ACCESS_KEY_SECRET = os.environ.get("PAI_DSW_ACCESS_KEY_SECRET", "")
-    PAI_DSW_REGION_ID         = os.environ.get("PAI_DSW_REGION_ID", "cn-beijing")
+    PAI_DSW_REGION_ID         = os.environ.get("PAI_DSW_REGION_ID", "cn-hangzhou")
     PAI_DSW_WORKSPACE_ID      = os.environ.get("PAI_DSW_WORKSPACE_ID", "")
     PAI_DSW_RESOURCE_ID       = os.environ.get("PAI_DSW_RESOURCE_ID", "")
 
