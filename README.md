@@ -12,6 +12,8 @@
 - **企业集成**：Prometheus 指标查询、Grafana 看板、飞书 Webhook 通知
 - **告警降噪**：Redis 去重，防止重复告警轰炸
 - **审计日志**：所有运维操作带时间戳完整记录
+- **PAI DSW 实例管理**：通过自然语言管理阿里云 PAI DSW 数据科学工作站（查询/启停/创建/资源发现）
+- **GPU 集群顾问**：基于 Prometheus 实时指标，输出利用率、散热、调度、成本优化建议
 
 ## 项目结构
 
@@ -40,7 +42,9 @@ langchaindev/
 │   ├── monitor_skills.py       # CPU 趋势分析
 │   ├── prometheus_tool.py      # Prometheus 指标查询与分析
 │   ├── feishu_tool.py          # 飞书消息卡片推送
-│   └── rag_tool.py             # 知识库查询工具
+│   ├── rag_tool.py             # 知识库查询工具
+│   ├── gpu_advisor_tool.py     # GPU 集群智能优化顾问
+│   └── pai_dsw_tool.py         # 阿里云 PAI DSW 实例管理
 │
 ├── utils/
 │   ├── llm_factory.py          # LLM 工厂（云端/边缘模型）
@@ -120,6 +124,14 @@ REDIS_PASSWORD=your-redis-password
 # Grafana
 GRAFANA_URL=your-grafana-url
 GRAFANA_API_KEY=your-grafana-api-key
+
+# PAI DSW（可选，用于 DSW 实例管理工具）
+PAI_DSW_CLI_PATH=/path/to/pai-dsw-cli-project/pai-dsw-cli.js
+PAI_DSW_ACCESS_KEY_ID=your-aliyun-ak
+PAI_DSW_ACCESS_KEY_SECRET=your-aliyun-sk
+PAI_DSW_REGION_ID=cn-hangzhou
+PAI_DSW_WORKSPACE_ID=your-workspace-id
+PAI_DSW_RESOURCE_ID=your-resource-id
 ```
 
 ### 初始化知识库
@@ -174,6 +186,8 @@ python main.py --mode bot      # 飞书机器人（监听端口 8088）
 | `prometheus_query` | Prometheus 指标查询与异常检测 |
 | `feishu_notify` | 飞书消息卡片推送 |
 | `knowledge_base` | 运维知识库语义查询 |
+| `gpu_advisor` | GPU 集群利用率/散热/调度/成本建议 |
+| `pai_dsw` | PAI DSW 实例查询、启停、创建、资源发现 |
 
 ## 技术栈
 
@@ -198,7 +212,9 @@ python main.py --mode bot      # 飞书机器人（监听端口 8088）
    │                    ├── 系统监控
    │                    ├── Prometheus
    │                    ├── K8s 操作
-   │                    └── 知识库查询
+   │                    ├── 知识库查询
+   │                    ├── GPU 集群顾问
+   │                    └── PAI DSW 实例管理
    │
    ├── Hybrid 模式 ──→ 边缘模型感知 → 云端模型决策
    │

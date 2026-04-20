@@ -6,6 +6,8 @@ from .ops_skills import k8s_restart_tool
 from .monitor_skills import cpu_analyzer_tool
 from .prometheus_tool import prometheus_tool
 from .feishu_tool import feishu_tool
+from .gpu_advisor_tool import gpu_advisor_tool
+from .pai_dsw_tool import pai_dsw_tool
 
 # Agent 可直接导入的完整工具列表
 ALL_TOOLS = [
@@ -16,4 +18,6 @@ ALL_TOOLS = [
     cpu_analyzer_tool,
     prometheus_tool,
     feishu_tool,
+    gpu_advisor_tool,
+    pai_dsw_tool,
 ]
