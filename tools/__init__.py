@@ -10,6 +10,7 @@ from .gpu_advisor_tool import gpu_advisor_tool
 from .pai_dsw_tool import pai_dsw_tool
 from .jira_tool import jira_tool
 from .ram_tool import ram_tool
+from .gpu_training_advisor import gpu_training_advisor_tool
 
 # Agent 可直接导入的完整工具列表
 ALL_TOOLS = [
@@ -24,4 +25,5 @@ ALL_TOOLS = [
     pai_dsw_tool,
     jira_tool,
     ram_tool,
+    gpu_training_advisor_tool,
 ]

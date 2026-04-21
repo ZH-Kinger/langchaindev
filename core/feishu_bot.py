@@ -588,8 +588,11 @@ def _process_message(message_id: str, chat_id: str, user_text: str, open_id: str
     # 先发"思考中"提示，让用户知道 Bot 在处理
     _feishu_reply(message_id, "🤔 正在分析，请稍候...")
 
+    # 将 open_id 注入输入，供 analyze_gpu_training 等需要身份识别的工具使用
+    agent_input = f"{user_text}\n[feishu_open_id={open_id}]" if open_id else user_text
+
     try:
-        result = _build_executor().invoke({"input": user_text, "chat_history": history})
+        result = _build_executor().invoke({"input": agent_input, "chat_history": history})
         reply  = result["output"]
 
         # 清除 LLM 可能在回复文本中虚构的 Markdown 图片占位符
@@ -597,7 +600,7 @@ def _process_message(message_id: str, chat_id: str, user_text: str, open_id: str
         reply = re.sub(r"!\[.*?\]\(.*?\)", "", reply)
         reply = re.sub(r"!https?://\S+", "", reply).strip()
 
-        # 将本轮对话写回 Redis，与 CLI 模式共用同一套持久化逻辑
+        # 写回历史时用原始 user_text（不含注入的 open_id 元数据）
         _save_turn(chat_id, user_text, reply)
 
         # 每次回复都尝试生成实时指标趋势图，失败时降级为纯文本回复

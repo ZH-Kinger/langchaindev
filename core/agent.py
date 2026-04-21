@@ -39,6 +39,7 @@ _TOOL_GROUPS = {
     "advisor":   {"advise_gpu_cluster", "query_infrastructure_metrics"},
     "pai_dsw":   {"manage_pai_dsw"},
     "jira":      {"manage_jira"},
+    "training":  {"analyze_gpu_training", "query_infrastructure_metrics"},
 }
 
 # 启动时校验 _TOOL_GROUPS 中的名字与 ALL_TOOLS 一致，防止静默路由失效
@@ -60,6 +61,9 @@ def _select_tools(user_input: str) -> list:
         names = _TOOL_GROUPS["jira"] | _TOOL_GROUPS["pai_dsw"]
     elif any(k in text for k in ("dlc", "eas", "产品", "算力", "训练任务", "推理", "开发环境", "分布")):
         names = _TOOL_GROUPS["monitor"]
+    elif any(k in text for k in ("训练建议", "算法建议", "训练分析", "利用率低", "怎么优化训练",
+                                  "分析我的gpu", "分析实例", "训练瓶颈", "显存优化", "dataloader")):
+        names = _TOOL_GROUPS["training"]
     elif any(k in text for k in ("建议", "优化", "效率", "成本", "散热", "调度", "空闲", "瓶颈")):
         names = _TOOL_GROUPS["advisor"]
     elif any(k in text for k in ("cpu", "内存", "memory", "prometheus", "指标", "趋势", "监控")):
