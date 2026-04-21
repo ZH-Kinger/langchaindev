@@ -29,6 +29,9 @@ from collections import deque
 import requests
 from flask import Flask, request, jsonify
 from config.settings import settings
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 from tools.feishu_tool import _get_access_token
 from tools.jira_tool import create_gpu_ticket, add_comment as jira_comment
 from core.dsw_scheduler import (scheduler, _redis_get, _redis_set, _redis_delete,
@@ -155,7 +158,7 @@ def _send_ak_register_card(message_id: str) -> None:
             if resp.json().get("code") == 0:
                 return
         except Exception as e:
-            print(f"[AK注册卡片] 异常: {e}")
+            logger.error("[AK注册卡片] 异常", exc_info=True)
     # 无模板降级为文字引导
     _feishu_reply(message_id,
         "首次申请 GPU 需要先绑定阿里云账号，请私信 Bot 发送：\n\n"
@@ -174,7 +177,7 @@ def _send_gpu_card(message_id: str) -> None:
                 lines.append(f"{i}. `{img['name']}`")
             _feishu_reply(message_id, "\n".join(lines))
     except Exception as e:
-        print(f"[GPU卡片] 镜像列表获取失败（已跳过）: {e}")
+        logger.warning("[GPU卡片] 镜像列表获取失败（已跳过）: %s", e)
 
     template_id = settings.FEISHU_GPU_CARD_TEMPLATE_ID
     if template_id:
@@ -191,9 +194,9 @@ def _send_gpu_card(message_id: str) -> None:
         )
         data = resp.json()
         if data.get("code") != 0:
-            print(f"[GPU卡片] 发送失败: {data.get('msg')}")
+            logger.warning("[GPU卡片] 发送失败: %s", data.get('msg'))
     except Exception as e:
-        print(f"[GPU卡片] 异常: {e}")
+        logger.error("[GPU卡片] 异常", exc_info=True)
 
 
 def _set_gpu_state(chat_id: str, config: dict | None = None) -> None:
@@ -304,9 +307,9 @@ def _feishu_reply(message_id: str, text: str) -> None:
         )
         data = resp.json()
         if data.get("code") != 0:
-            print(f"[飞书回复] 失败: {data.get('msg')}")
+            logger.warning("[飞书回复] 失败: %s", data.get('msg'))
     except Exception as e:
-        print(f"[飞书回复] 异常: {e}")
+        logger.error("[飞书回复] 异常", exc_info=True)
 
 
 def _feishu_reply_with_chart(message_id: str, text: str, image_key: str) -> None:
@@ -347,9 +350,9 @@ def _feishu_reply_with_chart(message_id: str, text: str, image_key: str) -> None
         )
         data = resp.json()
         if data.get("code") != 0:
-            print(f"[飞书卡片回复] 失败: {data.get('msg')}")
+            logger.warning("[飞书卡片回复] 失败: %s", data.get('msg'))
     except Exception as e:
-        print(f"[飞书卡片回复] 异常: {e}")
+        logger.error("[飞书卡片回复] 异常", exc_info=True)
 
 
 def _feishu_send(chat_id: str, text: str) -> None:
@@ -454,13 +457,12 @@ def _auto_map_user(open_id: str) -> None:
         matched = next((u for u in ram_users if u["display_name"] == feishu_name), None)
         if matched:
             save_user_map(open_id, matched["display_name"], matched["user_id"])
-            print(f"[AutoMap] {feishu_name} → RAM user_id={matched['user_id']}")
+            logger.info("[AutoMap] %s → RAM user_id=%s", feishu_name, matched['user_id'])
         else:
-            # 写入飞书姓名但没有 RAM 账号（可能是外部人员）
             save_user_map(open_id, feishu_name, "")
-            print(f"[AutoMap] {feishu_name} 无对应 RAM 用户")
+            logger.info("[AutoMap] %s 无对应 RAM 用户", feishu_name)
     except Exception as e:
-        print(f"[AutoMap] 失败: {e}")
+        logger.warning("[AutoMap] 失败: %s", e)
 
 
 # ── 我的实例快捷查询 ──────────────────────────────────────────────────────────────
@@ -539,7 +541,7 @@ def _query_my_instances(message_id: str, open_id: str, chat_id: str) -> None:
             timeout=15,
         )
     except Exception as e:
-        print(f"[我的实例] 发送失败: {e}")
+        logger.error("[我的实例] 发送失败", exc_info=True)
         _feishu_reply(message_id, "获取实例信息失败，请稍后重试。")
 
 
@@ -614,7 +616,7 @@ def _process_message(message_id: str, chat_id: str, user_text: str, open_id: str
             image_key = _upload_image(token, png_bytes)
             _feishu_reply_with_chart(message_id, reply, image_key)
         except Exception as chart_err:
-            print(f"[趋势图] 生成失败（已降级）: {chart_err}")
+            logger.warning("[趋势图] 生成失败（已降级）: %s", chart_err)
             _feishu_reply(message_id, reply)
 
     except Exception as e:
@@ -666,7 +668,7 @@ def _process_action(action_name: str, action_val: dict, open_id: str, chat_id: s
                         timeout=15,
                     )
                 except Exception as e:
-                    print(f"[GPU卡片推送] 失败: {e}")
+                    logger.error("[GPU卡片推送] 失败", exc_info=True)
             threading.Thread(target=_push_gpu_card, daemon=True).start()
 
         return {
@@ -909,7 +911,7 @@ def _send_text_to(open_id: str, chat_id: str, text: str) -> None:
             timeout=15,
         )
     except Exception as e:
-        print(f"[发消息] 失败: {e}")
+        logger.error("[发消息] 失败", exc_info=True)
 
 
 # ── Webhook 路由 ──────────────────────────────────────────────────────────────
@@ -943,7 +945,7 @@ def feishu_event():
 
     # ④ 卡片按钮点击事件（card.action.trigger）——同步处理，飞书要求 3s 内响应
     event_type = header.get("event_type", "")
-    print(f"[事件] event_type={event_type!r}")
+    logger.debug("[事件] event_type=%r", event_type)
     if event_type == "card.action.trigger":
         return jsonify(_handle_card_trigger_sync(data))
 
@@ -1013,7 +1015,7 @@ def feishu_card_action():
             action_name = "submit_ak_register"
         else:
             action_name = "submit_gpu_request"
-    print(f"[card_action] action_name={action_name!r} open_id={open_id!r}")
+    logger.info("[card_action] action=%r open_id=%r", action_name, open_id)
 
     return jsonify(_process_action(action_name, action_val, open_id, chat_id, form_value=form_value))
 
@@ -1028,23 +1030,21 @@ def health():
 def run(host: str = "0.0.0.0", port: int = 8088, debug: bool = False):
     # 在主线程预热 Agent，避免子线程首次导入时 Pydantic v2 对 RunnableParallel
     # 中 lambda 做重新验证导致的 TypeError: got NoneType
-    print("正在初始化 Agent（首次加载模型，请稍候）...")
+    logger.info("正在初始化 Agent（首次加载模型，请稍候）...")
     try:
         from core.agent import _build_executor
         _build_executor()
-        print("Agent 初始化完成 ✓")
+        logger.info("Agent 初始化完成")
     except Exception as e:
-        print(f"⚠️  Agent 初始化失败，Bot 将无法回复消息: {e}")
+        logger.error("Agent 初始化失败，Bot 将无法回复消息", exc_info=True)
 
-    # 启动 DSW 调度器（Jira 轮询 + 超时监控）
     try:
         scheduler.start()
     except Exception as e:
-        print(f"⚠️  调度器启动失败: {e}")
+        logger.error("调度器启动失败", exc_info=True)
 
-    print(f"飞书 Bot 服务启动 → http://{host}:{port}/feishu/event")
-    print(f"卡片回调地址     → http://{host}:{port}/feishu/card_action")
-    print("请在飞书开放平台 → 事件订阅 → 请求地址 填写：http(s)://你的公网IP:{port}/feishu/event")
+    logger.info("飞书 Bot 服务启动 → http://%s:%s/feishu/event", host, port)
+    logger.info("卡片回调地址     → http://%s:%s/feishu/card_action", host, port)
     app.run(host=host, port=port, debug=debug)
 
 

@@ -20,6 +20,9 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from config.settings import settings
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 from tools.jira_tool import (
     get_gpu_tickets, add_comment, transition_ticket,
     parse_ticket_metadata, update_ticket_field,
@@ -38,7 +41,7 @@ def _redis_set(ticket_key: str, data: dict) -> None:
         r = get_redis()
         r.set(_KEY_PREFIX + ticket_key, json.dumps(data), ex=7 * 86400)
     except Exception as e:
-        print(f"[Scheduler] Redis set 失败: {e}")
+        logger.error("[Scheduler] Redis set 失败", exc_info=True)
 
 
 def _redis_get(ticket_key: str) -> Optional[dict]:
@@ -108,7 +111,7 @@ def add_quota_usage(open_id: str, gpu_count: int, hours: float) -> None:
         r.incrbyfloat(key, gpu_count * hours)
         r.expire(key, ttl)
     except Exception as e:
-        print(f"[Quota] 记录使用量失败: {e}")
+        logger.warning("[Quota] 记录使用量失败: %s", e)
 
 
 def check_quota(open_id: str, gpu_count: int, hours: float) -> tuple[bool, float, float]:
@@ -245,14 +248,14 @@ def _poll_until_running(ticket_key: str, instance_id: str, instance_name: str,
                 card = _make_running_card(instance_id, instance_name, ticket_key,
                                           gpu_count, duration_hours)
                 _send_card(open_id, chat_id, card)
-                print(f"[Scheduler] 实例 {instance_id} Running，就绪通知已推送。")
+                logger.info("[Scheduler] 实例 %s Running，就绪通知已推送", instance_id)
                 return
             if any(s in result for s in ("Failed", "Stopped", "Deleted")):
                 _send_text(open_id, chat_id,
                     f"⚠️ 实例 {instance_name}（{instance_id}）启动异常，请检查 PAI DSW 控制台。")
                 return
         except Exception as e:
-            print(f"[Scheduler] 轮询实例状态失败: {e}")
+            logger.error("[Scheduler] 轮询实例状态失败", exc_info=True)
     _send_text(open_id, chat_id,
         f"⚠️ 实例 {instance_name}（{instance_id}）启动超时（>6min），请检查 PAI DSW 控制台。")
 
@@ -314,7 +317,7 @@ def _send_morning_report() -> None:
             lines.append("\n⏰ 今日到期实例请及时续期或停止，避免数据丢失。")
         _send_text(info["open_id"], info["chat_id"], "\n".join(lines))
 
-    print(f"[Scheduler] 早报已发送（{len(user_map)} 位用户）。")
+    logger.info("[Scheduler] 早报已发送（%s 位用户）", len(user_map))
 
 
 def _all_tracked_keys() -> list[str]:
@@ -347,7 +350,7 @@ def _send_card(open_id: str, chat_id: str, card: dict) -> None:
             timeout=15,
         )
     except Exception as e:
-        print(f"[Scheduler] 飞书推送失败: {e}")
+        logger.error("[Scheduler] 飞书推送失败", exc_info=True)
 
 
 def _send_text(open_id: str, chat_id: str, text: str) -> None:
@@ -369,7 +372,7 @@ def _send_text(open_id: str, chat_id: str, text: str) -> None:
             timeout=15,
         )
     except Exception as e:
-        print(f"[Scheduler] 飞书文本推送失败: {e}")
+        logger.error("[Scheduler] 飞书文本推送失败", exc_info=True)
 
 
 # ── 卡片构造 ──────────────────────────────────────────────────────────────────
@@ -473,14 +476,14 @@ def _process_new_ticket(ticket: dict) -> None:
         from core.feishu_bot import _is_registered
         if not _is_registered(open_id):
             if _mark_pending_reg(key):
-                print(f"[Scheduler] 工单 {key} 申请人未注册 AK/SK，暂缓创建。")
+                logger.info("[Scheduler] 工单 %s 申请人未注册 AK/SK，暂缓创建", key)
                 add_comment(key, "⚠️ 申请人尚未注册阿里云 AK/SK，实例创建暂缓。注册后调度器将在 20 秒内自动重试。")
                 _send_text(open_id, chat_id,
                     f"⚠️ 工单 {key} 暂缓处理：请先向 Bot 私信注册你的阿里云 AK/SK，注册成功后自动创建实例。\n\n"
                     "注册格式（请在私聊中发送，保障密钥安全）：\n"
                     "```\n注册AK: AccessKeyId AccessKeySecret\n```")
             else:
-                print(f"[Scheduler] 工单 {key} 申请人未注册（已通知，等待注册）。")
+                logger.info("[Scheduler] 工单 %s 申请人未注册（已通知，等待注册）", key)
             return
 
     # ── 审批流：大规模申请需管理员确认 ────────────────────────────────────────────
@@ -489,7 +492,7 @@ def _process_new_ticket(ticket: dict) -> None:
         admin_open_id = settings.ADMIN_FEISHU_OPEN_ID
         if admin_open_id:
             if _mark_approval_notified(key):
-                print(f"[Scheduler] 工单 {key} 需审批，发审批卡片给管理员。")
+                logger.info("[Scheduler] 工单 %s 需审批，发审批卡片给管理员", key)
                 card = _make_approval_card(
                     key, instance_name, gpu_count, duration_hours,
                     meta.get("dsw_purpose", "未说明"),
@@ -499,22 +502,22 @@ def _process_new_ticket(ticket: dict) -> None:
                 _send_card(admin_open_id, "", card)
                 add_comment(key, "⏳ 已发送审批通知，等待管理员确认后自动创建实例。")
             else:
-                print(f"[Scheduler] 工单 {key} 等待管理员审批中。")
+                logger.debug("[Scheduler] 工单 %s 等待管理员审批中", key)
         else:
             # 无管理员配置 → 自动批准
             _set_approved(key)
-            print(f"[Scheduler] ADMIN_FEISHU_OPEN_ID 未配置，工单 {key} 自动批准。")
+            logger.warning("[Scheduler] ADMIN_FEISHU_OPEN_ID 未配置，工单 %s 自动批准", key)
         if not _is_approved(key):
             return
 
-    print(f"[Scheduler] 处理新工单 {key}: {instance_name} x{gpu_count}GPU {duration_hours}h")
+    logger.info("[Scheduler] 处理新工单 %s: %s x%sGPU %sh", key, instance_name, gpu_count, duration_hours)
 
     from core.feishu_bot import _get_user_ak
     user_ak_id, user_ak_secret = _get_user_ak(open_id)
     if open_id:
-        print(f"[Scheduler] 使用申请人个人 AK 创建实例（open_id={open_id}）")
+        logger.info("[Scheduler] 使用申请人个人 AK 创建实例 open_id=%s", open_id)
     else:
-        print(f"[Scheduler] open_id 为空（管理员工单），使用全局账号创建实例")
+        logger.info("[Scheduler] open_id 为空（管理员工单），使用全局账号创建实例")
 
     # 构造 create_json 配置
     cpu_cores  = meta.get("dsw_cpu_cores", "") or str(int(gpu_count) * 8)
@@ -582,12 +585,12 @@ def _process_new_ticket(ticket: dict) -> None:
             daemon=True,
         ).start()
 
-        print(f"[Scheduler] 实例已创建 {instance_id}，就绪轮询已启动。")
+        logger.info("[Scheduler] 实例已创建 %s，就绪轮询已启动", instance_id)
     else:
         add_comment(key, f"⚠️ 自动创建实例失败，请人工处理。\n错误：{result}")
         _send_text(open_id, chat_id,
                    f"⚠️ 工单 {key} 的 GPU 实例自动创建失败，运维人员会尽快处理。\n详情：{result}")
-        print(f"[Scheduler] 工单 {key} 创建实例失败: {result}")
+        logger.error("[Scheduler] 工单 %s 创建实例失败: %s", key, result)
 
 
 def _check_running_instances() -> None:
@@ -615,7 +618,7 @@ def _check_running_instances() -> None:
 
         if not warned and remaining <= warn_advance:
             # 发警告卡片
-            print(f"[Scheduler] 实例 {instance_id} 还有 {int(remaining/60)} 分钟到期，发送警告。")
+            logger.info("[Scheduler] 实例 %s 还有 %s 分钟到期，发送警告", instance_id, int(remaining/60))
             card = _make_idle_warn_card(instance_id, instance_name,
                                         ticket_key, settings.DSW_IDLE_STOP_MINUTES)
             _send_card(open_id, chat_id, card)
@@ -625,7 +628,7 @@ def _check_running_instances() -> None:
 
         elif warned and (now - warn_ts) >= stop_seconds:
             # 警告后超时 → 自动停止
-            print(f"[Scheduler] 实例 {instance_id} 警告超时，自动停止。")
+            logger.info("[Scheduler] 实例 %s 警告超时，自动停止", instance_id)
             stop_result = manage_pai_dsw(action="stop", instance_id=instance_id)
             elapsed_h   = (now - float(state.get("start_ts", now))) / 3600
             gpu_cnt     = int(state.get("gpu_count", 1))
@@ -649,7 +652,7 @@ def _check_running_instances() -> None:
                         _redis_set(ticket_key, state)
                     elif (now - idle_since) >= settings.GPU_IDLE_WARN_MINUTES * 60:
                         if not state.get("idle_warned"):
-                            print(f"[Scheduler] 实例 {instance_id} GPU 空转，告警。")
+                            logger.info("[Scheduler] 实例 %s GPU 空转，告警", instance_id)
                             _send_text(open_id, chat_id,
                                 f"⚠️ GPU 空转提醒：实例 **{instance_name}** GPU 利用率 {gpu_util:.1f}%，"
                                 f"已持续 {settings.GPU_IDLE_WARN_MINUTES} 分钟低于 "
@@ -694,7 +697,7 @@ class DSWScheduler:
         self._ticket_thread.start()
         self._instance_thread.start()
         self._morning_thread.start()
-        print("[Scheduler] 启动：Jira 轮询 + DSW 超时监控 + GPU 空转检测 + 每日早报")
+        logger.info("[Scheduler] 启动：Jira 轮询 + DSW 超时监控 + GPU 空转检测 + 每日早报")
 
     def stop(self) -> None:
         self._running = False
@@ -708,9 +711,9 @@ class DSWScheduler:
                     try:
                         _process_new_ticket(ticket)
                     except Exception as e:
-                        print(f"[Scheduler] 处理工单 {ticket.get('key')} 失败: {e}")
+                        logger.error("[Scheduler] 处理工单 %s 失败", ticket.get("key"), exc_info=True)
             except Exception as e:
-                print(f"[Scheduler] Jira 轮询失败: {e}")
+                logger.error("[Scheduler] Jira 轮询失败", exc_info=True)
             time.sleep(self.TICKET_POLL_INTERVAL)
 
     def _instance_loop(self) -> None:
@@ -719,7 +722,7 @@ class DSWScheduler:
             try:
                 _check_running_instances()
             except Exception as e:
-                print(f"[Scheduler] 实例检查失败: {e}")
+                logger.error("[Scheduler] 实例检查失败", exc_info=True)
             time.sleep(self.INSTANCE_CHECK_INTERVAL)
 
     def _morning_loop(self) -> None:
@@ -739,7 +742,7 @@ class DSWScheduler:
                 try:
                     _send_morning_report()
                 except Exception as e:
-                    print(f"[Scheduler] 早报发送失败: {e}")
+                    logger.error("[Scheduler] 早报发送失败", exc_info=True)
 
 
 # 全局单例

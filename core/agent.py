@@ -1,6 +1,9 @@
 import sys
 import json
 import logging
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 # Windows GBK 终端下强制 UTF-8，reconfigure 就地修改不替换对象，不影响 Flask/click
 if hasattr(sys.stdout, "reconfigure"):
@@ -127,7 +130,7 @@ def _load_history(session_id: str) -> list:
             history.append(cls(content=data["content"]))
         return history
     except Exception as e:
-        logging.warning("Redis 加载历史失败: %s", e)
+        logger.warning("Redis 加载历史失败: %s", e)
         return []
 
 
@@ -145,7 +148,7 @@ def _save_turn(session_id: str, human: str, ai: str) -> None:
             pipe.ltrim(key, -MAX_HISTORY, -1)
             pipe.execute()
     except Exception as e:
-        logging.warning("Redis 保存历史失败: %s", e)
+        logger.warning("Redis 保存历史失败: %s", e)
 
 
 def _clear_history(session_id: str) -> None:
