@@ -33,6 +33,29 @@ _TREND_ICON = {
     "平稳 →": "➡️",
 }
 
+# ── GPU 专属工具函数 ────────────────────────────────────────────────────────────
+
+def _progress_bar(value: float, total: float = 100.0, width: int = 10) -> str:
+    """生成 Unicode 利用率进度条，如 ████████░░"""
+    filled = max(0, min(width, round(value / total * width)))
+    return "█" * filled + "░" * (width - filled)
+
+
+def _temp_icon(temp_c: float) -> str:
+    """按温度范围返回直观热力图标"""
+    if temp_c >= 90: return "☢️"
+    if temp_c >= 80: return "🔥"
+    if temp_c >= 70: return "♨️"
+    if temp_c >= 55: return "🌡️"
+    return "❄️"
+
+
+def _gpu_util_icon(pct: float) -> str:
+    """按 GPU SM 利用率返回颜色圆点（与整体告警色保持一致）"""
+    if pct >= 95: return "🔴"
+    if pct >= 80: return "🟡"
+    return "🟢"
+
 
 # ── 飞书 API 调用 ───────────────────────────────────────────────────────────────
 
@@ -51,6 +74,24 @@ def _get_access_token() -> str:
     if data.get("code") != 0:
         raise RuntimeError(f"获取飞书 Token 失败：{data.get('msg')}")
     return data["app_access_token"]
+
+
+def _get_user_name(open_id: str) -> str:
+    """通过飞书 open_id 获取用户真实姓名，失败时返回空字符串。"""
+    if not open_id:
+        return ""
+    try:
+        token = _get_access_token()
+        resp = requests.get(
+            "https://open.feishu.cn/open-apis/contact/v3/users",
+            params={"user_id_type": "open_id", "user_ids": open_id},
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+        items = resp.json().get("data", {}).get("items", [])
+        return items[0].get("name", "") if items else ""
+    except Exception:
+        return ""
 
 
 def _upload_image(token: str, png_bytes: bytes) -> str:
@@ -101,7 +142,7 @@ def _section_title(key: str) -> str:
         "MEMORY":  "🧠 内存使用率",
         "DISK":    "💾 磁盘 I/O",
         "NETWORK": "🌐 网络流量",
-        "GPU":     "🎮 GPU 使用率",
+        "GPU":     "⚡ GPU 使用率",
     }.get(key.upper(), key)
 
 
@@ -179,6 +220,7 @@ def _parse_report(content: str) -> dict:
             trend = trend.replace(trend_text, f"{icon} {trend_text}")
 
         sections.append({
+            "key":    key.upper(),
             "title":  _section_title(key),
             "color":  color,
             "status": status,
@@ -244,6 +286,54 @@ def _grafana_buttons(node_filter: str = "") -> list:
     return [{"tag": "hr"}, {"tag": "action", "actions": metric_buttons}]
 
 
+def _render_gpu_section(sec: dict, status_icon: dict) -> str:
+    """
+    GPU 专属卡片区块：
+    - SM 利用率进度条（████████░░）+ 颜色圆点，一眼看出负载程度
+    - 温度热力图标（❄️ 🌡️ ♨️ 🔥 ☢️），区分均值与峰值
+    - 解析失败时安全降级为通用格式
+    """
+    detail = sec.get("detail", "")
+    m_ua = re.search(r"SM利用率均值:\s*([\d.]+)", detail)
+    m_up = re.search(r"峰值:\s*([\d.]+)%", detail)
+    m_ta = re.search(r"温度均值:\s*([\d.]+)", detail)
+    m_tm = re.search(r"最高温:\s*([\d.]+)", detail)
+
+    # 解析失败 → 通用格式兜底
+    if not m_ua:
+        icon = status_icon.get(sec["color"], "")
+        return (
+            f"**{sec['title']}**　{icon} {sec['status']}\n"
+            f"均值 **{sec['avg']}** · 峰值 **{sec['peak']}** · {sec['trend']}\n"
+            f"{detail}"
+        )
+
+    util_avg = float(m_ua.group(1))
+    util_max = float(m_up.group(1)) if m_up else util_avg
+    temp_avg = float(m_ta.group(1)) if m_ta else None
+    temp_max = float(m_tm.group(1)) if m_tm else None
+
+    badge    = status_icon.get(sec["color"], "")
+    bar      = _progress_bar(util_avg)
+    u_icon   = _gpu_util_icon(util_avg)
+
+    lines = [
+        f"**⚡ GPU 使用率**　{badge} {sec['status']}",
+        f"SM 利用　{u_icon} `{bar}` **{util_avg:.1f}%** avg · 峰值 **{util_max:.1f}%**",
+    ]
+
+    if temp_avg is not None:
+        t_avg_icon = _temp_icon(temp_avg)
+        t_max_icon = _temp_icon(temp_max) if temp_max is not None else ""
+        lines.append(
+            f"温　　度　{t_avg_icon} **{temp_avg:.1f}°C** avg"
+            + (f" · 最高 {t_max_icon} **{temp_max:.1f}°C**" if temp_max is not None else "")
+        )
+
+    lines.append(f"趋　　势　{sec['trend']}")
+    return "\n".join(lines)
+
+
 def _build_card(title: str, parsed: dict,
                 image_key: str = None, chart_error: str = None) -> dict:
     """构建飞书 Interactive Card JSON。"""
@@ -287,12 +377,15 @@ def _build_card(title: str, parsed: dict,
         _ICON = {"red": "🔴", "yellow": "⚠️", "green": "✅", "gray": "⚪"}
         for sec in parsed["sections"]:
             elements.append({"tag": "hr"})
-            icon = _ICON.get(sec["color"], "")
-            body = (
-                f"**{sec['title']}**　{icon} {sec['status']}\n"
-                f"均值 **{sec['avg']}** · 峰值 **{sec['peak']}** · {sec['trend']}\n"
-                f"{sec['detail']}"
-            )
+            if sec.get("key") == "GPU":
+                body = _render_gpu_section(sec, _ICON)
+            else:
+                icon = _ICON.get(sec["color"], "")
+                body = (
+                    f"**{sec['title']}**　{icon} {sec['status']}\n"
+                    f"均值 **{sec['avg']}** · 峰值 **{sec['peak']}** · {sec['trend']}\n"
+                    f"{sec['detail']}"
+                )
             elements.append({
                 "tag": "div",
                 "text": {"tag": "lark_md", "content": body},
@@ -333,6 +426,15 @@ def send_feishu_report(
         return f"⚠️ 飞书 App ID / Secret 未配置，报告内容如下：\n{report_content}"
     if not settings.FEISHU_CHAT_ID:
         return "❌ FEISHU_CHAT_ID 未配置，无法确定推送目标群。"
+
+    # 检测 LLM 是否传入了占位符而非真实报告；若是则拒绝推送并给出明确提示
+    _PLACEHOLDER_HINTS = ("<报告内容>", "<content>", "<report>", "{{report}}", "{report}")
+    if any(h in report_content for h in _PLACEHOLDER_HINTS) or len(report_content.strip()) < 30:
+        return (
+            "❌ report_content 包含占位符或内容为空，无法推送。\n"
+            "请先调用 query_infrastructure_metrics(query_type='report') 获取完整报告，"
+            "再将其原始输出（从 [REPORT_START] 到 [REPORT_END]）作为 report_content 传入。"
+        )
 
     try:
         token  = _get_access_token()

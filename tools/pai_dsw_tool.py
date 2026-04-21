@@ -21,7 +21,7 @@ class PAIDSWSchema(BaseModel):
     action: str = Field(
         description=(
             "操作类型，支持：\n"
-            "  'list'        - 列出 DSW 实例（可按工作空间/名称/用户/资源过滤）\n"
+            "  'list'        - 列出所有 DSW 实例，每行已包含状态/规格/创建人，无需再调 get\n"
             "  'get'         - 查询单个实例详情（需提供 instance_id）\n"
             "  'start'       - 启动实例（需提供 instance_id）\n"
             "  'stop'        - 停止实例（需提供 instance_id，可选 save_image）\n"
@@ -45,7 +45,11 @@ class PAIDSWSchema(BaseModel):
     )
     user_id: str = Field(
         default="",
-        description="创建者用户 ID，用于 list/discover 过滤，留空则查全部。"
+        description="创建者用户 ID（数字），用于 list/discover 过滤，留空则查全部。"
+    )
+    user_name: str = Field(
+        default="",
+        description="创建者显示名（中文姓名），用于 list 结果的客户端过滤，如'王梓涵'。"
     )
     resource_id: str = Field(
         default="",
@@ -100,13 +104,20 @@ def manage_pai_dsw(
     workspace_id: str = "",
     instance_name: str = "",
     user_id: str = "",
+    user_name: str = "",
     resource_id: str = "",
     save_image: bool = False,
     accelerator_type: str = "GPU",
     create_config_json: str = "",
+    _ak_id: str = "",
+    _ak_secret: str = "",
 ) -> str:
     """管理阿里云 PAI DSW 实例：查询、启动、停止、删除、创建、资源发现。"""
-    client = _client()
+    if _ak_id and _ak_secret:
+        region = settings.PAI_DSW_REGION_ID or "cn-hangzhou"
+        client = _get_client(region, _ak_id, _ak_secret)
+    else:
+        client = _client()
     if client is None:
         return "❌ PAI_DSW_ACCESS_KEY_ID / PAI_DSW_ACCESS_KEY_SECRET 未配置，请在 .env 中设置。"
 
@@ -127,18 +138,25 @@ def manage_pai_dsw(
             )
             resp = client.list_instances(req)
             instances = resp.body.instances or []
+            # 按显示名过滤（API 只支持内部 user_id，显示名在客户端过滤）
+            if user_name:
+                instances = [i for i in instances if user_name in (i.user_name or "")]
             if not instances:
-                return "当前没有 DSW 实例。"
-            lines = ["## PAI DSW 实例列表\n"]
+                hint = f"（未找到创建人含「{user_name}」的实例）" if user_name else ""
+                return f"当前没有 DSW 实例。{hint}"
+            lines = [f"## PAI DSW 实例列表{'（创建人：' + user_name + '）' if user_name else ''}\n"]
             for i, inst in enumerate(instances, 1):
                 rr = inst.requested_resource
                 cpu = rr.cpu if rr else "-"
                 gpu = rr.gpu if rr else "-"
                 mem = rr.memory if rr else "-"
+                raw_owner = inst.user_name or inst.user_id or "-"
+                owner = "Bot代建（见Jira工单）" if raw_owner == "power-application-user" else raw_owner
                 lines.append(
                     f"{i}. **{inst.instance_name}** | {inst.status} | "
                     f"{inst.accelerator_type} | "
                     f"CPU {cpu} GPU {gpu} MEM {mem} | "
+                    f"创建人: {owner} | "
                     f"`{inst.instance_id}`"
                 )
             lines.append(f"\n共 {resp.body.total_count or len(instances)} 个实例。")
@@ -162,6 +180,7 @@ def manage_pai_dsw(
                 f"- **工作空间**：{inst.workspace_name} ({inst.workspace_id})",
                 f"- **资源组**：{inst.resource_name} ({inst.resource_id})",
                 f"- **创建时间**：{inst.gmt_create_time or '-'}",
+                f"- **创建人**：{inst.user_name or inst.user_id or '-'}",
             ]
             return "\n".join(lines)
 
@@ -349,6 +368,52 @@ def manage_pai_dsw(
     )
 
 
+def list_dsw_resources() -> dict:
+    """返回结构化的 DSW 可用资源：镜像列表和数据集挂载列表。
+    供飞书卡片回复前展示参考信息使用。失败时返回空结构。
+    """
+    client = _client()
+    if client is None:
+        return {"images": [], "datasets": []}
+    ws = settings.PAI_DSW_WORKSPACE_ID
+    rs = settings.PAI_DSW_RESOURCE_ID
+    try:
+        req = dsw_models.ListInstancesRequest(
+            page_size=100, page_number=1,
+            workspace_id=ws or None,
+            resource_id=rs or None,
+        )
+        resp = client.list_instances(req)
+        instances = resp.body.instances or []
+
+        seen_images, images = set(), []
+        for inst in instances:
+            name = inst.image_name or inst.image_url or ""
+            if name and name not in seen_images:
+                seen_images.add(name)
+                images.append({
+                    "name": name,
+                    "url": inst.image_url or "",
+                    "accelerator_type": inst.accelerator_type or "GPU",
+                })
+
+        seen_ds, datasets = set(), []
+        for inst in instances:
+            for ds in inst.datasets or []:
+                key = ds.uri or ""
+                if key and key not in seen_ds:
+                    seen_ds.add(key)
+                    datasets.append({
+                        "uri": ds.uri,
+                        "mount_path": ds.mount_path or "",
+                        "mount_access": ds.mount_access or "RW",
+                    })
+
+        return {"images": images, "datasets": datasets}
+    except Exception:
+        return {"images": [], "datasets": []}
+
+
 # ── LangChain 工具封装 ─────────────────────────────────────────────────────────
 
 pai_dsw_tool = StructuredTool.from_function(
@@ -358,6 +423,7 @@ pai_dsw_tool = StructuredTool.from_function(
         "管理阿里云 PAI DSW（数据科学工作站）实例。"
         "支持列出实例、查询详情、启动/停止/删除实例、发现可复用资源配置、查看可用规格及创建实例。"
         "当用户询问'DSW 实例'、'PAI 工作站'、'启动/停止实例'、'查看 GPU 规格'等问题时调用。"
+        "注意：list 操作已包含每个实例的状态、规格、创建人，若用户只需列表信息，只需一次 list 即可，无需对每个实例再调 get。"
     ),
     args_schema=PAIDSWSchema,
 )

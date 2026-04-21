@@ -38,6 +38,7 @@ _TOOL_GROUPS = {
     "notify":    {"push_report_to_feishu"},
     "advisor":   {"advise_gpu_cluster", "query_infrastructure_metrics"},
     "pai_dsw":   {"manage_pai_dsw"},
+    "jira":      {"manage_jira"},
 }
 
 # 启动时校验 _TOOL_GROUPS 中的名字与 ALL_TOOLS 一致，防止静默路由失效
@@ -55,6 +56,8 @@ def _select_tools(user_input: str) -> list:
         names = _TOOL_GROUPS["ops"] | _TOOL_GROUPS["monitor"]
     elif any(k in text for k in ("dsw", "实例", "工作站", "启动实例", "停止实例", "删除实例", "pai dsw", "数据科学")):
         names = _TOOL_GROUPS["pai_dsw"]
+    elif any(k in text for k in ("jira", "工单", "gpu申请", "申请记录", "工作项")):
+        names = _TOOL_GROUPS["jira"] | _TOOL_GROUPS["pai_dsw"]
     elif any(k in text for k in ("dlc", "eas", "产品", "算力", "训练任务", "推理", "开发环境", "分布")):
         names = _TOOL_GROUPS["monitor"]
     elif any(k in text for k in ("建议", "优化", "效率", "成本", "散热", "调度", "空闲", "瓶颈")):

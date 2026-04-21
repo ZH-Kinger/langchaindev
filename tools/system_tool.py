@@ -50,7 +50,7 @@ def get_system_stats_v2(mode: str, item: str = "cpu") -> str:
 # --- 部件 3: 工具封装 ---
 system_stats_tool = StructuredTool.from_function(
     func=get_system_stats_v2,
-    name="system_data_manager",  # 改个更有“管理感”的名字
+    name="system_data_manager",  # 改个更有"管理感"的名字
     description="主动管理系统数据。可以实时查看 CPU/内存负载，也可以主动扫描 data 目录下的测试文件列表。",
     args_schema=SystemCheckSchema
 )

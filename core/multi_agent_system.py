@@ -1,35 +1,33 @@
+from functools import lru_cache
 from langchain.agents import create_tool_calling_agent, AgentExecutor
-from langchain_core.prompts import ChatPromptTemplate
 from tools import system_stats_tool, alarm_reduction_tool, k8s_restart_tool
 from utils.llm_factory import get_cloud_llm
+from core.prompts import get_diag_prompt, get_ops_prompt
 
-# 初始化统一的 LLM（temperature=0 保证决策确定性）
-llm = get_cloud_llm(temperature=0)
+_diag_tools = [system_stats_tool, alarm_reduction_tool]
+_ops_tools  = [k8s_restart_tool]
 
-# 1. 定义【感知与诊断专家】 (Diagnostic Agent)
-# 它负责扫描文件和降噪分析
-diag_tools = [system_stats_tool, alarm_reduction_tool]
-diag_prompt = ChatPromptTemplate.from_messages([
-    ("system", "你是一名诊断专家。你的任务是发现异常文件，并利用 Pandas 工具进行深度降噪分析。你只负责产出分析报告，不执行任何修复动作。"),
-    ("human", "{input}"),
-    ("placeholder", "{agent_scratchpad}"),
-])
-diag_agent = create_tool_calling_agent(llm, diag_tools, diag_prompt)
-diag_executor = AgentExecutor(agent=diag_agent, tools=diag_tools, verbose=True)
 
-# 2. 定义【自动化执行官】 (Ops Executor Agent)
-# 它负责看报告并决定是否重启 K8s
-ops_tools = [k8s_restart_tool]
-ops_prompt = ChatPromptTemplate.from_messages([
-    ("system", "你是一名运维执行官。你会收到一份诊断报告。你的职责是评估报告中的风险，如果确实需要，则执行重启。如果报告建议不重启，你必须遵守。"),
-    ("human", "{input}"),
-    ("placeholder", "{agent_scratchpad}"),
-])
-ops_agent = create_tool_calling_agent(llm, ops_tools, ops_prompt)
-ops_executor = AgentExecutor(agent=ops_agent, tools=ops_tools, verbose=True)
+@lru_cache(maxsize=1)
+def _build_executors() -> tuple:
+    """首次调用时构建两个 AgentExecutor，后续复用缓存实例"""
+    llm = get_cloud_llm(temperature=0)
+
+    diag_executor = AgentExecutor(
+        agent=create_tool_calling_agent(llm, _diag_tools, get_diag_prompt()),
+        tools=_diag_tools, verbose=True,
+    )
+
+    ops_executor = AgentExecutor(
+        agent=create_tool_calling_agent(llm, _ops_tools, get_ops_prompt()),
+        tools=_ops_tools, verbose=True,
+    )
+
+    return diag_executor, ops_executor
 
 
 def run_collaborative_ops(task_description: str):
+    diag_executor, ops_executor = _build_executors()
     print(f"\n🚀 [中控台] 启动协作流程: {task_description}")
 
     # 阶段 1: 派诊断专家去拿结果

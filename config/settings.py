@@ -26,10 +26,13 @@ class Config:
     ALIYUN_ACCESS_KEY_SECRET = os.environ.get("ALIYUN_ACCESS_KEY_SECRET", "")
 
     # 飞书企业自建应用
-    FEISHU_APP_ID            = os.environ.get("FEISHU_APP_ID", "")
-    FEISHU_APP_SECRET        = os.environ.get("FEISHU_APP_SECRET", "")
-    FEISHU_CHAT_ID           = os.environ.get("FEISHU_CHAT_ID", "")
+    FEISHU_APP_ID             = os.environ.get("FEISHU_APP_ID", "")
+    FEISHU_APP_SECRET         = os.environ.get("FEISHU_APP_SECRET", "")
+    FEISHU_CHAT_ID            = os.environ.get("FEISHU_CHAT_ID", "")
     FEISHU_VERIFICATION_TOKEN = os.environ.get("FEISHU_VERIFICATION_TOKEN", "")
+    # GPU 申请表单卡片模板 ID（飞书卡片构建器发布后获取，留空则降级为 action buttons 卡片）
+    FEISHU_GPU_CARD_TEMPLATE_ID    = os.environ.get("FEISHU_GPU_CARD_TEMPLATE_ID", "")
+    FEISHU_AK_REGISTER_TEMPLATE_ID = os.environ.get("FEISHU_AK_REGISTER_TEMPLATE_ID", "")
 
     # 阿里云 PAI DSW（Python SDK，无需 Node.js）
     PAI_DSW_ACCESS_KEY_ID     = os.environ.get("PAI_DSW_ACCESS_KEY_ID", "")
@@ -37,11 +40,27 @@ class Config:
     PAI_DSW_REGION_ID         = os.environ.get("PAI_DSW_REGION_ID", "cn-hangzhou")
     PAI_DSW_WORKSPACE_ID      = os.environ.get("PAI_DSW_WORKSPACE_ID", "")
     PAI_DSW_RESOURCE_ID       = os.environ.get("PAI_DSW_RESOURCE_ID", "")
+    PAI_DSW_DEFAULT_IMAGE     = os.environ.get("PAI_DSW_DEFAULT_IMAGE", "")
+
+    # Jira（GPU 工单系统）
+    JIRA_URL              = os.environ.get("JIRA_URL", "")               # e.g. https://jira.example.com
+    JIRA_PAT              = os.environ.get("JIRA_PAT", "")               # Personal Access Token
+    JIRA_PROJECT_KEY      = os.environ.get("JIRA_PROJECT_KEY", "GPU")    # Jira 项目 Key
+    JIRA_ISSUE_TYPE       = os.environ.get("JIRA_ISSUE_TYPE", "Task")    # 工单类型
+    DSW_IDLE_WARN_HOURS   = float(os.environ.get("DSW_IDLE_WARN_HOURS", "1"))   # 空闲多久发警告（小时）
+    DSW_IDLE_STOP_MINUTES = int(os.environ.get("DSW_IDLE_STOP_MINUTES", "30"))  # 警告后多久自动停止（分钟）
 
     # Grafana
     GRAFANA_URL            = os.environ.get("GRAFANA_URL", "")           # e.g. https://grafana.example.com
     GRAFANA_API_KEY        = os.environ.get("GRAFANA_API_KEY", "")       # Bearer token
     GRAFANA_DATASOURCE_UID = os.environ.get("GRAFANA_DATASOURCE_UID", "") # Prometheus 数据源 UID
+
+    # GPU 配额与运营
+    ADMIN_FEISHU_OPEN_ID      = os.environ.get("ADMIN_FEISHU_OPEN_ID", "")
+    GPU_PRICE_PER_HOUR        = float(os.environ.get("GPU_PRICE_PER_HOUR", "35.0"))
+    GPU_QUOTA_HOURS_PER_MONTH = float(os.environ.get("GPU_QUOTA_HOURS_PER_MONTH", "200.0"))
+    GPU_IDLE_THRESHOLD_PCT    = float(os.environ.get("GPU_IDLE_THRESHOLD_PCT", "5.0"))
+    GPU_IDLE_WARN_MINUTES     = int(os.environ.get("GPU_IDLE_WARN_MINUTES", "30"))
 
     # Redis
     REDIS_HOST     = os.environ.get("REDIS_HOST", "127.0.0.1")

@@ -412,6 +412,279 @@ def _query_user_usage(ts: float) -> str:
     return "\n".join(lines)
 
 
+# ── PAI 产品级指标配置 ──────────────────────────────────────────────────────────
+# 每个产品各有独立的 Prometheus 指标前缀和实例标识标签。
+# 如果某产品指标在你的 Prometheus 中不可达，对应区块会自动降级并给出提示。
+_PRODUCT_QUERIES = {
+    "DSW": {
+        "display":    "DSW 交互式开发",
+        "emoji":      "📓",
+        "util":       "avg by (username, instanceName)(AliyunPaidsw_INSTANCE_GPU_SM_UTIL)",
+        "mem_used":   "avg by (username, instanceName)(AliyunPaidsw_INSTANCE_GPU_MEMORY_USED)",
+        "mem_total":  "avg by (username, instanceName)(AliyunPaidsw_INSTANCE_GPU_MEMORY_TOTAL)",
+        "cpu":        "avg by (username, instanceName)(AliyunPaidsw_INSTANCE_CPU_UTIL)",
+        "id_label":   "instanceName",
+        "user_label": "username",
+    },
+    "DLC": {
+        "display":    "DLC 分布式训练",
+        "emoji":      "🏋️",
+        "util":       "avg by (userName, jobName)(AliyunPaidlc_TASK_GPU_SM_UTIL)",
+        "mem_used":   "avg by (userName, jobName)(AliyunPaidlc_TASK_GPU_MEMORY_USED)",
+        "mem_total":  "avg by (userName, jobName)(AliyunPaidlc_TASK_GPU_MEMORY_TOTAL)",
+        "cpu":        "avg by (userName, jobName)(AliyunPaidlc_TASK_CPU_UTIL)",
+        "id_label":   "jobName",
+        "user_label": "userName",
+    },
+    "EAS": {
+        "display":    "EAS 在线推理",
+        "emoji":      "🚀",
+        "util":       "avg by (serviceName, namespace)(AliyunPaieas_INSTANCE_GPU_SM_UTIL)",
+        "mem_used":   "avg by (serviceName, namespace)(AliyunPaieas_INSTANCE_GPU_MEMORY_USED)",
+        "mem_total":  "avg by (serviceName, namespace)(AliyunPaieas_INSTANCE_GPU_MEMORY_TOTAL)",
+        "cpu":        "avg by (serviceName, namespace)(AliyunPaieas_INSTANCE_CPU_UTIL)",
+        "id_label":   "serviceName",
+        "user_label": "namespace",
+    },
+}
+
+
+def _query_one_product(cfg: dict) -> dict:
+    """
+    查询单个 PAI 产品（DLC / DSW / EAS）的当前 GPU 占用快照。
+    返回结构：
+    {
+      "ok":        bool,           # 是否有数据
+      "instances": [               # 每个实例/任务/服务
+        {"id": str, "owner": str, "gpu": float,
+         "cpu": float, "gmem_used": GiB, "gmem_total": GiB}
+      ]
+    }
+    """
+    util_res   = _query_instant(cfg["util"])
+    if not util_res:
+        return {"ok": False, "instances": []}
+
+    cpu_res    = _query_instant(cfg["cpu"])
+    mused_res  = _query_instant(cfg["mem_used"])
+    mtotal_res = _query_instant(cfg["mem_total"])
+
+    id_lbl   = cfg["id_label"]
+    user_lbl = cfg["user_label"]
+
+    # 以 util 结果为主键构建字典
+    inst_map: dict[str, dict] = {}
+    for r in util_res:
+        key   = r["metric"].get(id_lbl,   "unknown")
+        owner = r["metric"].get(user_lbl, "—")
+        try:    gpu = float(r["value"][1])
+        except: gpu = 0.0
+        inst_map[key] = {"id": key, "owner": owner,
+                         "gpu": gpu, "cpu": 0.0,
+                         "gmem_used": 0.0, "gmem_total": 0.0}
+
+    for r in cpu_res:
+        key = r["metric"].get(id_lbl, "unknown")
+        if key in inst_map:
+            try: inst_map[key]["cpu"] = float(r["value"][1])
+            except: pass
+
+    for r in mused_res:
+        key = r["metric"].get(id_lbl, "unknown")
+        if key in inst_map:
+            try: inst_map[key]["gmem_used"] = float(r["value"][1]) / 1024
+            except: pass
+
+    for r in mtotal_res:
+        key = r["metric"].get(id_lbl, "unknown")
+        if key in inst_map:
+            try: inst_map[key]["gmem_total"] = float(r["value"][1]) / 1024
+            except: pass
+
+    return {
+        "ok":        True,
+        "instances": sorted(inst_map.values(), key=lambda x: -x["gpu"]),
+    }
+
+
+def _query_all_instances(product_filter: str = "", user_filter: str = "") -> str:
+    """
+    跨产品（DLC / DSW / EAS）平铺所有实例/任务/服务，支持按产品或用户过滤。
+    输出：一行一条记录，按 GPU 利用率降序排列，方便快速定位高负载实例和对应用户。
+    """
+    from datetime import datetime
+
+    pf = product_filter.upper().strip()
+    uf = user_filter.strip().lower()
+
+    target_products = (
+        {pf: _PRODUCT_QUERIES[pf]} if pf and pf in _PRODUCT_QUERIES else _PRODUCT_QUERIES
+    )
+
+    # 拉取所有产品实例，合并为统一列表
+    all_rows: list[dict] = []
+    unreachable: list[str] = []
+    for prod_key, cfg in target_products.items():
+        result = _query_one_product(cfg)
+        if not result["ok"]:
+            unreachable.append(f"{cfg['emoji']} {cfg['display']}")
+            continue
+        for inst in result["instances"]:
+            row = {"product": prod_key, **inst}
+            # 用户过滤
+            if uf and uf not in inst["owner"].lower() and uf not in inst["id"].lower():
+                continue
+            all_rows.append(row)
+
+    if not all_rows and unreachable:
+        return (
+            "⚠️ 所选产品实例指标均不可达：\n" +
+            "\n".join(f"  · {u}" for u in unreachable)
+        )
+
+    # 按 GPU 利用率降序
+    all_rows.sort(key=lambda x: -x["gpu"])
+
+    # ── 表头 ────────────────────────────────────────────────────────────────
+    title_parts = []
+    if pf and pf in _PRODUCT_QUERIES:
+        title_parts.append(_PRODUCT_QUERIES[pf]["display"])
+    if uf:
+        title_parts.append(f"用户 {user_filter}")
+    scope = " · ".join(title_parts) if title_parts else "全产品"
+
+    lines = [
+        f"🖥️ {scope} 实例清单（{datetime.now().strftime('%H:%M:%S')}）",
+        f"{'产品':<6}{'用户':<14}{'实例/任务/服务':<28}{'GPU':>7}{'CPU':>7}{'显存':>14}",
+        "─" * 76,
+    ]
+
+    prod_cnt: dict[str, int] = {}
+    total_gpu  = 0.0
+    total_mu   = 0.0
+    total_mt   = 0.0
+
+    for row in all_rows:
+        prod      = row["product"]
+        emoji     = _PRODUCT_QUERIES[prod]["emoji"]
+        owner     = row["owner"] if row["owner"] not in ("—", "unknown") else "—"
+        inst_id   = row["id"][:26]
+        gpu_str   = f"{row['gpu']:.1f}%"
+        cpu_str   = f"{row['cpu']:.1f}%"
+        gmem_str  = (f"{row['gmem_used']:.1f}/{row['gmem_total']:.0f}G"
+                     if row["gmem_total"] > 0 else "—")
+
+        lines.append(
+            f"{emoji}{prod:<5}{owner:<14}{inst_id:<28}{gpu_str:>7}{cpu_str:>7}{gmem_str:>14}"
+        )
+        prod_cnt[prod] = prod_cnt.get(prod, 0) + 1
+        total_gpu += row["gpu"]
+        total_mu  += row["gmem_used"]
+        total_mt  += row["gmem_total"]
+
+    # ── 汇总 ────────────────────────────────────────────────────────────────
+    lines.append("─" * 76)
+    count_str = "  ".join(f"{k}×{v}" for k, v in prod_cnt.items())
+    avg_gpu   = total_gpu / len(all_rows) if all_rows else 0
+    gmem_sum  = (f"{total_mu:.1f}/{total_mt:.0f} GiB" if total_mt > 0 else "N/A")
+    lines.append(
+        f"共 {len(all_rows)} 个实例  {count_str}"
+        f"  |  GPU 均值 {avg_gpu:.1f}%  |  显存 {gmem_sum}"
+    )
+
+    if unreachable:
+        lines.append("\n指标不可达（已跳过）：" + "、".join(
+            cfg.split(" ")[1] for cfg in unreachable
+        ))
+
+    return "\n".join(lines)
+
+
+def _query_product_breakdown(product_filter: str = "") -> str:
+    """
+    按 PAI 产品（DLC / DSW / EAS）维度，展示 GPU 算力分布与实例明细。
+    各产品指标独立查询，任意一路不可达时自动降级，不影响其他产品显示。
+    product_filter 非空时只展示指定产品。
+    """
+    from datetime import datetime
+
+    pf = product_filter.upper().strip()
+    target_products = (
+        {pf: _PRODUCT_QUERIES[pf]} if pf and pf in _PRODUCT_QUERIES else _PRODUCT_QUERIES
+    )
+    scope = _PRODUCT_QUERIES[pf]["display"] if pf and pf in _PRODUCT_QUERIES else "全产品"
+
+    lines = [
+        f"🏗️ PAI GPU 算力分布 — {scope}（{datetime.now().strftime('%H:%M:%S')}）",
+        "━" * 52,
+    ]
+
+    total_gpu_sum   = 0.0
+    total_gpu_cnt   = 0
+    total_gmem_used = 0.0
+    total_gmem_cap  = 0.0
+    active_products = []
+
+    for prod_key, cfg in target_products.items():
+        result = _query_one_product(cfg)
+        emoji  = cfg["emoji"]
+        label  = cfg["display"]
+
+        if not result["ok"]:
+            lines.append(f"\n{emoji} **{label}**")
+            lines.append(
+                f"   ⚪ 指标不可达（{cfg['util'].split('(')[0].split('_TASK_')[0].split('_INSTANCE_')[0].split('(')[-1].strip()} 系列）"
+                f"  ← 若已使用此产品，请确认相关 exporter 已接入 Prometheus"
+            )
+            continue
+
+        insts = result["instances"]
+        n     = len(insts)
+        avg_gpu   = sum(i["gpu"] for i in insts) / n if n else 0.0
+        gmem_used = sum(i["gmem_used"]  for i in insts)
+        gmem_cap  = sum(i["gmem_total"] for i in insts)
+
+        total_gpu_sum   += avg_gpu
+        total_gpu_cnt   += 1
+        total_gmem_used += gmem_used
+        total_gmem_cap  += gmem_cap
+        active_products.append(prod_key)
+
+        gmem_str = (f"{gmem_used:.1f}/{gmem_cap:.0f} GiB"
+                    if gmem_cap > 0 else "显存数据不可达")
+        gpu_bar  = "█" * max(0, min(10, round(avg_gpu / 10))) + "░" * (10 - max(0, min(10, round(avg_gpu / 10))))
+
+        lines.append(f"\n{emoji} **{label}**  ·  {n} 个运行中")
+        lines.append(f"   GPU `{gpu_bar}` {avg_gpu:.1f}%  |  显存 {gmem_str}")
+
+        # 实例明细（最多展示前 8 个，按 GPU 降序）
+        for i in insts[:8]:
+            gmem = (f"{i['gmem_used']:.1f}/{i['gmem_total']:.0f}G"
+                    if i["gmem_total"] > 0 else "")
+            owner_tag = f"[{i['owner']}]" if i["owner"] not in ("—", "unknown") else ""
+            lines.append(
+                f"   └─ {i['id']}  {owner_tag}"
+                f"  GPU {i['gpu']:.1f}%  CPU {i['cpu']:.1f}%  {gmem}"
+            )
+        if n > 8:
+            lines.append(f"   └─ （另有 {n - 8} 个实例已省略）")
+
+    # ── 汇总行 ────────────────────────────────────────────────────────────────
+    lines.append("\n" + "━" * 52)
+    if active_products:
+        avg_total = total_gpu_sum / total_gpu_cnt if total_gpu_cnt else 0
+        gmem_summary = (f"{total_gmem_used:.1f}/{total_gmem_cap:.0f} GiB"
+                        if total_gmem_cap > 0 else "N/A")
+        lines.append(
+            f"汇总  活跃产品：{'  '.join(active_products)}"
+            f"  |  GPU 均值 {avg_total:.1f}%  |  显存 {gmem_summary}"
+        )
+    else:
+        lines.append("⚠️ 所有产品的实例级指标均不可达，请检查 PAI Prometheus exporter 配置。")
+
+    return "\n".join(lines)
+
+
 def _build_report_block(metrics: dict, report_time: str) -> str:
     """
     将各指标分析结果拼成带标记的报告字符串，供 feishu_tool 解析。
@@ -447,6 +720,8 @@ def query_prometheus_metrics(
     query_type: str,
     node_filter: str = "",
     duration_minutes: int = 60,
+    product_filter: str = "",
+    user_filter: str = "",
 ) -> str:
     """Agent 工具执行函数。"""
     if not settings.PROMETHEUS_URL:
@@ -462,7 +737,12 @@ def query_prometheus_metrics(
             resp = requests.get(url, auth=_auth(), timeout=10)
             resp.raise_for_status()
             names = resp.json().get("data", [])
-            return f"发现 {len(names)} 个指标：\n" + "\n".join(names[:100])
+            # 只列出 PAI 相关指标，避免信息过载
+            pai_names = [n for n in names if n.startswith("AliyunPai")]
+            other_cnt = len(names) - len(pai_names)
+            result = f"发现 {len(names)} 个指标（PAI 相关 {len(pai_names)} 个，其余 {other_cnt} 个已省略）：\n"
+            result += "\n".join(pai_names) if pai_names else "\n".join(names[:100])
+            return result
         except Exception as e:
             return f"❌ 指标发现失败：{e}"
 
@@ -475,9 +755,20 @@ def query_prometheus_metrics(
         }
         return _build_report_block(metrics, report_time)
 
-    # 按用户聚合（实例级指标）
+    # 按用户聚合（DSW 实例级指标）
     if query_type == "users":
         return _query_user_usage(end)
+
+    # 按产品维度拆分（DLC / DSW / EAS），可按产品过滤
+    if query_type == "breakdown":
+        return _query_product_breakdown(product_filter=product_filter)
+
+    # 跨产品平铺实例清单，可按产品或用户过滤
+    if query_type == "instances":
+        return _query_all_instances(
+            product_filter=product_filter,
+            user_filter=user_filter,
+        )
 
     # 单类指标模式
     if query_type in METRIC_QUERIES:
@@ -493,7 +784,7 @@ def query_prometheus_metrics(
 
     return (
         f"❓ 未知 query_type：{query_type}，"
-        f"可选值：report / cpu / memory / disk / network / gpu / users / discover"
+        f"可选值：report / breakdown / instances / cpu / memory / disk / network / gpu / users / discover"
     )
 
 
@@ -503,14 +794,16 @@ class PrometheusQuerySchema(BaseModel):
     query_type: str = Field(
         description=(
             "查询类型：\n"
-            "  'report'   - 生成完整五合一报告（CPU+内存+磁盘+网络+GPU，推飞书前必须先调此项）\n"
-            "  'cpu'      - 仅分析 CPU 使用率趋势\n"
-            "  'memory'   - 仅分析内存使用率趋势\n"
-            "  'disk'     - 仅分析磁盘 I/O 吞吐（读+写）\n"
-            "  'network'  - 仅分析网络收发流量\n"
-            "  'gpu'      - 仅分析 GPU SM 利用率和温度\n"
-            "  'users'    - 按用户展示各实例 CPU/GPU/显存占用（实例级明细）\n"
-            "  'discover' - 列出 Prometheus 中所有可用指标名称"
+            "  'report'    - 生成完整五合一报告（CPU+内存+磁盘+网络+GPU，推飞书前必须先调此项）\n"
+            "  'breakdown' - 按 PAI 产品（DLC/DSW/EAS）拆分 GPU 算力，含进度条和实例明细\n"
+            "  'instances' - 跨产品平铺所有实例/任务/服务清单，按 GPU 降序，可按产品或用户过滤\n"
+            "  'cpu'       - 仅分析 CPU 使用率趋势\n"
+            "  'memory'    - 仅分析内存使用率趋势\n"
+            "  'disk'      - 仅分析磁盘 I/O 吞吐（读+写）\n"
+            "  'network'   - 仅分析网络收发流量\n"
+            "  'gpu'       - 仅分析 GPU SM 利用率和温度\n"
+            "  'users'     - 按用户展示 DSW 实例 CPU/GPU/显存占用\n"
+            "  'discover'  - 列出 Prometheus 中所有可用 PAI 指标名称"
         )
     )
     node_filter: str = Field(
@@ -520,6 +813,20 @@ class PrometheusQuerySchema(BaseModel):
     duration_minutes: int = Field(
         default=60,
         description="查询过去多少分钟的数据，默认 60 分钟。"
+    )
+    product_filter: str = Field(
+        default="",
+        description=(
+            "产品过滤，仅在 query_type='breakdown' 或 'instances' 时生效。\n"
+            "可选值：'DSW' / 'DLC' / 'EAS'，留空则显示全部产品。"
+        )
+    )
+    user_filter: str = Field(
+        default="",
+        description=(
+            "用户名过滤，仅在 query_type='instances' 时生效。\n"
+            "填写用户名关键词（模糊匹配），留空则显示所有用户。"
+        )
     )
 
 

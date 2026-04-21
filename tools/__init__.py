@@ -8,6 +8,8 @@ from .prometheus_tool import prometheus_tool
 from .feishu_tool import feishu_tool
 from .gpu_advisor_tool import gpu_advisor_tool
 from .pai_dsw_tool import pai_dsw_tool
+from .jira_tool import jira_tool
+from .ram_tool import ram_tool
 
 # Agent 可直接导入的完整工具列表
 ALL_TOOLS = [
@@ -20,4 +22,6 @@ ALL_TOOLS = [
     feishu_tool,
     gpu_advisor_tool,
     pai_dsw_tool,
+    jira_tool,
+    ram_tool,
 ]

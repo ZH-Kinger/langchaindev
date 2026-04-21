@@ -1,27 +1,23 @@
+from functools import lru_cache
 from langchain.tools import tool
-from utils.llm_factory import get_cloud_llm
-from core.chains import create_rag_chain
-from utils.vector_store import get_retriever
-from core.prompts import aiops_prompt
 
-# --- 初始化 RAG 所需零件 ---
-llm = get_cloud_llm()
 
-# 2. 获取检索器和 Prompt
-retriever = get_retriever()
-rag_prompt = aiops_prompt()
+@lru_cache(maxsize=1)
+def _get_rag_chain():
+    """首次调用时构建 RAG 链（加载 Embedding 模型），后续复用缓存实例"""
+    from utils.llm_factory import get_cloud_llm
+    from core.chains import create_rag_chain
+    from utils.vector_store import get_retriever
+    from core.prompts import aiops_prompt
+    return create_rag_chain(get_cloud_llm(), get_retriever(), aiops_prompt())
 
-# 3. 组装成真正的 rag_chain
-# 注意：这个 rag_chain 是给工具调用的“内部逻辑”
-rag_chain = create_rag_chain(llm, retriever, rag_prompt)
 
-# --- 第二步：定义工具 ---
 @tool
 def query_knowledge(query: str) -> str:
     """当需要查询 K8s、Kafka 或运维规程时，调用此工具。输入应为具体问题。"""
-    # 强制补齐 rag_chain 需要的字典结构（input, chat_history）
-    response = rag_chain.invoke({
+    # 工具调用无对话上下文，传空列表而非空字符串，与 MessagesPlaceholder 类型一致
+    response = _get_rag_chain().invoke({
         "input": query,
-        "chat_history": ""
+        "chat_history": []
     })
     return response

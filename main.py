@@ -48,7 +48,8 @@ def run_bot():
 RUNNERS = {
     "rag":    run_rag,
     "agent":  run_agent,
-    "hybrid": run_hybrid,
+    "hybrid":
+        run_hybrid,
     "collab": run_collab,
     "bot":    run_bot,
 }
@@ -63,7 +64,11 @@ def select_mode_interactive() -> str:
         print(f"  {i}. [{key}] {MODES[key]}")
     print("=" * 50)
     while True:
-        choice = input("请输入序号或模式名称 (默认 2-agent): ").strip()
+        try:
+            choice = input("请输入序号或模式名称 (默认 2-agent): ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\n已取消，退出程序。")
+            sys.exit(0)
         if choice == "":
             return "agent"
         if choice in MODES:
