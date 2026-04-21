@@ -29,7 +29,7 @@ from collections import deque
 import requests
 from flask import Flask, request, jsonify
 from config.settings import settings
-from utils.logger import get_logger
+from utils.logger import get_logger, set_trace_id, clear_trace_id, register_error_callback
 
 logger = get_logger(__name__)
 from tools.feishu_tool import _get_access_token
@@ -620,7 +620,10 @@ def _process_message(message_id: str, chat_id: str, user_text: str, open_id: str
             _feishu_reply(message_id, reply)
 
     except Exception as e:
+        logger.error("处理消息出错", exc_info=True)
         _feishu_reply(message_id, f"⚠️ 处理出错：{e}")
+    finally:
+        clear_trace_id()
 
 
 # ── 卡片按钮事件处理（card.action.trigger / card_action 共用）────────────────
@@ -970,6 +973,7 @@ def feishu_event():
     message_id = message.get("message_id", "")
     chat_id    = message.get("chat_id", "")
     open_id    = event.get("sender", {}).get("sender_id", {}).get("open_id", "")
+    set_trace_id(message_id[-8:] if message_id else "-")
 
     # ⑤ AK 注册指令优先处理（私聊场景，保障安全）
     if _handle_ak_register(message_id, open_id, user_text):
@@ -1022,7 +1026,68 @@ def feishu_card_action():
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "ts": int(time.time())})
+    """深度健康检查：探测各依赖服务连通性。"""
+    result: dict = {"ts": int(time.time()), "status": "ok"}
+
+    # Redis
+    try:
+        from utils.redis_client import get_redis
+        get_redis().ping()
+        result["redis"] = "ok"
+    except Exception as e:
+        result["redis"] = f"error: {e}"
+        result["status"] = "degraded"
+
+    # Prometheus
+    try:
+        from tools.prometheus_tool import _query_instant
+        r = _query_instant("up")
+        result["prometheus"] = "ok" if r is not None else "error: empty response"
+        if r is None:
+            result["status"] = "degraded"
+    except Exception as e:
+        result["prometheus"] = f"error: {e}"
+        result["status"] = "degraded"
+
+    # Jira
+    try:
+        import requests as _req
+        from config.settings import settings
+        if settings.JIRA_URL and settings.JIRA_PAT:
+            resp = _req.get(
+                f"{settings.JIRA_URL}/rest/api/2/serverInfo",
+                headers={"Authorization": f"Bearer {settings.JIRA_PAT}"},
+                timeout=5,
+            )
+            result["jira"] = "ok" if resp.status_code == 200 else f"error: HTTP {resp.status_code}"
+            if resp.status_code != 200:
+                result["status"] = "degraded"
+        else:
+            result["jira"] = "not_configured"
+    except Exception as e:
+        result["jira"] = f"error: {e}"
+        result["status"] = "degraded"
+
+    # PAI DSW API
+    try:
+        from tools.pai_dsw_tool import list_dsw_resources
+        list_dsw_resources()
+        result["dsw_api"] = "ok"
+    except Exception as e:
+        result["dsw_api"] = f"error: {e}"
+        result["status"] = "degraded"
+
+    # 飞书 Token
+    try:
+        token = _get_access_token()
+        result["feishu"] = "ok" if token else "error: empty token"
+        if not token:
+            result["status"] = "degraded"
+    except Exception as e:
+        result["feishu"] = f"error: {e}"
+        result["status"] = "degraded"
+
+    return jsonify(result), 200 if result["status"] == "ok" else 207
 
 
 # ── 入口 ──────────────────────────────────────────────────────────────────────
@@ -1030,6 +1095,13 @@ def health():
 def run(host: str = "0.0.0.0", port: int = 8088, debug: bool = False):
     # 在主线程预热 Agent，避免子线程首次导入时 Pydantic v2 对 RunnableParallel
     # 中 lambda 做重新验证导致的 TypeError: got NoneType
+    # 注册错误回调：ERROR 级别日志自动推送管理员飞书
+    if settings.ADMIN_FEISHU_OPEN_ID:
+        register_error_callback(
+            lambda msg: _send_text_to(settings.ADMIN_FEISHU_OPEN_ID, settings.FEISHU_CHAT_ID, msg)
+        )
+        logger.info("错误飞书推送已注册 → %s", settings.ADMIN_FEISHU_OPEN_ID)
+
     logger.info("正在初始化 Agent（首次加载模型，请稍候）...")
     try:
         from core.agent import _build_executor

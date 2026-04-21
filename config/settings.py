@@ -83,6 +83,42 @@ class Config:
     CHUNK_SIZE = 500
     CHUNK_OVERLAP = 50
 
+    # ── 配置项描述（用于自检报告）────────────────────────────────────────────────
+    _REQUIRED_FIELDS = [
+        ("API_KEY",                "LLM 不可用，Agent 无法工作"),
+        ("PROMETHEUS_URL",         "监控分析 / GPU 训练建议不可用"),
+        ("FEISHU_APP_ID",          "飞书 Bot 不可用"),
+        ("FEISHU_APP_SECRET",      "飞书 Bot 不可用"),
+        ("FEISHU_VERIFICATION_TOKEN", "飞书事件验证跳过（存在安全风险）"),
+        ("JIRA_URL",               "GPU 工单系统不可用"),
+        ("JIRA_PAT",               "GPU 工单系统不可用"),
+        ("PAI_DSW_ACCESS_KEY_ID",  "DSW 实例管理不可用"),
+        ("PAI_DSW_WORKSPACE_ID",   "DSW 实例管理不可用"),
+        ("REDIS_HOST",             "会话记忆 / 配额管理不可用（降级到内存）"),
+        ("ADMIN_FEISHU_OPEN_ID",   "大规格申请审批流不可用（将自动批准）"),
+    ]
+
+    def validate(self) -> list[tuple[str, str]]:
+        """检查配置完整性，返回 [(缺失字段, 影响说明), ...] 列表。"""
+        missing = []
+        for field, impact in self._REQUIRED_FIELDS:
+            val = getattr(self, field, None)
+            if not val:
+                missing.append((field, impact))
+        return missing
+
+    def print_validate(self) -> None:
+        """启动时打印配置自检报告（有缺失才输出）。"""
+        from utils.logger import get_logger
+        log = get_logger("config")
+        missing = self.validate()
+        if not missing:
+            log.info("配置自检通过，所有关键配置已设置 ✓")
+            return
+        log.warning("以下配置未设置，相关功能不可用：")
+        for field, impact in missing:
+            log.warning("  %-35s → %s", field, impact)
+
     def setup_env(self):
         # 离线开关（防止 HuggingFace 联网）
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
@@ -95,7 +131,9 @@ class Config:
         for path in [self.SESSION_DIR, self.MODEL_CACHE, self.VECTOR_DB, self.DATA_PATH]:
             if not os.path.exists(path):
                 os.makedirs(path, exist_ok=True)
-                print(f"自动创建目录: {path}")
+
+        # 配置自检
+        self.print_validate()
 
 
 settings = Config()
