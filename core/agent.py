@@ -44,6 +44,7 @@ _TOOL_GROUPS = {
     "jira":      {"manage_jira"},
     "training":  {"analyze_gpu_training", "query_infrastructure_metrics"},
     "inspect":   {"inspect_dsw_instance", "manage_pai_dsw"},
+    "cluster":   {"cluster_health_report", "inspect_dsw_instance"},
 }
 
 # 启动时校验 _TOOL_GROUPS 中的名字与 ALL_TOOLS 一致，防止静默路由失效
@@ -68,6 +69,9 @@ def _select_tools(user_input: str) -> list:
     elif any(k in text for k in ("训练建议", "算法建议", "训练分析", "利用率低", "怎么优化训练",
                                   "分析我的gpu", "分析实例", "训练瓶颈", "显存优化", "dataloader")):
         names = _TOOL_GROUPS["training"]
+    elif any(k in text for k in ("集群状态", "所有实例", "全局监控", "哪些在空转",
+                                  "总费用", "集群监控", "cluster", "全部实例")):
+        names = _TOOL_GROUPS["cluster"]
     elif any(k in text for k in ("健康", "巡检", "状态怎么样", "在跑吗", "费用多少",
                                   "要不要停", "实例状态", "跑了多久", "inspect")):
         names = _TOOL_GROUPS["inspect"]

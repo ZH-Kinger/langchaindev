@@ -11,7 +11,7 @@ from .pai_dsw_tool import pai_dsw_tool
 from .jira_tool import jira_tool
 from .ram_tool import ram_tool
 from .gpu_training_advisor import gpu_training_advisor_tool
-from .dsw_instance_inspector import dsw_instance_inspector_tool
+from .dsw_instance_inspector import dsw_instance_inspector_tool, cluster_health_report_tool
 
 # Agent 可直接导入的完整工具列表
 ALL_TOOLS = [
@@ -28,4 +28,5 @@ ALL_TOOLS = [
     ram_tool,
     gpu_training_advisor_tool,
     dsw_instance_inspector_tool,
+    cluster_health_report_tool,
 ]
