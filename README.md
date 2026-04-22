@@ -31,8 +31,7 @@
 
 ```
 langchaindev/
-├── main.py                     # 主入口，运行模式选择器
-├── app.py                      # RAG 模式独立入口
+├── main.py                     # 主入口，运行模式选择器（--mode / --session）
 ├── ingest.py                   # 文档向量化写入脚本
 │
 ├── config/
@@ -40,14 +39,19 @@ langchaindev/
 │
 ├── core/
 │   ├── agent.py                # 单智能体（工具调用 + Redis 记忆）
+│   ├── rag_runner.py           # RAG 模式运行入口（会话 ID 隔离）
 │   ├── hybrid_agents.py        # 混合双模型工作流（边缘→云端）
 │   ├── multi_agent_system.py   # 多智能体协作（诊断 + 执行）
 │   ├── feishu_bot.py           # 飞书 Webhook 服务（Flask）
 │   ├── dsw_scheduler.py        # DSW 工单调度器（Jira轮询 + 实例监控 + 早报）
 │   ├── chains.py               # RAG 链组装
-│   └── prompts.py              # 系统提示词
+│   ├── llm_factory.py          # LLM 工厂（云端/边缘模型，@lru_cache）
+│   ├── vector_store.py         # ChromaDB + HuggingFace Embedding（@lru_cache）
+│   ├── prompts_rag.py          # RAG 模式系统提示词
+│   └── prompts_agent.py        # Agent / Hybrid / Collab 系统提示词
 │
 ├── tools/
+│   ├── __init__.py             # ALL_TOOLS + TOOL_GROUPS（单一来源）
 │   ├── base_tool.py            # 工具基类（日志、路径管理）
 │   ├── system_tool.py          # 系统监控（CPU、内存、磁盘）
 │   ├── analysis_skills.py      # 告警降噪 + Pandas 数据分析
@@ -57,13 +61,16 @@ langchaindev/
 │   ├── feishu_tool.py          # 飞书消息卡片推送
 │   ├── rag_tool.py             # 知识库查询工具
 │   ├── gpu_advisor_tool.py     # GPU 集群智能优化顾问
+│   ├── gpu_training_advisor.py # GPU 训练行为分析（Roofline 模型）
 │   ├── pai_dsw_tool.py         # 阿里云 PAI DSW 实例管理（Python SDK）
-│   └── jira_tool.py            # Jira 工单操作（GPU 申请工单 CRUD）
+│   ├── jira_tool.py            # Jira 工单操作（GPU 申请工单 CRUD）
+│   ├── ram_tool.py             # 阿里云 RAM 用户权限管理
+│   ├── dsw_instance_inspector.py  # DSW 单实例健康巡检
+│   └── cluster_health_tool.py     # GPU 集群全局监控看板
 │
 ├── utils/
-│   ├── llm_factory.py          # LLM 工厂（云端/边缘模型）
-│   ├── vector_store.py         # ChromaDB + HuggingFace Embedding
 │   ├── redis_client.py         # Redis 单例（会话/缓存/去重）
+│   ├── logger.py               # 结构化日志（trace_id + 飞书告警回调）
 │   ├── aliyun_auth.py          # 阿里云鉴权
 │   └── chart_builder.py        # 实时指标趋势图生成
 │
@@ -76,7 +83,7 @@ langchaindev/
 │
 ├── vector_db/                  # ChromaDB 持久化存储
 ├── models/model_cache/         # HuggingFace 模型缓存
-└── sessions/                   # 对话历史文件
+└── sessions/                   # RAG 对话历史文件（按会话 ID 隔离）
 ```
 
 ## 快速开始
@@ -176,12 +183,13 @@ python ingest.py
 ## 运行
 
 ```bash
-python main.py                  # 交互式模式选择
-python main.py --mode rag       # RAG 知识库问答
-python main.py --mode agent     # 单智能体（全工具集）
-python main.py --mode hybrid    # 混合边云双模型
-python main.py --mode collab    # 多智能体协作
-python main.py --mode bot       # 飞书机器人（端口 8088）
+python main.py                          # 交互式模式选择
+python main.py --mode rag               # RAG 知识库问答（交互式选择会话 ID）
+python main.py --mode rag --session ops # RAG 模式，指定会话 ID
+python main.py --mode agent             # 单智能体（全工具集）
+python main.py --mode hybrid            # 混合边云双模型
+python main.py --mode collab            # 多智能体协作
+python main.py --mode bot               # 飞书机器人（端口 8088）
 ```
 
 ## 运行模式说明
@@ -283,19 +291,22 @@ dsw:pending_reg:{ticket_key}  → 未注册通知去重（1 小时 TTL）
 
 ## 可用工具
 
-| 工具 | 功能 |
-|------|------|
-| `system_monitor` | 实时 CPU/内存/磁盘监控 |
-| `alarm_reduction` | 告警降噪去重分析 |
-| `data_analysis` | CSV/JSON/Excel 多格式数据分析 |
-| `k8s_pod_restart` | Kubernetes Pod 重启（带审计日志）|
-| `cpu_trend` | CPU 趋势分析（代理 Prometheus）|
-| `prometheus_query` | Prometheus 指标查询与异常检测 |
-| `feishu_notify` | 飞书消息卡片推送 |
-| `knowledge_base` | 运维知识库语义查询 |
-| `gpu_advisor` | GPU 集群利用率/散热/调度/成本建议 |
-| `pai_dsw` | PAI DSW 实例查询、启停、创建、资源发现 |
-| `manage_jira` | Jira GPU 工单查询、评论、关闭 |
+| 工具名 | 文件 | 功能 |
+|--------|------|------|
+| `system_data_manager` | system_tool.py | 实时 CPU/内存/磁盘监控 |
+| `compress_system_alarms` | analysis_skills.py | 告警降噪去重分析 |
+| `restart_k8s_service` | ops_skills.py | Kubernetes Pod 重启（带审计日志，生产命名空间保护）|
+| `analyze_node_cpu_trend` | monitor_skills.py | CPU 趋势分析 |
+| `query_infrastructure_metrics` | prometheus_tool.py | Prometheus 指标查询与异常检测 |
+| `push_report_to_feishu` | feishu_tool.py | 飞书消息卡片推送 |
+| `query_knowledge` | rag_tool.py | 运维知识库语义查询 |
+| `advise_gpu_cluster` | gpu_advisor_tool.py | GPU 集群利用率/散热/调度/成本建议 |
+| `analyze_gpu_training` | gpu_training_advisor.py | GPU 训练行为深度分析（Roofline 模型）|
+| `manage_pai_dsw` | pai_dsw_tool.py | PAI DSW 实例查询、启停、创建、资源发现 |
+| `manage_jira` | jira_tool.py | Jira GPU 工单查询、评论、关闭 |
+| `manage_ram` | ram_tool.py | 阿里云 RAM 用户权限查询与映射 |
+| `inspect_dsw_instance` | dsw_instance_inspector.py | DSW 单实例健康巡检（GPU/温度/费用/建议）|
+| `cluster_health_report` | cluster_health_tool.py | GPU 集群全局监控看板（并行巡检 + 排行表）|
 
 ## 技术栈
 
@@ -343,7 +354,42 @@ Flask /feishu/event
 
 ## 部署（公网发布）
 
-### 方案一：公网服务器 + nginx + HTTPS
+### 方案一：Docker Compose（推荐）
+
+```yaml
+# docker-compose.yml
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8088:8088"
+    volumes:
+      - ./logs:/app/logs
+      - ./sessions:/app/sessions
+      - ./vector_db:/app/vector_db
+      - ./models:/app/models
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+
+volumes:
+  redis_data:
+```
+
+```bash
+docker compose up -d          # 启动
+docker compose logs -f bot    # 查看日志
+```
+
+### 方案二：公网服务器 + nginx + HTTPS
 
 ```bash
 # 1. 安装依赖并启动
