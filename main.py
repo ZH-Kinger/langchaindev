@@ -20,9 +20,9 @@ MODES = {
 }
 
 
-def run_rag():
-    from app import chat
-    chat()
+def run_rag(session_id: str = ""):
+    from core.rag_runner import run
+    run(session_id=session_id)
 
 
 def run_agent():
@@ -85,6 +85,11 @@ if __name__ == "__main__":
         choices=list(MODES.keys()),
         help="运行模式（不指定则交互选择）",
     )
+    parser.add_argument(
+        "--session",
+        default="",
+        help="会话 ID，用于隔离对话记忆（RAG 模式有效，不指定则交互询问）",
+    )
     args = parser.parse_args()
 
     mode = args.mode if args.mode else select_mode_interactive()
@@ -94,4 +99,7 @@ if __name__ == "__main__":
     print("输入 exit 退出")
     print("=" * 50)
 
-    RUNNERS[mode]()
+    if mode == "rag":
+        RUNNERS[mode](session_id=args.session)
+    else:
+        RUNNERS[mode]()

@@ -5,10 +5,10 @@ from langchain.tools import tool
 @lru_cache(maxsize=1)
 def _get_rag_chain():
     """首次调用时构建 RAG 链（加载 Embedding 模型），后续复用缓存实例"""
-    from utils.llm_factory import get_cloud_llm
+    from core.llm_factory import get_cloud_llm
     from core.chains import create_rag_chain
-    from utils.vector_store import get_retriever
-    from core.prompts import aiops_prompt
+    from core.vector_store import get_retriever
+    from core.prompts_rag import aiops_prompt
     return create_rag_chain(get_cloud_llm(), get_retriever(), aiops_prompt())
 
 

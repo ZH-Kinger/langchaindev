@@ -39,9 +39,34 @@ from core.dsw_scheduler import (scheduler, _redis_get, _redis_set, _redis_delete
 
 app = Flask(__name__)
 
-# ── 去重：同一 event_id 只处理一次（飞书会重试未 200 的请求）──────────────────
-_seen_events: set = set()
-_seen_lock   = threading.Lock()
+# ── 去重：同一 event_id 只处理一次（飞书会重试未 200 的请求）──────��───────────
+# 优先用 Redis SET NX + TTL；Redis 不可用时降级为有上限的内存集合
+_seen_events_fallback: set = set()
+_seen_lock = threading.Lock()
+_DEDUP_TTL = 3600  # event_id 保留 1 小时，覆盖飞书最长重试窗口
+
+
+def _is_duplicate_event(event_id: str) -> bool:
+    """已见过返回 True，首次见到返回 False 并记录。"""
+    if not event_id:
+        return False
+    try:
+        from utils.redis_client import get_redis, is_redis_available
+        if is_redis_available():
+            added = get_redis().set(
+                f"feishu:event_dedup:{event_id}", 1, nx=True, ex=_DEDUP_TTL
+            )
+            return not added  # added=None 说明 key 已存在 → 重复
+    except Exception:
+        pass
+    # Redis 不可用：内存兜底，最多保留 500 条（随机淘汰）
+    with _seen_lock:
+        if event_id in _seen_events_fallback:
+            return True
+        _seen_events_fallback.add(event_id)
+        if len(_seen_events_fallback) > 500:
+            _seen_events_fallback.clear()
+        return False
 
 # 会话历史统一由 core.agent 的 Redis 函数管理（按 chat_id 隔离）
 
@@ -936,15 +961,8 @@ def feishu_event():
 
     # ③ 去重
     event_id = header.get("event_id", "")
-    with _seen_lock:
-        if event_id in _seen_events:
-            return jsonify({"code": 0})
-        _seen_events.add(event_id)
-        # 防止集合无限增长，超过 5000 条就清一半
-        if len(_seen_events) > 5000:
-            remove = list(_seen_events)[:2500]
-            for e in remove:
-                _seen_events.discard(e)
+    if _is_duplicate_event(event_id):
+        return jsonify({"code": 0})
 
     # ④ 卡片按钮点击事件（card.action.trigger）——同步处理，飞书要求 3s 内响应
     event_type = header.get("event_type", "")

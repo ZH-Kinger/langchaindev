@@ -3,7 +3,7 @@ from langchain_community.document_loaders import DirectoryLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
 from config.settings import settings
-from utils.vector_store import get_embedding_model
+from core.vector_store import get_embedding_model
 
 
 def run_ingest():

@@ -13,7 +13,7 @@ from config.settings import settings
 PROMPT = "用一句话介绍你自己。"
 
 
-def test_api(name: str, llm_getter, extra_info: dict = None):
+def test_api(name: str, llm_getter, extra_info: dict | None = None) -> None:
     print(f"\n{'='*50}")
     print(f"测试：{name}")
     if extra_info:
@@ -36,7 +36,7 @@ def test_api(name: str, llm_getter, extra_info: dict = None):
 
 
 if __name__ == "__main__":
-    from utils.llm_factory import get_cloud_llm, get_edge_llm
+    from core.llm_factory import get_cloud_llm, get_edge_llm
 
     test_api(
         "☁️  云端 Qwen-Max (DashScope)",

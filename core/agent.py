@@ -14,10 +14,10 @@ if hasattr(sys.stderr, "reconfigure"):
 from functools import lru_cache
 from langchain.agents import AgentExecutor, create_tool_calling_agent
 from langchain_core.messages import HumanMessage, AIMessage
-from utils.llm_factory import get_cloud_llm
+from core.llm_factory import get_cloud_llm
 from utils.redis_client import get_redis, is_redis_available
-from core.prompts import get_agent_prompt
-from tools import ALL_TOOLS
+from core.prompts_agent import get_agent_prompt
+from tools import ALL_TOOLS, TOOL_GROUPS
 
 # ── Redis 对话记忆 key 前缀 ───────────────────────────────────────────────────
 SESSION_KEY_PREFIX = "agent:chat_history:"
@@ -33,54 +33,34 @@ def _build_executor() -> AgentExecutor:
     return AgentExecutor(agent=agent, tools=ALL_TOOLS, verbose=True, handle_parsing_errors=True)
 
 
-# ── 工具路由（按关键词缩减工具列表，减少 token 消耗）──────────────────────────
-_TOOL_GROUPS = {
-    "knowledge": {"query_knowledge"},
-    "monitor":   {"system_data_manager", "analyze_node_cpu_trend", "query_infrastructure_metrics"},
-    "ops":       {"compress_system_alarms", "restart_k8s_service"},
-    "notify":    {"push_report_to_feishu"},
-    "advisor":   {"advise_gpu_cluster", "query_infrastructure_metrics"},
-    "pai_dsw":   {"manage_pai_dsw"},
-    "jira":      {"manage_jira"},
-    "training":  {"analyze_gpu_training", "query_infrastructure_metrics"},
-    "inspect":   {"inspect_dsw_instance", "manage_pai_dsw"},
-    "cluster":   {"cluster_health_report", "inspect_dsw_instance"},
-}
-
-# 启动时校验 _TOOL_GROUPS 中的名字与 ALL_TOOLS 一致，防止静默路由失效
-_ALL_TOOL_NAMES = {t.name for t in ALL_TOOLS}
-for _g, _ns in _TOOL_GROUPS.items():
-    assert _ns <= _ALL_TOOL_NAMES, f"_TOOL_GROUPS[{_g}] 含未知工具名: {_ns - _ALL_TOOL_NAMES}"
-
-
 def _select_tools(user_input: str) -> list:
     """按关键词路由工具，匹配失败时安全回退到全量工具列表"""
     text = user_input.lower()
     if any(k in text for k in ("文档", "规程", "知识库", "怎么", "如何")):
-        names = _TOOL_GROUPS["knowledge"] | _TOOL_GROUPS["monitor"]
+        names = TOOL_GROUPS["knowledge"] | TOOL_GROUPS["monitor"]
     elif any(k in text for k in ("重启", "pod", "k8s", "告警", "降噪", "修复")):
-        names = _TOOL_GROUPS["ops"] | _TOOL_GROUPS["monitor"]
+        names = TOOL_GROUPS["ops"] | TOOL_GROUPS["monitor"]
     elif any(k in text for k in ("dsw", "实例", "工作站", "启动实例", "停止实例", "删除实例", "pai dsw", "数据科学")):
-        names = _TOOL_GROUPS["pai_dsw"]
+        names = TOOL_GROUPS["pai_dsw"]
     elif any(k in text for k in ("jira", "工单", "gpu申请", "申请记录", "工作项")):
-        names = _TOOL_GROUPS["jira"] | _TOOL_GROUPS["pai_dsw"]
+        names = TOOL_GROUPS["jira"] | TOOL_GROUPS["pai_dsw"]
     elif any(k in text for k in ("dlc", "eas", "产品", "算力", "训练任务", "推理", "开发环境", "分布")):
-        names = _TOOL_GROUPS["monitor"]
+        names = TOOL_GROUPS["monitor"]
     elif any(k in text for k in ("训练建议", "算法建议", "训练分析", "利用率低", "怎么优化训练",
                                   "分析我的gpu", "分析实例", "训练瓶颈", "显存优化", "dataloader")):
-        names = _TOOL_GROUPS["training"]
+        names = TOOL_GROUPS["training"]
     elif any(k in text for k in ("集群状态", "所有实例", "全局监控", "哪些在空转",
                                   "总费用", "集群监控", "cluster", "全部实例")):
-        names = _TOOL_GROUPS["cluster"]
+        names = TOOL_GROUPS["cluster"]
     elif any(k in text for k in ("健康", "巡检", "状态怎么样", "在跑吗", "费用多少",
                                   "要不要停", "实例状态", "跑了多久", "inspect")):
-        names = _TOOL_GROUPS["inspect"]
+        names = TOOL_GROUPS["inspect"]
     elif any(k in text for k in ("建议", "优化", "效率", "成本", "散热", "调度", "空闲", "瓶颈")):
-        names = _TOOL_GROUPS["advisor"]
+        names = TOOL_GROUPS["advisor"]
     elif any(k in text for k in ("cpu", "内存", "memory", "prometheus", "指标", "趋势", "监控")):
-        names = _TOOL_GROUPS["monitor"]
+        names = TOOL_GROUPS["monitor"]
     elif any(k in text for k in ("飞书", "通知", "发送", "消息", "推送")):
-        names = _TOOL_GROUPS["notify"]
+        names = TOOL_GROUPS["notify"]
     else:
         return ALL_TOOLS
     matched = [t for t in ALL_TOOLS if t.name in names]

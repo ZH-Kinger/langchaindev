@@ -3,8 +3,8 @@ from langchain.agents import create_tool_calling_agent, AgentExecutor
 from tools.system_tool import system_stats_tool
 from tools.analysis_skills import alarm_reduction_tool
 from tools.ops_skills import k8s_restart_tool
-from utils.llm_factory import get_cloud_llm, get_edge_llm
-from core.prompts import get_watcher_prompt, get_manager_prompt
+from core.llm_factory import get_cloud_llm, get_edge_llm
+from core.prompts_agent import get_watcher_prompt, get_manager_prompt
 
 _watcher_tools = [system_stats_tool]
 _manager_tools = [alarm_reduction_tool, k8s_restart_tool]

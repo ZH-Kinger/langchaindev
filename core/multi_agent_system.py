@@ -1,8 +1,8 @@
 from functools import lru_cache
 from langchain.agents import create_tool_calling_agent, AgentExecutor
 from tools import system_stats_tool, alarm_reduction_tool, k8s_restart_tool
-from utils.llm_factory import get_cloud_llm
-from core.prompts import get_diag_prompt, get_ops_prompt
+from core.llm_factory import get_cloud_llm
+from core.prompts_agent import get_diag_prompt, get_ops_prompt
 
 _diag_tools = [system_stats_tool, alarm_reduction_tool]
 _ops_tools  = [k8s_restart_tool]
