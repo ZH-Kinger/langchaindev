@@ -50,14 +50,11 @@ def cluster_health_report(top_n: int = 20) -> str:
         return "❌ PROMETHEUS_URL 未配置，无法读取指标。"
 
     try:
-        from tools.pai_dsw_tool import list_dsw_resources
-        raw = list_dsw_resources()
-        all_instances = raw.get("instances", [])
+        from tools.pai_dsw_tool import get_running_gpu_instances
+        running = get_running_gpu_instances()
     except Exception as e:
         return f"❌ 获取实例列表失败：{e}"
 
-    running = [i for i in all_instances
-               if i.get("status") == "Running" and i.get("gpu_count", 0) > 0]
     if not running:
         return "当前没有运行中的 GPU 实例。"
 

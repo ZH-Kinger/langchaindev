@@ -224,32 +224,38 @@ def _send_gpu_card(message_id: str) -> None:
         logger.error("[GPU卡片] 异常", exc_info=True)
 
 
-def _set_gpu_state(chat_id: str, config: dict | None = None) -> None:
+def _gpu_state_key(chat_id: str, open_id: str) -> str:
+    return f"{_GPU_STATE_PREFIX}{chat_id}:{open_id}"
+
+
+def _set_gpu_state(chat_id: str, open_id: str, config: dict | None = None) -> None:
     try:
         from utils.redis_client import get_redis
-        get_redis().setex(f"{_GPU_STATE_PREFIX}{chat_id}", _GPU_STATE_TTL,
+        get_redis().setex(_gpu_state_key(chat_id, open_id), _GPU_STATE_TTL,
                           json.dumps(config or {}))
     except Exception:
         pass
 
 
-def _get_gpu_state(chat_id: str) -> dict | None:
+def _get_gpu_state(chat_id: str, open_id: str) -> dict | None:
     """返回已存储的配置 dict；key 不存在时返回 None。"""
     try:
         from utils.redis_client import get_redis
-        raw = get_redis().get(f"{_GPU_STATE_PREFIX}{chat_id}")
+        raw = get_redis().get(_gpu_state_key(chat_id, open_id))
         return json.loads(raw) if raw else None
     except Exception:
         return None
 
 
-def _clear_gpu_state(chat_id: str) -> None:
+def _clear_gpu_state(chat_id: str, open_id: str) -> None:
     try:
         from utils.redis_client import get_redis
-        get_redis().delete(f"{_GPU_STATE_PREFIX}{chat_id}")
+        get_redis().delete(_gpu_state_key(chat_id, open_id))
     except Exception:
         pass
 
+
+# ── GPU 申请解析 ──────────────────────────────────────────────────────────────
 
 def _parse_gpu_request(text: str) -> dict | None:
     """尝试从用户文本中解析 GPU 申请信息，成功返回 dict，失败返回 None。"""
@@ -505,13 +511,12 @@ def _query_my_instances(message_id: str, open_id: str, chat_id: str) -> None:
         return
 
     elements: list = []
-    total_cost = 0.0
+    total_gpu = 0
     for key, state in user_tickets:
         elapsed_h   = (now - float(state.get("start_ts", now))) / 3600
         remaining_h = max(0.0, float(state.get("duration_hours", 8)) - elapsed_h)
         gpu_cnt     = int(state.get("gpu_count", 1))
-        cost        = elapsed_h * gpu_cnt * settings.GPU_PRICE_PER_HOUR
-        total_cost += cost
+        total_gpu  += gpu_cnt
         elements.append({
             "tag": "div",
             "fields": [
@@ -522,7 +527,7 @@ def _query_my_instances(message_id: str, open_id: str, chat_id: str) -> None:
                 {"is_short": True, "text": {"tag": "lark_md",
                  "content": f"**已使用**\n{elapsed_h:.1f} h"}},
                 {"is_short": True, "text": {"tag": "lark_md",
-                 "content": f"**当前费用**\n≈ ¥{cost:.0f}"}},
+                 "content": f"**GPU 卡数**\n{gpu_cnt} 张"}},
             ],
         })
         elements.append({
@@ -553,7 +558,7 @@ def _query_my_instances(message_id: str, open_id: str, chat_id: str) -> None:
                    "template": "blue"},
         "elements": [
             {"tag": "div", "text": {"tag": "lark_md",
-             "content": f"**本次会话累计费用：** ≈ ¥{total_cost:.0f}"}},
+             "content": f"**共占用 GPU：** {total_gpu} 张"}},
             {"tag": "hr"},
         ] + elements,
     }
@@ -578,7 +583,7 @@ def _process_message(message_id: str, chat_id: str, user_text: str, open_id: str
     threading.Thread(target=_auto_map_user, args=(open_id,), daemon=True).start()
 
     # ② 我的实例快捷查询（不走 Agent）
-    if re.search(r"(我的|my)\s*(实例|instance|dsw|gpu)", user_text, re.IGNORECASE):
+    if re.search(r"(我的|my)\s*(实例|instance|dsw)", user_text, re.IGNORECASE):
         threading.Thread(
             target=_query_my_instances, args=(message_id, open_id, chat_id), daemon=True
         ).start()
@@ -588,23 +593,23 @@ def _process_message(message_id: str, chat_id: str, user_text: str, open_id: str
     if _is_gpu_intent(user_text):
         if not _is_registered(open_id):
             _send_ak_register_card(message_id)
-            _set_gpu_state(chat_id, {"pending_gpu": True, "open_id": open_id})
+            _set_gpu_state(chat_id, open_id, {"pending_gpu": True, "open_id": open_id})
         else:
             _send_gpu_card(message_id)
-            _set_gpu_state(chat_id, {})
+            _set_gpu_state(chat_id, open_id, {})
         return
 
-    # ② 处于 GPU 申请状态 → 合并快选配置（gpu_count/duration_hours）和文字解析
-    gpu_config = _get_gpu_state(chat_id)
+    # ④ 处于 GPU 申请状态 → 合并快选配置（gpu_count/duration_hours）和文字解析
+    gpu_config = _get_gpu_state(chat_id, open_id)
     if gpu_config is not None:
         parsed = _parse_gpu_request(user_text)
         if parsed or gpu_config:
             merged = {**gpu_config, **(parsed or {})}   # 文字解析优先级更高
             if "instance_name" in merged or len(merged) >= 3:
-                _clear_gpu_state(chat_id)
+                _clear_gpu_state(chat_id, open_id)
                 _handle_gpu_request(message_id, chat_id, open_id, merged)
                 return
-        _clear_gpu_state(chat_id)  # 解析不足，清除状态走 Agent
+        _clear_gpu_state(chat_id, open_id)  # 解析不足，清除状态走 Agent
 
     # 延迟导入，避免在模块加载时触发 LLM 初始化
     from core.agent import _build_executor, _load_history, _save_turn
@@ -676,9 +681,9 @@ def _process_action(action_name: str, action_val: dict, open_id: str, chat_id: s
         save_user_map(open_id, user_name, "")
 
         # 注册完后如果有待处理的 GPU 申请，推送 GPU 卡片
-        gpu_state = _get_gpu_state(chat_id)
+        gpu_state = _get_gpu_state(chat_id, open_id)
         if gpu_state and gpu_state.get("pending_gpu"):
-            _clear_gpu_state(chat_id)
+            _clear_gpu_state(chat_id, open_id)
             def _push_gpu_card():
                 import time; time.sleep(1)
                 # 主动发消息（无 message_id 可 reply，改发给 chat_id）
@@ -800,7 +805,7 @@ def _process_action(action_name: str, action_val: dict, open_id: str, chat_id: s
     if action_name == "quick_gpu":
         gpu_count      = action_val.get("gpu_count", "1")
         duration_hours = action_val.get("duration_hours", "8")
-        _set_gpu_state(chat_id, {"gpu_count": gpu_count, "duration_hours": duration_hours})
+        _set_gpu_state(chat_id, open_id, {"gpu_count": gpu_count, "duration_hours": duration_hours})
         return {
             "toast": {"type": "info", "content": f"已选 {gpu_count}GPU · {duration_hours}h，请回复实例名和用途"},
             "card": {
@@ -831,16 +836,17 @@ def _process_action(action_name: str, action_val: dict, open_id: str, chat_id: s
         ticket_key   = action_val.get("ticket_key", "")
         extend_hours = float(action_val.get("extend_hours", "2"))
         state = _redis_get(ticket_key) if ticket_key else None
-        if state:
-            state["duration_hours"] = state.get("duration_hours", 8) + extend_hours
-            state["warned"]         = False
-            state["warn_ts"]        = 0.0
-            _redis_set(ticket_key, state)
-            threading.Thread(
-                target=jira_comment,
-                args=(ticket_key, f"用户选择延续使用 {int(extend_hours)} 小时。"),
-                daemon=True,
-            ).start()
+        if not state:
+            return {"toast": {"type": "error", "content": "实例已停止或不存在，无法延续"}}
+        state["duration_hours"] = state.get("duration_hours", 8) + extend_hours
+        state["warned"]         = False
+        state["warn_ts"]        = 0.0
+        _redis_set(ticket_key, state)
+        threading.Thread(
+            target=jira_comment,
+            args=(ticket_key, f"用户选择延续使用 {int(extend_hours)} 小时。"),
+            daemon=True,
+        ).start()
         return {"toast": {"type": "success", "content": f"已延续使用 {int(extend_hours)} 小时"}}
 
     # ── 立即停止 ──────────────────────────────────────────────────────────────
@@ -849,6 +855,10 @@ def _process_action(action_name: str, action_val: dict, open_id: str, chat_id: s
         from tools.jira_tool import transition_ticket
         ticket_key  = action_val.get("ticket_key", "")
         instance_id = action_val.get("instance_id", "")
+
+        # 幂等保护：state 已删说明已停止过，直接告知
+        if ticket_key and not _redis_get(ticket_key):
+            return {"toast": {"type": "info", "content": "实例已停止，无需重复操作"}}
 
         def _do_stop() -> None:
             if instance_id:
@@ -859,7 +869,20 @@ def _process_action(action_name: str, action_val: dict, open_id: str, chat_id: s
                 _redis_delete(ticket_key)
 
         threading.Thread(target=_do_stop, daemon=True).start()
-        return {"toast": {"type": "info", "content": "实例停止中，工单已关闭"}}
+        return {
+            "toast": {"type": "info", "content": "实例停止中，工单已关闭"},
+            "card": {
+                "config": {"wide_screen_mode": True},
+                "header": {
+                    "title": {"tag": "plain_text", "content": "🛑 实例已停止"},
+                    "template": "red",
+                },
+                "elements": [
+                    {"tag": "div", "text": {"tag": "lark_md",
+                     "content": f"实例 `{instance_id or ticket_key}` 已手动停止，工单已关闭。\n按钮已失效，如需重新使用请提交新工单。"}},
+                ],
+            },
+        }
 
     # ── 审批通过 ──────────────────────────────────────────────────────────────
     if action_name == "approve_gpu":
@@ -966,6 +989,9 @@ def feishu_event():
 
     # ④ 卡片按钮点击事件（card.action.trigger）——同步处理，飞书要求 3s 内响应
     event_type = header.get("event_type", "")
+    # 已读回执无需处理，提前返回避免日志噪音
+    if event_type == "im.message.message_read_v1":
+        return jsonify({"code": 0})
     logger.debug("[事件] event_type=%r", event_type)
     if event_type == "card.action.trigger":
         return jsonify(_handle_card_trigger_sync(data))

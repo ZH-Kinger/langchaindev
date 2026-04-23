@@ -1,0 +1,38 @@
+name: PR Check
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # 1. 语法检查（不执行，只检查能否解析）
+      - name: Syntax check
+        run: python -m compileall -q tools/ core/ utils/ config/
+
+      # 2. Tool 注册完整性校验（确保 __init__.py 里的工具名与实现一致）
+      - name: Tool registry check
+        run: |
+          python - <<'EOF'
+          from tools import ALL_TOOLS, TOOL_GROUPS
+          print(f"✅ {len(ALL_TOOLS)} tools registered")
+          for t in ALL_TOOLS:
+              print(f"  - {t.name}")
+          EOF
+
+      # 3. 配置项自检（不需要真实 key，只检查 settings 能否正常 import）
+      - name: Settings import check
+        run: python -c "from config.settings import settings; print('✅ settings OK')"

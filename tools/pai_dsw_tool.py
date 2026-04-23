@@ -414,6 +414,45 @@ def list_dsw_resources() -> dict:
         return {"images": [], "datasets": []}
 
 
+def get_running_gpu_instances() -> list:
+    """返回所有 Running 状态的 GPU 实例列表，供集群健康巡检使用。
+    每项包含: name, status, gpu_count, accelerator_type。失败时返回空列表。
+    """
+    client = _client()
+    if client is None:
+        return []
+    ws = settings.PAI_DSW_WORKSPACE_ID
+    rs = settings.PAI_DSW_RESOURCE_ID
+    try:
+        req = dsw_models.ListInstancesRequest(
+            page_size=100, page_number=1,
+            workspace_id=ws or None,
+            resource_id=rs or None,
+        )
+        resp = client.list_instances(req)
+        instances = resp.body.instances or []
+        result = []
+        for inst in instances:
+            if (inst.status or "").upper() != "RUNNING":
+                continue
+            if (inst.accelerator_type or "").upper() != "GPU":
+                continue
+            rr = inst.requested_resource
+            try:
+                gpu_count = int(float(rr.gpu)) if rr and rr.gpu else 0
+            except (ValueError, TypeError):
+                gpu_count = 0
+            result.append({
+                "name":             inst.instance_name or inst.instance_id,
+                "status":           inst.status,
+                "gpu_count":        gpu_count,
+                "accelerator_type": inst.accelerator_type or "GPU",
+            })
+        return result
+    except Exception:
+        return []
+
+
 # ── LangChain 工具封装 ─────────────────────────────────────────────────────────
 
 pai_dsw_tool = StructuredTool.from_function(

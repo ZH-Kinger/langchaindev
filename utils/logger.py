@@ -109,7 +109,9 @@ def _configure_root() -> None:
     root.addHandler(_make_file_handler("app.log",   logging.INFO))
     root.addHandler(_make_file_handler("error.log", logging.ERROR))
     root.addHandler(_make_console_handler())
-    root.addHandler(_FeishuAlertHandler())   # ERROR+ 触发飞书推送
+    _feishu_handler = _FeishuAlertHandler()
+    _feishu_handler.setLevel(logging.ERROR)  # 只推送 ERROR+，不触发 INFO/DEBUG
+    root.addHandler(_feishu_handler)
 
     # 抑制三方库噪音
     for lib in ("urllib3", "requests", "httpx", "openai", "langchain",

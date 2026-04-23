@@ -45,8 +45,13 @@ class Config:
     # Jira（GPU 工单系统）
     JIRA_URL              = os.environ.get("JIRA_URL", "")               # e.g. https://jira.example.com
     JIRA_PAT              = os.environ.get("JIRA_PAT", "")               # Personal Access Token
-    JIRA_PROJECT_KEY      = os.environ.get("JIRA_PROJECT_KEY", "GPU")    # Jira 项目 Key
+    JIRA_PROJECT_KEY      = os.environ.get("JIRA_PROJECT_KEY", "GPU")    # GPU 工单项目 Key
     JIRA_ISSUE_TYPE       = os.environ.get("JIRA_ISSUE_TYPE", "Task")    # 工单类型
+    JIRA_WORKFLOW_PROJECT = os.environ.get("JIRA_WORKFLOW_PROJECT", "")  # 算法组工作流项目 Key（如 ALGO）
+
+    # GitHub（工作流查询）
+    GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")   # Personal Access Token（repo 权限）
+    GITHUB_ORG   = os.environ.get("GITHUB_ORG", "")     # 组织名，如 wuji-technology
     DSW_IDLE_WARN_HOURS   = float(os.environ.get("DSW_IDLE_WARN_HOURS", "1"))   # 空闲多久发警告（小时）
     DSW_IDLE_STOP_MINUTES = int(os.environ.get("DSW_IDLE_STOP_MINUTES", "30"))  # 警告后多久自动停止（分钟）
 

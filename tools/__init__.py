@@ -13,6 +13,8 @@ from .ram_tool import ram_tool
 from .gpu_training_advisor import gpu_training_advisor_tool
 from .dsw_instance_inspector import dsw_instance_inspector_tool
 from .cluster_health_tool import cluster_health_report_tool
+from .jira_workflow_tool import jira_workflow_tool
+from .github_workflow_tool import github_workflow_tool
 
 ALL_TOOLS = [
     system_stats_tool,
@@ -29,12 +31,14 @@ ALL_TOOLS = [
     gpu_training_advisor_tool,
     dsw_instance_inspector_tool,
     cluster_health_report_tool,
+    jira_workflow_tool,
+    github_workflow_tool,
 ]
 
 # 工具分组：供 agent.py 做关键词路由，单一来源
 TOOL_GROUPS = {
     "knowledge": {"query_knowledge"},
-    "monitor":   {"system_data_manager", "analyze_node_cpu_trend", "query_infrastructure_metrics"},
+    "monitor":   {"system_data_manager", "analyze_node_cpu_trend", "query_infrastructure_metrics", "manage_ram"},
     "ops":       {"compress_system_alarms", "restart_k8s_service"},
     "notify":    {"push_report_to_feishu"},
     "advisor":   {"advise_gpu_cluster", "query_infrastructure_metrics"},
@@ -43,6 +47,7 @@ TOOL_GROUPS = {
     "training":  {"analyze_gpu_training", "query_infrastructure_metrics"},
     "inspect":   {"inspect_dsw_instance", "manage_pai_dsw"},
     "cluster":   {"cluster_health_report", "inspect_dsw_instance"},
+    "workflow":  {"query_jira_workflow", "query_github_workflow"},
 }
 
 # 启动时校验 TOOL_GROUPS 中的名字与 ALL_TOOLS 一致，防止静默路由失效

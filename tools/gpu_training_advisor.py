@@ -12,6 +12,7 @@ GPU 训练行为深度分析工具。
 基于 Roofline 模型分析计算瓶颈（计算受限 vs 显存带宽受限），
 识别 Tensor Core 是否空置，输出带代码示例的针对性建议。
 """
+import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -21,6 +22,8 @@ from pydantic import BaseModel, Field
 from langchain.tools import StructuredTool
 
 from config.settings import settings
+
+logger = logging.getLogger(__name__)
 
 
 # ── 24 项 DSW 实例级指标（并行拉取）─────────────────────────────────────────────
@@ -75,7 +78,8 @@ def _fetch_all_metrics(name: str, start: float, end: float) -> dict[str, list]:
             series = _query_range(promql, start, end, step="120s")
             vals = [float(v) for s in series for _, v in s.get("values", [])
                     if v not in ("NaN", "Inf", "+Inf", "-Inf")]
-        except Exception:
+        except Exception as e:
+            logger.warning("GPU 指标查询失败 | key=%s | error=%s", key, e)
             vals = []
         return key, vals
 
@@ -86,8 +90,10 @@ def _fetch_all_metrics(name: str, start: float, end: float) -> dict[str, list]:
             try:
                 k, v = fut.result(timeout=30)
                 result[k] = v
-            except Exception:
-                result[futures[fut]] = []
+            except Exception as e:
+                metric_key = futures[fut]
+                logger.warning("GPU 指标获取超时或失败 | key=%s | error=%s", metric_key, e)
+                result[metric_key] = []
     return result
 
 

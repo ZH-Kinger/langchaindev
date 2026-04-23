@@ -3,6 +3,7 @@ Prometheus 指标查询与分析工具。
 数据源：阿里云 PAI Prometheus（Basic Auth，AK/SK 认证）。
 支持：CPU / 内存 / 磁盘 I/O / 网络 / GPU 五类指标的趋势分析和阈值判断。
 """
+import logging
 import time
 from datetime import datetime
 
@@ -12,6 +13,8 @@ from pydantic import BaseModel, Field
 from langchain.tools import StructuredTool
 
 from config.settings import settings
+
+logger = logging.getLogger(__name__)
 
 
 # ── PromQL 配置字典（阿里云 PAI 节点级指标）────────────────────────────────────
@@ -106,7 +109,8 @@ def _query_range(promql: str, start: float, end: float, step: str = "60s") -> li
         )
         resp.raise_for_status()
         return resp.json().get("data", {}).get("result", [])
-    except Exception:
+    except Exception as e:
+        logger.warning("Prometheus range query failed | promql=%.100s | error=%s", promql, e)
         return []
 
 
@@ -119,7 +123,8 @@ def _query_instant(promql: str) -> list:
         resp = requests.get(url, params={"query": promql}, auth=_auth(), timeout=10)
         resp.raise_for_status()
         return resp.json().get("data", {}).get("result", [])
-    except Exception:
+    except Exception as e:
+        logger.warning("Prometheus instant query failed | promql=%.100s | error=%s", promql, e)
         return []
 
 
@@ -355,32 +360,32 @@ def _query_user_usage(ts: float) -> str:
                                    "gmem_used": 0.0, "gmem_total": 0.0})
         try:
             instances[key]["cpu"] = float(r["value"][1])
-        except Exception:
-            pass
+        except (ValueError, TypeError, IndexError) as e:
+            logger.debug("CPU 值解析跳过 | instance=%s | error=%s", key, e)
 
     for r in gpu_results:
         key = r["metric"].get("instanceName", "unknown")
         if key in instances:
             try:
                 instances[key]["gpu"] = float(r["value"][1])
-            except Exception:
-                pass
+            except (ValueError, TypeError, IndexError) as e:
+                logger.debug("GPU 值解析跳过 | instance=%s | error=%s", key, e)
 
     for r in gmem_used:
         key = r["metric"].get("instanceName", "unknown")
         if key in instances:
             try:
                 instances[key]["gmem_used"] = float(r["value"][1]) / 1024
-            except Exception:
-                pass
+            except (ValueError, TypeError, IndexError) as e:
+                logger.debug("GPU 显存(used)值解析跳过 | instance=%s | error=%s", key, e)
 
     for r in gmem_total:
         key = r["metric"].get("instanceName", "unknown")
         if key in instances:
             try:
                 instances[key]["gmem_total"] = float(r["value"][1]) / 1024
-            except Exception:
-                pass
+            except (ValueError, TypeError, IndexError) as e:
+                logger.debug("GPU 显存(total)值解析跳过 | instance=%s | error=%s", key, e)
 
     # 按用户分组汇总
     user_map: dict[str, list] = {}

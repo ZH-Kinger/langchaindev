@@ -2,6 +2,7 @@
 飞书企业自建应用消息推送工具。
 流程：用 app_id + app_secret 换取 app_access_token → 调 IM API 发送富文本卡片。
 """
+import logging
 import re
 import requests
 from datetime import datetime
@@ -9,6 +10,8 @@ from pydantic import BaseModel, Field
 from langchain.tools import StructuredTool
 
 from config.settings import settings
+
+logger = logging.getLogger(__name__)
 
 
 # ── 颜色 / 状态映射 ─────────────────────────────────────────────────────────────
@@ -90,7 +93,8 @@ def _get_user_name(open_id: str) -> str:
         )
         items = resp.json().get("data", {}).get("items", [])
         return items[0].get("name", "") if items else ""
-    except Exception:
+    except Exception as e:
+        logger.warning("获取飞书用户名失败 | open_id=%s | error=%s", open_id, e)
         return ""
 
 
