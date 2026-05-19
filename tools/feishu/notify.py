@@ -252,7 +252,7 @@ def _grafana_buttons(node_filter: str = "") -> list:
     """
     import json
     import urllib.parse
-    from tools.prometheus_tool import grafana_shortcuts
+    from tools.aliyun.prometheus import grafana_shortcuts
 
     if not settings.GRAFANA_URL:
         return []
@@ -448,7 +448,7 @@ def send_feishu_report(
         image_key   = None
         chart_error = None
         try:
-            from tools.prometheus_tool import fetch_raw_series
+            from tools.aliyun.prometheus import fetch_raw_series
             from utils.chart_builder import build_metrics_chart
             series    = fetch_raw_series()
             png_bytes = build_metrics_chart(series)

@@ -5,7 +5,7 @@ CPU 趋势分析工具（已升级）。
 """
 from pydantic import BaseModel, Field
 from langchain.tools import StructuredTool
-from tools.prometheus_tool import query_prometheus_metrics
+from tools.aliyun.prometheus import query_prometheus_metrics
 
 
 class CPUAnalysisSchema(BaseModel):

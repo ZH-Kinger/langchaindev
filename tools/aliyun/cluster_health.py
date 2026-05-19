@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from langchain.tools import StructuredTool
 
 from config.settings import settings
-from tools.dsw_instance_inspector import (
+from tools.aliyun.dsw_inspector import (
     _fetch_instant,
     _fetch_gpu_trend,
     _classify_trend,
@@ -50,7 +50,7 @@ def cluster_health_report(top_n: int = 20) -> str:
         return "❌ PROMETHEUS_URL 未配置，无法读取指标。"
 
     try:
-        from tools.pai_dsw_tool import get_running_gpu_instances
+        from tools.aliyun.pai_dsw import get_running_gpu_instances
         running = get_running_gpu_instances()
     except Exception as e:
         return f"❌ 获取实例列表失败：{e}"

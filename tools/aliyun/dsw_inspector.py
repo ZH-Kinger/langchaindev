@@ -44,7 +44,7 @@ _TREND_STEP    = "120s"
 # ── 并行拉取即时值 ────────────────────────────────────────────────────────────────
 
 def _fetch_instant(name: str) -> dict[str, float | None]:
-    from tools.prometheus_tool import _query_instant
+    from tools.aliyun.prometheus import _query_instant
 
     def _one(key: str, promql: str) -> tuple[str, float | None]:
         try:
@@ -68,7 +68,7 @@ def _fetch_instant(name: str) -> dict[str, float | None]:
 
 def _fetch_gpu_trend(name: str) -> list[float]:
     """拉取最近 30 分钟的 GPU SM 利用率时序。"""
-    from tools.prometheus_tool import _query_range
+    from tools.aliyun.prometheus import _query_range
     end   = time.time()
     start = end - _TREND_MINUTES * 60
     promql = f'avg(AliyunPaidsw_INSTANCE_GPU_SM_UTIL{{instanceName="{name}"}})'
@@ -168,7 +168,7 @@ def _get_instance_meta(name: str) -> dict:
 
     # ② DSW API（兜底，获取真实状态）
     try:
-        from tools.pai_dsw_tool import _list_instances
+        from tools.aliyun.pai_dsw import _list_instances
         instances = _list_instances()
         for inst in instances:
             if inst.get("name") == name:

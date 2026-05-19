@@ -63,14 +63,21 @@ _INSTANCE_PROMQL: dict[str, str] = {
     "pcie_tx":        'avg(AliyunPaidsw_INSTANCE_GPU_PCIE_TRANSMIT{{instanceName="{n}"}})',
     # ── RDMA（多节点训练）──────────────────────────────────────────────────────
     "rdma_seq_err":   'avg(rate(AliyunPaidsw_INSTANCE_RDMA_PACKET_SEQUENCE_ERROR{{instanceName="{n}"}}[5m]))',
+    # ── GPU 型号（用于动态阈值选取）────────────────────────────────────────────
+    "gpu_model":      'count by (gpu_product)(AliyunPaidsw_INSTANCE_GPU_SM_UTIL{{instanceName="{n}"}})',
 }
 
 
 # ── 并行拉取 ─────────────────────────────────────────────────────────────────────
 
 def _fetch_all_metrics(name: str, start: float, end: float) -> dict[str, list]:
-    """并行查询所有指标，返回 {key: [float...]}，缺失指标为空列表。"""
-    from tools.prometheus_tool import _query_range
+    """并行查询所有指标，返回 {key: [float...]}，缺失指标为空列表。
+    特殊键 '_gpu_model_str' 存储 GPU 型号字符串（非数值）。
+    """
+    from tools.aliyun.prometheus import _query_range, _query_instant
+
+    # gpu_model 单独用即时查询提取 label，不参与数值并行拉取
+    _numeric_promql = {k: v for k, v in _INSTANCE_PROMQL.items() if k != "gpu_model"}
 
     def _fetch_one(key: str, tmpl: str) -> tuple[str, list]:
         promql = tmpl.format(n=name)
@@ -85,7 +92,7 @@ def _fetch_all_metrics(name: str, start: float, end: float) -> dict[str, list]:
 
     result: dict[str, list] = {}
     with ThreadPoolExecutor(max_workers=8) as pool:
-        futures = {pool.submit(_fetch_one, k, q): k for k, q in _INSTANCE_PROMQL.items()}
+        futures = {pool.submit(_fetch_one, k, q): k for k, q in _numeric_promql.items()}
         for fut in as_completed(futures):
             try:
                 k, v = fut.result(timeout=30)
@@ -94,7 +101,40 @@ def _fetch_all_metrics(name: str, start: float, end: float) -> dict[str, list]:
                 metric_key = futures[fut]
                 logger.warning("GPU 指标获取超时或失败 | key=%s | error=%s", metric_key, e)
                 result[metric_key] = []
+
+    # 提取 GPU 型号 label
+    try:
+        model_promql = _INSTANCE_PROMQL["gpu_model"].format(n=name)
+        model_series = _query_instant(model_promql)
+        gpu_model_str = ""
+        if model_series:
+            raw = model_series[0].get("metric", {}).get("gpu_product", "")
+            gpu_model_str = raw.upper()
+        result["_gpu_model_str"] = gpu_model_str  # type: ignore[assignment]
+    except Exception:
+        result["_gpu_model_str"] = ""  # type: ignore[assignment]
+
     return result
+
+
+# ── GPU 型号阈值表 ────────────────────────────────────────────────────────────────
+# temp_crit: 触发热管理告警的温度上限（°C）
+# power_crit: 触发热管理告警的功耗上限（W）
+_GPU_THRESHOLDS: dict[str, dict] = {
+    "A10":  {"temp_crit": 85,  "power_crit": 145},
+    "A100": {"temp_crit": 83,  "power_crit": 380},
+    "H100": {"temp_crit": 83,  "power_crit": 700},
+    "V100": {"temp_crit": 83,  "power_crit": 300},
+    "T4":   {"temp_crit": 83,  "power_crit": 70},
+}
+_GPU_THRESHOLDS_DEFAULT = {"temp_crit": 85, "power_crit": 145}
+
+
+def _gpu_thresholds(gpu_model: str) -> dict:
+    for model_key in _GPU_THRESHOLDS:
+        if model_key in gpu_model:
+            return _GPU_THRESHOLDS[model_key]
+    return _GPU_THRESHOLDS_DEFAULT
 
 
 # ── 统计量 ───────────────────────────────────────────────────────────────────────
@@ -182,6 +222,7 @@ def _build_feature_vec(raw: dict[str, list], gpu_count: int) -> dict:
         # 元信息
         "gpu_count":     gpu_count,
         "data_points":   len(raw.get("gpu_util", [])),
+        "gpu_model":     raw.get("_gpu_model_str", ""),
     }
 
 
@@ -205,7 +246,7 @@ def _get_purpose_from_jira(ticket_key: str) -> str:
     if not ticket_key:
         return ""
     try:
-        from tools.jira_tool import _s as _js, _base, parse_ticket_metadata
+        from tools.jira.ticket import _s as _js, _base, parse_ticket_metadata
         s = _js()
         if not s:
             return ""
@@ -247,6 +288,7 @@ def _classify(fv: dict) -> list[str]:
     gpu_p10      = fv.get("gpu_p10") or 0
     gpu_p90      = fv.get("gpu_p90") or 0
     gpu_std      = fv.get("gpu_std") or 0
+    thresholds   = _gpu_thresholds(fv.get("gpu_model", ""))
 
     # ── GPU 硬件故障 ──────────────────────────────────────────────────────────
     if gpu_health is not None and gpu_health < 1:
@@ -294,8 +336,9 @@ def _classify(fv: dict) -> list[str]:
     if cpfs_lat is not None and cpfs_lat > 5:
         tags.append("cpfs_slow")
 
-    # ── 热管理风险（高温 or 高功耗）─────────────────────────────────────────
-    if (temp_max is not None and temp_max > 85) or (power_max is not None and power_max > 145):
+    # ── 热管理风险（高温 or 高功耗，阈值按 GPU 型号动态选取）────────────────────
+    if (temp_max is not None and temp_max > thresholds["temp_crit"]) or \
+       (power_max is not None and power_max > thresholds["power_crit"]):
         tags.append("thermal_risk")
 
     # ── 多卡：未用 NVLink（梯度同步走 PCIe，效率低）─────────────────────────
@@ -806,7 +849,46 @@ def analyze_user_gpu_training(
             advices = _build_advices(tags, task, fv)
             all_advices.extend(advices)
 
-    # ── 汇总优化建议 ─────────────────────────────────────────────────────────
+    # ── 多实例横向对比 ────────────────────────────────────────────────────────
+    if len(profiles) > 1:
+        lines.append("---")
+        lines.append("## 实例横向对比")
+        lines.append("")
+        lines.append("| 实例 | GPU利用率 | Tensor Core参与率 | 显存占用 | 主要瓶颈 |")
+        lines.append("|------|-----------|-------------------|----------|----------|")
+
+        def _rank_val(profiles: list, key: str) -> dict:
+            vals = {p["name"]: p["fv"].get(key) for p in profiles if p["fv"].get(key) is not None}
+            return vals
+
+        gpu_vals    = _rank_val(profiles, "gpu_avg")
+        tensor_vals = _rank_val(profiles, "tensor_ratio")
+        mem_vals    = _rank_val(profiles, "mem_pct")
+
+        best_gpu  = max(gpu_vals,    key=gpu_vals.get)    if gpu_vals    else None
+        worst_gpu = min(gpu_vals,    key=gpu_vals.get)    if gpu_vals    else None
+        best_tc   = max(tensor_vals, key=tensor_vals.get) if tensor_vals else None
+
+        for p in profiles:
+            name = p["name"]
+            fv   = p["fv"]
+            tags = p["tags"]
+
+            gpu_str    = f"{fv['gpu_avg']:.1f}%" if fv.get("gpu_avg") is not None else "—"
+            tc_str     = f"{fv['tensor_ratio']*100:.0f}%" if fv.get("tensor_ratio") is not None else "—"
+            mem_str    = f"{fv['mem_pct']:.0f}%" if fv.get("mem_pct") is not None else "—"
+            top_tag    = _TAG_LABEL.get(tags[0], tags[0]) if tags else "—"
+
+            marks = []
+            if name == best_gpu:  marks.append("🏆GPU最高")
+            if name == worst_gpu and len(profiles) > 1: marks.append("⚠️GPU最低")
+            if name == best_tc:   marks.append("🏆TC最高")
+            name_cell = f"`{name}` " + " ".join(marks) if marks else f"`{name}`"
+
+            lines.append(f"| {name_cell} | {gpu_str} | {tc_str} | {mem_str} | {top_tag} |")
+
+        lines.append("")
+
     if not all_advices:
         lines.append("✅ 所有实例运行状态良好，暂无高优先级优化项。")
     else:

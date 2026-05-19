@@ -23,6 +23,12 @@ alibabacloud-credentials==1.0.8
 alibabacloud-credentials-api==1.0.0
 alibabacloud_gateway_spi==0.0.3
 darabonba-core==1.0.5
+# STS / RAM / ECS / OSS / SLS（通过 STS AssumeRole 接入）
+alibabacloud-sts20150401>=1.1.4
+alibabacloud-ram20150501>=1.0.0
+alibabacloud-ecs20140526>=4.1.0
+oss2>=2.18.0
+aliyun-log-python-sdk>=0.9.0
 
 # Storage & Infrastructure
 redis==7.4.0
@@ -36,3 +42,8 @@ pandas==3.0.1
 
 # Env
 python-dotenv
+
+# Testing
+pytest>=7.4
+pytest-mock>=3.12
+fakeredis>=2.20

@@ -1,8 +1,8 @@
 from functools import lru_cache
 from langchain.agents import create_tool_calling_agent, AgentExecutor
-from tools.system_tool import system_stats_tool
-from tools.analysis_skills import alarm_reduction_tool
-from tools.ops_skills import k8s_restart_tool
+from tools.ops.system import system_stats_tool
+from tools.ops.analysis import alarm_reduction_tool
+from tools.ops.k8s import k8s_restart_tool
 from core.llm_factory import get_cloud_llm, get_edge_llm
 from core.prompts_agent import get_watcher_prompt, get_manager_prompt
 

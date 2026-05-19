@@ -3,7 +3,6 @@ GPU 集群智能顾问工具。
 基于实时 Prometheus 指标对 GPU 集群进行全面诊断，
 给出负载均衡、散热管理、任务调度、成本优化等针对性建议。
 """
-import re
 import time
 
 from pydantic import BaseModel, Field
@@ -86,13 +85,9 @@ def _advice_utilization(gpu: dict) -> list:
 
 
 def _advice_thermal(gpu: dict) -> list:
-    items  = []
-    detail = gpu.get("detail", "")
-
-    m_ta = re.search(r"温度均值:\s*([\d.]+)", detail)
-    m_tm = re.search(r"最高温:\s*([\d.]+)", detail)
-    temp_avg = float(m_ta.group(1)) if m_ta else None
-    temp_max = float(m_tm.group(1)) if m_tm else None
+    items    = []
+    temp_avg = gpu.get("temp_avg")
+    temp_max = gpu.get("temp_max")
 
     if temp_avg is None:
         items.append(
@@ -205,6 +200,29 @@ def _advice_cost(gpu: dict, cpu: dict) -> list:
 
 # ── 主函数 ────────────────────────────────────────────────────────────────────
 
+def _send_trend_alert(gpu_m: dict, scope: str, duration_minutes: int) -> None:
+    """当 GPU 利用率持续下降且曾经活跃时，通过飞书发送告警。"""
+    try:
+        from tools.feishu.notify import _get_access_token, _send_card
+        token = _get_access_token()
+        card = {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "title": {"tag": "plain_text", "content": "⚠️ GPU 利用率持续下降告警"},
+                "template": "orange",
+            },
+            "elements": [{"tag": "markdown", "content": (
+                f"**范围**：{scope}　**周期**：近 {duration_minutes} 分钟\n"
+                f"**当前均值**：{gpu_m.get('avg', 0):.1f}%　**趋势**：{gpu_m.get('trend', '')}\n\n"
+                "可能原因：训练任务已卡住、DataLoader 阻塞或进程异常退出。\n"
+                "建议：检查训练日志、DataLoader 状态及 Pod 健康状况。"
+            )}],
+        }
+        _send_card(token, card)
+    except Exception:
+        pass  # 告警失败不影响主流程
+
+
 def advise_gpu_cluster(
     focus: str = "all",
     node_filter: str = "",
@@ -214,7 +232,7 @@ def advise_gpu_cluster(
     if not settings.PROMETHEUS_URL:
         return "❌ PROMETHEUS_URL 未配置，无法获取集群指标。"
 
-    from tools.prometheus_tool import _analyze_single
+    from tools.aliyun.prometheus import _analyze_single
 
     end   = time.time()
     start = end - duration_minutes * 60
@@ -274,6 +292,10 @@ def advise_gpu_cluster(
         cta = "⚠️ **近期跟进**：存在潜在风险，建议在本周内完成优化。"
     else:
         cta = "📌 **持续优化**：集群运行稳定，可按优先级逐步落地以上建议。"
+
+    # ── 趋势告警：利用率持续下降且曾经活跃，可能训练已卡住 ─────────────────────
+    if gpu_m.get("trend") == "下降" and gpu_m.get("avg", 0) > 50:
+        _send_trend_alert(gpu_m, scope, duration_minutes)
 
     return "\n".join(header + body) + cta
 

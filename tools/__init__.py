@@ -1,38 +1,51 @@
-# tools/__init__.py
-from .system_tool import system_stats_tool
-from .rag_tool import query_knowledge
-from .analysis_skills import alarm_reduction_tool
-from .ops_skills import k8s_restart_tool
-from .monitor_skills import cpu_analyzer_tool
-from .prometheus_tool import prometheus_tool
-from .feishu_tool import feishu_tool
-from .gpu_advisor_tool import gpu_advisor_tool
-from .pai_dsw_tool import pai_dsw_tool
-from .jira_tool import jira_tool
-from .ram_tool import ram_tool
-from .gpu_training_advisor import gpu_training_advisor_tool
-from .dsw_instance_inspector import dsw_instance_inspector_tool
-from .cluster_health_tool import cluster_health_report_tool
-from .jira_workflow_tool import jira_workflow_tool
-from .github_workflow_tool import github_workflow_tool
+# tools/__init__.py — 工具按云服务/业务功能分类，子包统一暴露
+from .aliyun import (
+    pai_dsw_tool,
+    ecs_tool,
+    oss_tool,
+    sls_tool,
+    ram_tool,
+    prometheus_tool,
+    dsw_instance_inspector_tool,
+    gpu_advisor_tool,
+    gpu_training_advisor_tool,
+    cluster_health_report_tool,
+)
+from .feishu import feishu_tool
+from .jira import jira_tool, jira_workflow_tool
+from .github import github_workflow_tool
+from .knowledge import query_knowledge
+from .ops import (
+    system_stats_tool,
+    alarm_reduction_tool,
+    cpu_analyzer_tool,
+    k8s_restart_tool,
+)
 
 ALL_TOOLS = [
-    system_stats_tool,
-    query_knowledge,
-    alarm_reduction_tool,
-    k8s_restart_tool,
-    cpu_analyzer_tool,
-    prometheus_tool,
-    feishu_tool,
-    gpu_advisor_tool,
+    # ── 阿里云 ────────────────────────────────────────────────
     pai_dsw_tool,
-    jira_tool,
+    ecs_tool,
+    oss_tool,
+    sls_tool,
     ram_tool,
-    gpu_training_advisor_tool,
+    prometheus_tool,
     dsw_instance_inspector_tool,
+    gpu_advisor_tool,
+    gpu_training_advisor_tool,
     cluster_health_report_tool,
+    # ── 飞书 / Jira / GitHub ─────────────────────────────────
+    feishu_tool,
+    jira_tool,
     jira_workflow_tool,
     github_workflow_tool,
+    # ── 知识库 ───────────────────────────────────────────────
+    query_knowledge,
+    # ── 运维通用 ─────────────────────────────────────────────
+    system_stats_tool,
+    alarm_reduction_tool,
+    cpu_analyzer_tool,
+    k8s_restart_tool,
 ]
 
 # 工具分组：供 agent.py 做关键词路由，单一来源
@@ -48,6 +61,9 @@ TOOL_GROUPS = {
     "inspect":   {"inspect_dsw_instance", "manage_pai_dsw"},
     "cluster":   {"cluster_health_report", "inspect_dsw_instance"},
     "workflow":  {"query_jira_workflow", "query_github_workflow"},
+    "ecs":       {"manage_ecs"},
+    "oss":       {"manage_oss"},
+    "sls":       {"manage_sls"},
 }
 
 # 启动时校验 TOOL_GROUPS 中的名字与 ALL_TOOLS 一致，防止静默路由失效

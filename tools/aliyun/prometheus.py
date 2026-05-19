@@ -232,6 +232,8 @@ def _analyze_single(key: str, node_filter: str, start: float, end: float) -> dic
             "avg": round(util_avg, 2), "max": round(util_max, 2),
             "trend": _trend_analysis(util_vals) if util_vals else "无数据",
             "status": status, "color": color,
+            "temp_avg": round(temp_avg, 1),
+            "temp_max": round(temp_max, 1),
             "detail": (
                 f"SM利用率均值: {util_avg:.1f}% | 峰值: {util_max:.1f}% | "
                 f"温度均值: {temp_avg:.1f}°C | 最高温: {temp_max:.1f}°C"

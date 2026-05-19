@@ -109,17 +109,27 @@ def manage_pai_dsw(
     save_image: bool = False,
     accelerator_type: str = "GPU",
     create_config_json: str = "",
+    open_id: str = "",
     _ak_id: str = "",
     _ak_secret: str = "",
 ) -> str:
-    """管理阿里云 PAI DSW 实例：查询、启动、停止、删除、创建、资源发现。"""
-    if _ak_id and _ak_secret:
+    """管理阿里云 PAI DSW 实例：查询、启动、停止、删除、创建、资源发现。
+
+    凭证优先级：
+      1. open_id 非空 → STS AssumeRole（推荐，按用户隔离）
+      2. _ak_id/_ak_secret 显式传入 → 直接用（兼容旧调用）
+      3. 都没有 → 用 settings.PAI_DSW_ACCESS_KEY_* 全局凭证
+    """
+    if open_id:
+        from utils.aliyun_client_factory import get_pai_dsw_client
+        client = get_pai_dsw_client(open_id)
+    elif _ak_id and _ak_secret:
         region = settings.PAI_DSW_REGION_ID or "cn-hangzhou"
         client = _get_client(region, _ak_id, _ak_secret)
     else:
         client = _client()
     if client is None:
-        return "❌ PAI_DSW_ACCESS_KEY_ID / PAI_DSW_ACCESS_KEY_SECRET 未配置，请在 .env 中设置。"
+        return "❌ 凭证不可用：请确认 open_id 已建立 RAM 映射，或在 .env 中设置 PAI_DSW_ACCESS_KEY_*。"
 
     action = action.strip().lower()
     ws = workspace_id or settings.PAI_DSW_WORKSPACE_ID

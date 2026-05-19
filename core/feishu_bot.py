@@ -32,8 +32,8 @@ from config.settings import settings
 from utils.logger import get_logger, set_trace_id, clear_trace_id, register_error_callback
 
 logger = get_logger(__name__)
-from tools.feishu_tool import _get_access_token
-from tools.jira_tool import create_gpu_ticket, add_comment as jira_comment
+from tools.feishu.notify import _get_access_token
+from tools.jira.ticket import create_gpu_ticket, add_comment as jira_comment
 from core.dsw_scheduler import (scheduler, _redis_get, _redis_set, _redis_delete,
                                 _all_tracked_keys, check_quota, _cost_str, _set_approved)
 
@@ -168,7 +168,10 @@ _GPU_STATE_TTL    = 600   # 10 分钟内等待用户填写
 
 
 def _send_ak_register_card(message_id: str) -> None:
-    """发送 AK/SK 注册卡片（模板优先，无模板则发文字引导）。"""
+    """发送 AK/SK 绑定卡片：
+    - 优先用飞书卡片构建器模板（FEISHU_AK_REGISTER_TEMPLATE_ID，含密码输入框）
+    - 无模板时降级为文字引导，但提示用户应使用模板卡片而非聊天明文
+    """
     template_id = settings.FEISHU_AK_REGISTER_TEMPLATE_ID
     if template_id:
         content = json.dumps({"type": "template", "data": {"template_id": template_id}})
@@ -182,19 +185,27 @@ def _send_ak_register_card(message_id: str) -> None:
             )
             if resp.json().get("code") == 0:
                 return
-        except Exception as e:
+        except Exception:
             logger.error("[AK注册卡片] 异常", exc_info=True)
-    # 无模板降级为文字引导
+
+    # 无模板降级：文字引导（明确告诉用户不要把 AK/SK 直接发到聊天里）
     _feishu_reply(message_id,
-        "首次申请 GPU 需要先绑定阿里云账号，请私信 Bot 发送：\n\n"
-        "```\n注册AK: 你的AccessKeyId 你的AccessKeySecret\n```\n\n"
-        "绑定后发送消息即可继续申请。")
+        "## 🔐 绑定阿里云 AK/SK\n\n"
+        "绑定后 Bot 会用你的 RAM 用户身份创建资源，控制台能直接看到归属。\n\n"
+        "**推荐方式**：让管理员在飞书卡片构建器配置 `FEISHU_AK_REGISTER_TEMPLATE_ID`\n"
+        "  → 之后绑定走表单卡片，AccessKey Secret 输入框为密码遮蔽，不会出现在聊天记录中。\n\n"
+        "**临时方式**（不推荐，有泄密风险）：私信 Bot 发送\n"
+        "```\n绑定RAM: 你的RAM用户名\n```\n"
+        "→ 仅建立 RAM 映射，资源归属是 Bot 角色（不是你本人），但操作审计能查到。\n\n"
+        "其他命令：\n"
+        "- `查看绑定` — 查看当前绑定状态\n"
+        "- `解绑AK` — 删除已加密的 AK/SK")
 
 
 def _send_gpu_card(message_id: str) -> None:
     """回复 GPU 申请卡片：先发可用镜像参考，再发表单卡片。"""
     try:
-        from tools.pai_dsw_tool import list_dsw_resources
+        from tools.aliyun.pai_dsw import list_dsw_resources
         images = list_dsw_resources().get("images", [])
         if images:
             lines = ["**可用镜像（复制填入卡片「镜像」字段）：**"]
@@ -346,7 +357,7 @@ def _feishu_reply(message_id: str, text: str) -> None:
 def _feishu_reply_with_chart(message_id: str, text: str, image_key: str) -> None:
     """以交互卡片形式回复：文本回答 + 实时指标趋势图"""
     from datetime import datetime
-    from tools.feishu_tool import _upload_image  # noqa: F401 (确保路径可用)
+    from tools.feishu.notify import _upload_image  # noqa: F401 (确保路径可用)
     card = {
         "config": {"wide_screen_mode": True},
         "elements": [
@@ -405,67 +416,121 @@ def _feishu_send(chat_id: str, text: str) -> None:
         pass
 
 
-# ── 用户 AK/SK 注册（每人用自己的阿里云凭证创建实例）────────────────────────────
+# ── 飞书↔阿里云身份绑定 ────────────────────────────────────────────────────
+#
+# 两条路径并存：
+#   A. 用户 AK/SK（推荐）：通过飞书表单卡片填入，加密存 Redis
+#      → 资源归属 = RAM 用户本人 ✅
+#   B. RAM 映射 + STS（兜底）：根据飞书姓名匹配 RAM 用户，调 STS AssumeRole
+#      → 资源归属 = BotRole/session（审计能查到 open_id）
 
-_AK_PREFIX = "feishu:user_ak:"
-_AK_PATTERN = re.compile(
-    r"注册\s*ak\s*[:\s]+(\S+)\s+(\S+)",
-    re.IGNORECASE,
-)
-
-
-def _save_user_ak(open_id: str, ak_id: str, ak_secret: str) -> None:
-    try:
-        from utils.redis_client import get_redis
-        get_redis().set(f"{_AK_PREFIX}{open_id}",
-                        json.dumps({"ak_id": ak_id, "ak_secret": ak_secret}))
-    except Exception:
-        pass
-
-
-def _get_user_ak(open_id: str) -> tuple[str, str]:
-    """返回 (ak_id, ak_secret)，未注册时返回全局默认值。"""
-    try:
-        from utils.redis_client import get_redis
-        raw = get_redis().get(f"{_AK_PREFIX}{open_id}")
-        if raw:
-            d = json.loads(raw)
-            return d["ak_id"], d["ak_secret"]
-    except Exception:
-        pass
-    return settings.PAI_DSW_ACCESS_KEY_ID, settings.PAI_DSW_ACCESS_KEY_SECRET
+_RAM_BIND_PATTERN = re.compile(r"绑定\s*RAM\s*[:：\s]+(\S+)", re.IGNORECASE)
 
 
 def _is_registered(open_id: str) -> bool:
-    """检查用户是否已在 Redis 中注册个人 AK/SK。"""
+    """检查飞书用户是否已建立任意一种凭证关联：
+    - 用户 AK/SK 已加密绑定，或
+    - RAM 映射已建立（可走 STS 兜底）
+    """
     if not open_id:
         return False
+    # 用户 AK 优先（不解密、只检查存在）
     try:
-        from utils.redis_client import get_redis
-        return bool(get_redis().exists(f"{_AK_PREFIX}{open_id}"))
+        from utils.aliyun_user_creds import has_user_ak
+        if has_user_ak(open_id):
+            return True
+    except Exception:
+        pass
+    # 退而求其次：RAM 映射存在
+    try:
+        from tools.aliyun.ram import get_ram_user_by_open_id
+        info = get_ram_user_by_open_id(open_id)
+        return bool(info and info.get("user_name"))
     except Exception:
         return False
 
 
-def _handle_ak_register(message_id: str, open_id: str, text: str) -> bool:
-    """若消息是注册指令则处理并返回 True，否则返回 False。"""
-    m = _AK_PATTERN.search(text)
-    if not m:
-        # 检查不带参数的注册引导
-        if re.search(r"注册\s*ak|绑定\s*ak|设置\s*(阿里云)?\s*ak", text, re.IGNORECASE):
+def _handle_ram_bind(message_id: str, open_id: str, text: str) -> bool:
+    """处理「绑定RAM」「解绑AK」「查看绑定」「注册AK / 绑定AK」等文本指令。"""
+    # 「解绑AK」
+    if re.search(r"解绑\s*ak|删除\s*ak|取消\s*绑定", text, re.IGNORECASE):
+        from utils.aliyun_user_creds import delete_user_ak
+        if delete_user_ak(open_id):
             _feishu_reply(message_id,
-                "请私信 Bot 发送以下格式完成注册（消息仅在私聊中发送，保障安全）：\n\n"
-                "```\n注册AK: LTAI5tXXXXXXXX XXXXXXXXXXXXXXXXXXXXXXXX\n```\n\n"
-                "注册后 Bot 将用你自己的阿里云账号创建 DSW 实例，实例「创建人」将显示你的名字。")
-            return True
+                "✅ 已解绑你的阿里云 AK/SK，加密数据已从 Redis 删除。\n"
+                "下次 Bot 操作将走 STS 兜底路径（资源归属为 Bot 角色）。")
+        else:
+            _feishu_reply(message_id, "ℹ️ 你尚未绑定 AK/SK，无需解绑。")
+        return True
+
+    # 「查看绑定 / 我的绑定」
+    if re.search(r"查看\s*绑定|我的\s*绑定|绑定\s*状态", text, re.IGNORECASE):
+        _send_bind_status(message_id, open_id)
+        return True
+
+    # 「注册AK / 绑定AK」→ 弹出飞书表单卡片
+    if re.search(r"注册\s*ak|绑定\s*ak", text, re.IGNORECASE):
+        _send_ak_register_card(message_id)
+        return True
+
+    # 「绑定RAM: <ram_user_name>」→ 仅建立 RAM 映射（走 STS 兜底）
+    m = _RAM_BIND_PATTERN.search(text)
+    if not m:
         return False
-    ak_id, ak_secret = m.group(1), m.group(2)
-    _save_user_ak(open_id, ak_id, ak_secret)
-    _feishu_reply(message_id,
-        "✅ AK/SK 已绑定！之后通过 Bot 创建的 DSW 实例将使用你自己的阿里云账号，"
-        "实例「创建人」将显示为你的 RAM 用户名。\n\n"
-        "⚠️ 请立即撤回此条消息（长按 → 撤回），避免 AK/SK 在聊天记录中留存。")
+
+    ram_user_name = m.group(1).strip()
+    try:
+        from tools.aliyun.ram import list_ram_users_api, save_user_map
+        ram_users = list_ram_users_api()
+        matched = next((u for u in ram_users if u["user_name"] == ram_user_name), None)
+        if not matched:
+            _feishu_reply(message_id,
+                f"❌ 未找到 RAM 用户 `{ram_user_name}`。\n"
+                "请确认用户名拼写正确，或联系运维人员协助绑定。")
+            return True
+        save_user_map(open_id, matched["display_name"] or ram_user_name, matched["user_id"])
+        _feishu_reply(message_id,
+            f"✅ 已建立 RAM 映射：**{matched['display_name'] or ram_user_name}**。\n"
+            "此为兜底路径（走 STS，资源归属为 Bot 角色）。\n"
+            "如希望资源归属直接显示你的 RAM 用户名，请发送「绑定AK」走表单卡片。")
+    except Exception as e:
+        logger.error("[RAM绑定] 失败", exc_info=True)
+        _feishu_reply(message_id, f"❌ 绑定失败：{e}")
     return True
+
+
+def _send_bind_status(message_id: str, open_id: str) -> None:
+    """展示当前用户的绑定状态。"""
+    lines = ["## 你的阿里云身份绑定"]
+    try:
+        from utils.aliyun_user_creds import get_user_ak_meta
+        from datetime import datetime
+        meta = get_user_ak_meta(open_id)
+        if meta:
+            created = datetime.fromtimestamp(meta["created_ts"]).strftime("%Y-%m-%d %H:%M")
+            last_u  = datetime.fromtimestamp(meta["last_used_ts"]).strftime("%Y-%m-%d %H:%M")
+            lines.append(f"- **AK 绑定**：✅  AccessKey ID `{meta['ak_id_masked']}`")
+            lines.append(f"  - 绑定时间：{created}")
+            lines.append(f"  - 最近使用：{last_u}")
+            lines.append(f"  - 资源归属：**你的 RAM 用户**（阿里云控制台可直接看到）")
+        else:
+            lines.append("- **AK 绑定**：❌ 未绑定（发送「绑定AK」可配置）")
+    except Exception:
+        lines.append("- **AK 绑定**：查询失败")
+
+    try:
+        from tools.aliyun.ram import get_ram_user_by_open_id
+        info = get_ram_user_by_open_id(open_id) or {}
+        if info.get("user_name"):
+            lines.append(f"- **RAM 映射**：✅  {info.get('user_name')}（STS 兜底路径）")
+        else:
+            lines.append("- **RAM 映射**：❌ 未建立")
+    except Exception:
+        pass
+
+    lines.append("")
+    lines.append("发送「绑定AK」绑定 AK/SK · 「解绑AK」取消绑定")
+    _feishu_reply(message_id, "\n".join(lines))
 
 
 # ── 飞书用户 ↔ RAM 用户自动映射 ──────────────────────────────────────────────
@@ -475,11 +540,11 @@ def _auto_map_user(open_id: str) -> None:
     if not open_id:
         return
     try:
-        from tools.ram_tool import get_user_map, save_user_map, list_ram_users_api
+        from tools.aliyun.ram import get_user_map, save_user_map, list_ram_users_api
         if open_id in get_user_map():
             return  # 已有映射，跳过
         # 查飞书姓名
-        from tools.feishu_tool import _get_user_name
+        from tools.feishu.notify import _get_user_name
         feishu_name = _get_user_name(open_id)
         if not feishu_name:
             return
@@ -637,9 +702,9 @@ def _process_message(message_id: str, chat_id: str, user_text: str, open_id: str
 
         # 每次回复都尝试生成实时指标趋势图，失败时降级为纯文本回复
         try:
-            from tools.prometheus_tool import fetch_raw_series
+            from tools.aliyun.prometheus import fetch_raw_series
             from utils.chart_builder import build_metrics_chart
-            from tools.feishu_tool import _upload_image
+            from tools.feishu.notify import _upload_image
             series    = fetch_raw_series()
             png_bytes = build_metrics_chart(series)
             token     = _get_access_token()
@@ -663,32 +728,49 @@ def _process_action(action_name: str, action_val: dict, open_id: str, chat_id: s
     """所有卡片动作的共享处理逻辑，返回飞书期待的响应 dict。
     耗时操作（Jira / DSW API）放后台线程，同步只做状态更新和 UI 反馈。
     """
-    # ── AK/SK 注册表单提交 ────────────────────────────────────────────────────
+    # ── AK/SK 表单卡片提交（Fernet 加密存 Redis，资源归属为用户本人）─────────
     if action_name == "submit_ak_register" and form_value:
-        user_name  = (form_value.get("user_name") or "").strip()
-        ak_id      = (form_value.get("ak_id") or "").strip()
-        ak_secret  = (form_value.get("ak_secret") or "").strip()
+        ak_id     = (form_value.get("ak_id") or "").strip()
+        ak_secret = (form_value.get("ak_secret") or "").strip()
+        # 可选：用户也可以同时填 ram_user_name 显式指定 RAM 用户（不填则按飞书姓名自动匹配）
+        ram_user_name = (form_value.get("ram_user_name") or form_value.get("user_name") or "").strip()
 
-        if not user_name:
-            return {"toast": {"type": "error", "content": "请填写姓名"}}
         if not ak_id or not ak_secret:
             return {"toast": {"type": "error", "content": "请填写 AccessKey ID 和 Secret"}}
+        if not ak_id.startswith(("LTAI", "ltai")):
+            return {"toast": {"type": "error", "content": "AccessKey ID 格式不正确（应以 LTAI 开头）"}}
 
-        # 保存 AK/SK
-        _save_user_ak(open_id, ak_id, ak_secret)
-        # 同步写入 RAM 映射表
-        from tools.ram_tool import save_user_map
-        save_user_map(open_id, user_name, "")
+        # 加密存储 AK/SK
+        from utils.aliyun_user_creds import save_user_ak
+        if not save_user_ak(open_id, ak_id, ak_secret):
+            return {"toast": {"type": "error", "content": "保存失败（Redis 不可达？）"}}
 
-        # 注册完后如果有待处理的 GPU 申请，推送 GPU 卡片
+        # 同步建立 RAM 映射：优先用用户填的 ram_user_name，否则尝试自动匹配
+        display = ram_user_name or ""
+        try:
+            from tools.aliyun.ram import list_ram_users_api, save_user_map
+            ram_users = list_ram_users_api()
+            if ram_user_name:
+                matched = next((u for u in ram_users if u["user_name"] == ram_user_name), None)
+            else:
+                # 按飞书显示名匹配
+                from tools.feishu.notify import _get_user_name
+                feishu_name = _get_user_name(open_id)
+                matched = next((u for u in ram_users
+                                if u.get("display_name") == feishu_name), None) if feishu_name else None
+            if matched:
+                display = matched.get("display_name") or matched["user_name"]
+                save_user_map(open_id, display, matched["user_id"])
+        except Exception as e:
+            logger.warning("[RAM映射] 同步失败（不影响 AK 绑定）: %s", e)
+
+        # 绑定完后如有待处理的 GPU 申请，推送 GPU 卡片
         gpu_state = _get_gpu_state(chat_id, open_id)
         if gpu_state and gpu_state.get("pending_gpu"):
             _clear_gpu_state(chat_id, open_id)
             def _push_gpu_card():
                 import time; time.sleep(1)
-                # 主动发消息（无 message_id 可 reply，改发给 chat_id）
-                _feishu_send(chat_id, "✅ 账号已绑定！正在为你打开 GPU 申请表单...")
-                # 需要一个有效 message_id 才能 reply，此处改为主动推送 GPU 表单
+                _feishu_send(chat_id, "✅ AK 已绑定！正在为你打开 GPU 申请表单...")
                 try:
                     template_id = settings.FEISHU_GPU_CARD_TEMPLATE_ID
                     content = json.dumps({"type": "template", "data": {"template_id": template_id}}) if template_id else json.dumps(_GPU_REQUEST_CARD)
@@ -700,20 +782,23 @@ def _process_action(action_name: str, action_val: dict, open_id: str, chat_id: s
                         json={"receive_id": chat_id, "msg_type": "interactive", "content": content},
                         timeout=15,
                     )
-                except Exception as e:
+                except Exception:
                     logger.error("[GPU卡片推送] 失败", exc_info=True)
             threading.Thread(target=_push_gpu_card, daemon=True).start()
 
         return {
-            "toast": {"type": "success", "content": f"✅ {user_name} 绑定成功"},
+            "toast": {"type": "success", "content": "✅ AK 已加密保存"},
             "card": {
                 "config": {"wide_screen_mode": True},
-                "header": {"title": {"tag": "plain_text", "content": "✅ 账号绑定成功"}, "template": "green"},
+                "header": {"title": {"tag": "plain_text", "content": "✅ AccessKey 已绑定"}, "template": "green"},
                 "elements": [{
                     "tag": "div",
                     "text": {"tag": "lark_md", "content":
-                        f"**姓名：** {user_name}\n**AccessKey：** `{ak_id[:8]}...`（已安全保存）\n\n"
-                        "GPU 申请表单即将发送，请稍候。"},
+                        f"**AccessKey ID：** `{ak_id[:8]}****`（已 Fernet 加密存入 Redis）\n"
+                        + (f"**RAM 用户：** {display}\n" if display else "")
+                        + f"**资源归属：** 你的 RAM 用户本人（阿里云控制台可直接看到）\n"
+                        + f"**自动失效：** {settings.USER_AK_IDLE_TTL_SECONDS // 86400} 天未使用\n\n"
+                        + "随时发送「解绑AK」可删除，「查看绑定」查状态。"},
                 }],
             },
         }
@@ -753,7 +838,7 @@ def _process_action(action_name: str, action_val: dict, open_id: str, chat_id: s
         cost_hint      = _cost_str(gpu_count_i, duration_float)
 
         # 获取飞书真实姓名，用于工单归属
-        from tools.feishu_tool import _get_user_name
+        from tools.feishu.notify import _get_user_name
         reporter_name = _get_user_name(open_id)
 
         def _do() -> None:
@@ -851,8 +936,8 @@ def _process_action(action_name: str, action_val: dict, open_id: str, chat_id: s
 
     # ── 立即停止 ──────────────────────────────────────────────────────────────
     if action_name == "stop_dsw":
-        from tools.pai_dsw_tool import manage_pai_dsw
-        from tools.jira_tool import transition_ticket
+        from tools.aliyun.pai_dsw import manage_pai_dsw
+        from tools.jira.ticket import transition_ticket
         ticket_key  = action_val.get("ticket_key", "")
         instance_id = action_val.get("instance_id", "")
 
@@ -907,7 +992,7 @@ def _process_action(action_name: str, action_val: dict, open_id: str, chat_id: s
 
     # ── 审批拒绝 ──────────────────────────────────────────────────────────────
     if action_name == "reject_gpu":
-        from tools.jira_tool import transition_ticket
+        from tools.jira.ticket import transition_ticket
         ticket_key  = action_val.get("ticket_key", "")
         req_open_id = action_val.get("requester_open_id", "")
         req_chat_id = action_val.get("requester_chat_id", "")
@@ -940,7 +1025,8 @@ def _handle_card_trigger_sync(data: dict) -> dict:
     chat_id    = event.get("context", {}).get("open_chat_id", "") or settings.FEISHU_CHAT_ID
     action_name = action_val.get("action", "") if isinstance(action_val, dict) else ""
     if not action_name and form_value:
-        if "ak_id" in form_value or "ak_secret" in form_value:
+        # 兼容旧 AK 表单（ak_id/ak_secret）和新 RAM 绑定表单（ram_user_name/user_name）
+        if any(k in form_value for k in ("ak_id", "ak_secret", "ram_user_name")):
             action_name = "submit_ak_register"
         else:
             action_name = "submit_gpu_request"
@@ -1019,8 +1105,8 @@ def feishu_event():
     open_id    = event.get("sender", {}).get("sender_id", {}).get("open_id", "")
     set_trace_id(message_id[-8:] if message_id else "-")
 
-    # ⑤ AK 注册指令优先处理（私聊场景，保障安全）
-    if _handle_ak_register(message_id, open_id, user_text):
+    # ⑤ RAM 绑定指令优先处理（自动映射失败时的兜底）
+    if _handle_ram_bind(message_id, open_id, user_text):
         return jsonify({"code": 0})
 
     # ⑥ 先立即返回 200，再异步调用 Agent（飞书 5s 超时，Agent 可能更慢）
@@ -1084,7 +1170,7 @@ def health():
 
     # Prometheus
     try:
-        from tools.prometheus_tool import _query_instant
+        from tools.aliyun.prometheus import _query_instant
         r = _query_instant("up")
         result["prometheus"] = "ok" if r is not None else "error: empty response"
         if r is None:
@@ -1114,7 +1200,7 @@ def health():
 
     # PAI DSW API
     try:
-        from tools.pai_dsw_tool import list_dsw_resources
+        from tools.aliyun.pai_dsw import list_dsw_resources
         list_dsw_resources()
         result["dsw_api"] = "ok"
     except Exception as e:
@@ -1131,12 +1217,35 @@ def health():
         result["feishu"] = f"error: {e}"
         result["status"] = "degraded"
 
+    # 加密 key
+    try:
+        from utils.crypto import is_key_configured
+        if is_key_configured():
+            result["crypto"] = "ok"
+        else:
+            result["crypto"] = "error: BOT_CREDS_ENCRYPTION_KEY not configured"
+            result["status"] = "degraded"
+    except Exception as e:
+        result["crypto"] = f"error: {e}"
+        result["status"] = "degraded"
+
     return jsonify(result), 200 if result["status"] == "ok" else 207
 
 
 # ── 入口 ──────────────────────────────────────────────────────────────────────
 
 def run(host: str = "0.0.0.0", port: int = 8088, debug: bool = False):
+    # ── 启动前安全校验：加密 key 必须配置 ─────────────────────────────────
+    from utils.crypto import is_key_configured
+    if not is_key_configured():
+        logger.error(
+            "[启动校验] BOT_CREDS_ENCRYPTION_KEY 未配置或格式错误！\n"
+            "  原因：用户绑定 AK 路径需要 Fernet 加密 key，否则会拒绝写入。\n"
+            "  生成命令：python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\"\n"
+            "  把输出填到 .env 的 BOT_CREDS_ENCRYPTION_KEY= 行后即可重启。"
+        )
+        raise SystemExit(2)
+
     # 在主线程预热 Agent，避免子线程首次导入时 Pydantic v2 对 RunnableParallel
     # 中 lambda 做重新验证导致的 TypeError: got NoneType
     # 注册错误回调：ERROR 级别日志自动推送管理员飞书

@@ -23,11 +23,11 @@ from config.settings import settings
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
-from tools.jira_tool import (
+from tools.jira.ticket import (
     get_gpu_tickets, add_comment, transition_ticket,
     parse_ticket_metadata, update_ticket_field,
 )
-from tools.pai_dsw_tool import manage_pai_dsw
+from tools.aliyun.pai_dsw import manage_pai_dsw
 from utils.redis_client import get_redis
 
 
@@ -236,14 +236,13 @@ def _make_running_card(instance_id: str, instance_name: str,
 
 def _poll_until_running(ticket_key: str, instance_id: str, instance_name: str,
                          open_id: str, chat_id: str,
-                         gpu_count: int, duration_hours: float,
-                         ak_id: str, ak_secret: str) -> None:
+                         gpu_count: int, duration_hours: float) -> None:
     """后台轮询实例状态，Running 后推送就绪通知（最多等 6 分钟）。"""
     for _ in range(36):
         time.sleep(10)
         try:
             result = manage_pai_dsw(action="get", instance_id=instance_id,
-                                    _ak_id=ak_id, _ak_secret=ak_secret)
+                                    open_id=open_id)
             if "Running" in result:
                 card = _make_running_card(instance_id, instance_name, ticket_key,
                                           gpu_count, duration_hours)
@@ -265,7 +264,7 @@ def _poll_until_running(ticket_key: str, instance_id: str, instance_name: str,
 def _get_instance_gpu_util(instance_name: str) -> Optional[float]:
     """从 Prometheus 查询 DSW 实例即时 GPU SM 利用率（%），不可达返回 None。"""
     try:
-        from tools.prometheus_tool import _query_instant
+        from tools.aliyun.prometheus import _query_instant
         promql  = f'avg(AliyunPaidsw_INSTANCE_GPU_SM_UTIL{{instanceName="{instance_name}"}})'
         results = _query_instant(promql)
         if results and results[0].get("value"):
@@ -334,7 +333,7 @@ def _send_card(open_id: str, chat_id: str, card: dict) -> None:
     """向用户发送飞书交互卡片（优先私信，降级群聊）。"""
     try:
         import requests
-        from tools.feishu_tool import _get_access_token
+        from tools.feishu.notify import _get_access_token
         token = _get_access_token()
         target_id = open_id or chat_id
         id_type   = "open_id" if open_id else "chat_id"
@@ -356,7 +355,7 @@ def _send_card(open_id: str, chat_id: str, card: dict) -> None:
 def _send_text(open_id: str, chat_id: str, text: str) -> None:
     try:
         import requests
-        from tools.feishu_tool import _get_access_token
+        from tools.feishu.notify import _get_access_token
         token = _get_access_token()
         target_id = open_id or chat_id
         id_type   = "open_id" if open_id else "chat_id"
@@ -471,19 +470,22 @@ def _process_new_ticket(ticket: dict) -> None:
     if _redis_get(key):
         return
 
-    # ── 强制要求申请人已注册个人 AK/SK（open_id 为空视为管理员手动工单，豁免）──
+    # ── 强制要求申请人已建立飞书↔RAM 映射（open_id 为空视为管理员手动工单，豁免）──
     if open_id:
         from core.feishu_bot import _is_registered
         if not _is_registered(open_id):
             if _mark_pending_reg(key):
-                logger.info("[Scheduler] 工单 %s 申请人未注册 AK/SK，暂缓创建", key)
-                add_comment(key, "⚠️ 申请人尚未注册阿里云 AK/SK，实例创建暂缓。注册后调度器将在 20 秒内自动重试。")
+                logger.info("[Scheduler] 工单 %s 申请人无 RAM 映射，暂缓创建", key)
+                add_comment(key, "⚠️ 申请人尚未建立飞书↔RAM 用户映射，实例创建暂缓。映射建立后调度器将在 20 秒内自动重试。")
                 _send_text(open_id, chat_id,
-                    f"⚠️ 工单 {key} 暂缓处理：请先向 Bot 私信注册你的阿里云 AK/SK，注册成功后自动创建实例。\n\n"
-                    "注册格式（请在私聊中发送，保障密钥安全）：\n"
-                    "```\n注册AK: AccessKeyId AccessKeySecret\n```")
+                    f"⚠️ 工单 {key} 暂缓处理：未找到你对应的 RAM 用户。\n\n"
+                    "可能原因：\n"
+                    "  · 飞书显示名与阿里云 RAM 用户的 displayName 不一致\n"
+                    "  · 该 RAM 用户不存在或被禁用\n\n"
+                    "请联系运维人员手动绑定，或在飞书 Bot 发送：\n"
+                    "```\n绑定RAM: <你的RAM用户名>\n```")
             else:
-                logger.info("[Scheduler] 工单 %s 申请人未注册（已通知，等待注册）", key)
+                logger.info("[Scheduler] 工单 %s 申请人无映射（已通知，等待绑定）", key)
             return
 
     # ── 审批流：大规模申请需管理员确认 ────────────────────────────────────────────
@@ -512,10 +514,8 @@ def _process_new_ticket(ticket: dict) -> None:
 
     logger.info("[Scheduler] 处理新工单 %s: %s x%sGPU %sh", key, instance_name, gpu_count, duration_hours)
 
-    from core.feishu_bot import _get_user_ak
-    user_ak_id, user_ak_secret = _get_user_ak(open_id)
     if open_id:
-        logger.info("[Scheduler] 使用申请人个人 AK 创建实例 open_id=%s", open_id)
+        logger.info("[Scheduler] 通过 STS AssumeRole 创建实例 open_id=%s", open_id)
     else:
         logger.info("[Scheduler] open_id 为空（管理员工单），使用全局账号创建实例")
 
@@ -535,8 +535,9 @@ def _process_new_ticket(ticket: dict) -> None:
         },
     })
 
+    # open_id 非空时走 STS（按申请人临时凭证创建，实例归属正确）；为空降级用全局 AK
     result = manage_pai_dsw(action="create_json", create_config_json=create_cfg,
-                            _ak_id=user_ak_id, _ak_secret=user_ak_secret)
+                            open_id=open_id)
 
     if "实例创建成功" in result or "instance_id" in result.lower():
         # 提取实例 ID
@@ -581,7 +582,7 @@ def _process_new_ticket(ticket: dict) -> None:
         _th.Thread(
             target=_poll_until_running,
             args=(key, instance_id, instance_name, open_id, chat_id,
-                  gpu_count_i, dur_h_f, user_ak_id, user_ak_secret),
+                  gpu_count_i, dur_h_f),
             daemon=True,
         ).start()
 

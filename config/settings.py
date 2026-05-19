@@ -42,6 +42,31 @@ class Config:
     PAI_DSW_RESOURCE_ID       = os.environ.get("PAI_DSW_RESOURCE_ID", "")
     PAI_DSW_DEFAULT_IMAGE     = os.environ.get("PAI_DSW_DEFAULT_IMAGE", "")
 
+    # 阿里云 Bot Master 账号（用于 STS AssumeRole 和 RAM 查询）
+    # Master 账号只挂 AliyunSTSAssumeRoleAccess + AliyunRAMReadOnlyAccess
+    # 真正的资源操作权限挂在 BotRole-* 角色上，按用户/用户组动态选择
+    ALIYUN_BOT_MASTER_AK_ID     = os.environ.get("ALIYUN_BOT_MASTER_AK_ID", "")
+    ALIYUN_BOT_MASTER_AK_SECRET = os.environ.get("ALIYUN_BOT_MASTER_AK_SECRET", "")
+    ALIYUN_BOT_ACCOUNT_UID      = os.environ.get("ALIYUN_BOT_ACCOUNT_UID", "")
+    ALIYUN_STS_REGION_ID        = os.environ.get("ALIYUN_STS_REGION_ID", "cn-hangzhou")
+    ALIYUN_STS_DURATION_SECONDS = int(os.environ.get("ALIYUN_STS_DURATION_SECONDS", "3600"))
+
+    # 用户组 → 角色 ARN 映射（按声明顺序优先匹配，留空表示走 default）
+    # 格式：JSON 数组，例：[{"group":"algo-team","role":"acs:ram::UID:role/BotRole-Algo"}]
+    ALIYUN_BOT_ROLE_MAPPING_RAW = os.environ.get("ALIYUN_BOT_ROLE_MAPPING", "[]")
+    ALIYUN_BOT_ROLE_DEFAULT     = os.environ.get(
+        "ALIYUN_BOT_ROLE_DEFAULT",
+        f"acs:ram::{os.environ.get('ALIYUN_BOT_ACCOUNT_UID', '')}:role/BotRole-Default"
+        if os.environ.get("ALIYUN_BOT_ACCOUNT_UID") else "",
+    )
+
+    # 用户 AK/SK 加密 key（Fernet）— 用户在飞书表单卡片填入的 AK 用此 key 加密后存 Redis
+    # 生成命令：python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    # 缺失时 utils/crypto.py 会降级为透明传递并告警（建议生产必填）
+    BOT_CREDS_ENCRYPTION_KEY = os.environ.get("BOT_CREDS_ENCRYPTION_KEY", "")
+    # 用户 AK 30 天未使用自动清理（秒）
+    USER_AK_IDLE_TTL_SECONDS = int(os.environ.get("USER_AK_IDLE_TTL_SECONDS", str(30 * 86400)))
+
     # Jira（GPU 工单系统）
     JIRA_URL              = os.environ.get("JIRA_URL", "")               # e.g. https://jira.example.com
     JIRA_PAT              = os.environ.get("JIRA_PAT", "")               # Personal Access Token

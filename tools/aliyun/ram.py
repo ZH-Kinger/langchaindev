@@ -16,7 +16,7 @@ from config.settings import settings
 def list_team_members() -> list[dict]:
     """从现有 DSW 实例中提取所有团队成员（user_name + user_id），去重后返回。"""
     try:
-        from tools.pai_dsw_tool import _client
+        from tools.aliyun.pai_dsw import _client
         from alibabacloud_pai_dsw20220101 import models as dsw_models
 
         client = _client()

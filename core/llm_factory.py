@@ -25,3 +25,9 @@ def get_edge_llm(temperature: float = 0) -> ChatOpenAI:
         max_retries=5,
         timeout=60,
     )
+
+
+def clear_llm_cache() -> None:
+    """清空 LLM 工厂缓存，模型切换或配置变更后调用。"""
+    get_cloud_llm.cache_clear()
+    get_edge_llm.cache_clear()
