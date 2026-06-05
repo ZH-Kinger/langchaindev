@@ -319,6 +319,26 @@ def _send_morning_report() -> None:
     logger.info("[Scheduler] 早报已发送（%s 位用户）", len(user_map))
 
 
+def _send_cluster_morning_report() -> None:
+    """每日集群监控早报：生成基础设施健康报告并推送到飞书群。"""
+    if not settings.CLUSTER_MORNING_REPORT_ENABLED:
+        return
+    if not settings.PROMETHEUS_URL:
+        logger.info("[Scheduler] PROMETHEUS_URL 未配置，跳过集群监控早报")
+        return
+    try:
+        from tools.aliyun.prometheus import query_prometheus_metrics
+        from tools.feishu.notify import send_feishu_report
+        report = query_prometheus_metrics(query_type="report")
+        if report.startswith("❌") or "[REPORT_START]" not in report:
+            logger.warning("[Scheduler] 集群报告生成异常，跳过推送：%.80s", report)
+            return
+        result = send_feishu_report(report, title="📊 每日集群监控早报")
+        logger.info("[Scheduler] 集群监控早报已推送：%.80s", result)
+    except Exception as e:
+        logger.error("[Scheduler] 集群监控早报失败", exc_info=True)
+
+
 def _all_tracked_keys() -> list[str]:
     try:
         r = get_redis()
@@ -706,7 +726,7 @@ class DSWScheduler:
             )
             self._capacity_thread.start()
             extra = " + 容量巡检"
-        logger.info("[Scheduler] 启动：Jira 轮询 + DSW 超时监控 + GPU 空转检测 + 每日早报%s", extra)
+        logger.info("[Scheduler] 启动：Jira 轮询 + DSW 超时监控 + GPU 空转检测 + 每日早报(实例+集群)%s", extra)
 
     def stop(self) -> None:
         self._running = False
@@ -752,6 +772,10 @@ class DSWScheduler:
                     _send_morning_report()
                 except Exception as e:
                     logger.error("[Scheduler] 早报发送失败", exc_info=True)
+                try:
+                    _send_cluster_morning_report()
+                except Exception as e:
+                    logger.error("[Scheduler] 集群监控早报发送失败", exc_info=True)
 
     def _capacity_loop(self) -> None:
         """按 CAPACITY_MONITOR_INTERVAL_HOURS 巡检 OSS/TOS 容量并推送飞书。"""

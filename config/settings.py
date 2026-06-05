@@ -85,6 +85,9 @@ class Config:
     GRAFANA_API_KEY        = os.environ.get("GRAFANA_API_KEY", "")       # Bearer token
     GRAFANA_DATASOURCE_UID = os.environ.get("GRAFANA_DATASOURCE_UID", "") # Prometheus 数据源 UID
 
+    # 每日集群监控早报（9 点随 DSW 实例早报一起推送基础设施健康报告到群）
+    CLUSTER_MORNING_REPORT_ENABLED = os.environ.get("CLUSTER_MORNING_REPORT_ENABLED", "true").lower() == "true"
+
     # GPU 配额与运营
     ADMIN_FEISHU_OPEN_ID      = os.environ.get("ADMIN_FEISHU_OPEN_ID", "")
     GPU_PRICE_PER_HOUR        = float(os.environ.get("GPU_PRICE_PER_HOUR", "35.0"))
