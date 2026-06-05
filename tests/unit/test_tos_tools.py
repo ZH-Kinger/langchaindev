@@ -88,7 +88,7 @@ def test_tos_compute_nested_sizes(patch_tos):
         ("tp/egodex/2026-01/a", 100),
         ("tp/egodex/2026-01/b", 50),
         ("tp/egodex/2026-02/c", 200),
-        ("tp/egodex/root.txt", 10),             # 厂家直属文件 → (根)
+        ("tp/egodex/root.txt", 10),             # 厂家直属文件 → /
         ("tp/egoverse/x/d", 5),
     ])
     from tools.volcano.tos import compute_nested_sizes
@@ -97,7 +97,7 @@ def test_tos_compute_nested_sizes(patch_tos):
     eg = by["egodex"]
     assert eg["total_bytes"] == 360 and eg["total_count"] == 4
     batches = {name: (b, c) for name, b, c in eg["batches"]}
-    assert batches["2026-01"] == (150, 2) and batches["(根)"] == (10, 1)
+    assert batches["2026-01"] == (150, 2) and batches["/"] == (10, 1)
     assert by["egoverse"]["total_bytes"] == 5
 
 

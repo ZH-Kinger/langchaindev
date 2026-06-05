@@ -106,7 +106,7 @@ def test_batch_cache_roundtrip(patch_compute, capture_cards, two_targets, fake_r
     from core.capacity_monitor import run_capacity_scan, _load_batch_cache
     run_capacity_scan()
     cache = _load_batch_cache("oss", "wuji-bucket-hangzhou", "third-party-data/")
-    # aether 的两个批次应已缓存（(根) 不缓存）
+    # aether 的两个批次应已缓存（/ 不缓存）
     assert cache.get("aether/batch-a") == (60, 1)
     assert cache.get("aether/batch-b") == (40, 1)
 

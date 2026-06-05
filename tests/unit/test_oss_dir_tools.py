@@ -123,7 +123,7 @@ def test_compute_nested_sizes_two_levels(patch_bucket):
         ("tp/lightwheel/2026-01/a.bin", 100),
         ("tp/lightwheel/2026-01/b.bin", 50),
         ("tp/lightwheel/2026-02/c.bin", 200),
-        ("tp/lightwheel/readme.txt", 10),       # 厂家直属文件 → (根)
+        ("tp/lightwheel/readme.txt", 10),       # 厂家直属文件 → /
         ("tp/aether/x/d.bin", 5),
     ])
     from tools.aliyun.oss import compute_nested_sizes
@@ -135,7 +135,7 @@ def test_compute_nested_sizes_two_levels(patch_bucket):
     batches = {name: (b, c) for name, b, c in lw["batches"]}
     assert batches["2026-01"] == (150, 2)
     assert batches["2026-02"] == (200, 1)
-    assert batches["(根)"] == (10, 1)            # 直属文件归入 (根)
+    assert batches["/"] == (10, 1)            # 直属文件归入 /
 
     assert by["aether"]["total_bytes"] == 5
 
@@ -162,7 +162,7 @@ def test_compute_nested_sizes_uses_cache(monkeypatch, patch_bucket):
 
 
 def test_flat_family_collapses_to_total(patch_bucket):
-    """批次数超过 _MAX_BATCHES 的「平铺」厂家应折叠成单行 '(整体)'，不细分。"""
+    """批次数超过 _MAX_BATCHES 的「平铺」厂家应折叠成单行 'ALL'，不细分。"""
     from tools.aliyun import oss as oss_mod
     objs = [(f"tp/egoverse/b{i}/f.bin", 1) for i in range(oss_mod._MAX_BATCHES + 30)]
     objs.append(("tp/egodex/2026-01/a.bin", 100))   # 正常厂家不应被折叠
@@ -171,7 +171,7 @@ def test_flat_family_collapses_to_total(patch_bucket):
     entries, _ = oss_mod.compute_nested_sizes("", "bkt", "tp/")
     by = {e["厂家"]: e for e in entries}
     ego = by["egoverse"]
-    assert len(ego["batches"]) == 1 and ego["batches"][0][0] == "(整体)"
+    assert len(ego["batches"]) == 1 and ego["batches"][0][0] == "ALL"
     assert ego["total_count"] == oss_mod._MAX_BATCHES + 30
     # 正常厂家保留批次明细
     assert by["egodex"]["batches"][0][0] == "2026-01"

@@ -372,7 +372,7 @@ def _direct_files_size(bucket, prefix: str):
 def _grouped_sizes(bucket, family_prefix: str) -> dict:
     """一趟连续扫描 family_prefix 下所有对象，按第二层目录(批次)归并求和。
 
-    返回 {批次名: (bytes, count)}；厂家直属文件归入 '(根)'。
+    返回 {批次名: (bytes, count)}；厂家直属文件归入 '/'。
     调用次数只与对象数有关、与批次数无关——批次极多时远快于逐批次扫描。
     """
     sizes: dict = {}
@@ -383,7 +383,7 @@ def _grouped_sizes(bucket, family_prefix: str) -> dict:
             if obj.key.endswith("/") and obj.size == 0:
                 continue
             rel = obj.key[len(family_prefix):]
-            batch = rel.split("/", 1)[0] if "/" in rel else "(根)"
+            batch = rel.split("/", 1)[0] if "/" in rel else "/"
             slot = sizes.setdefault(batch, [0, 0])
             slot[0] += obj.size
             slot[1] += 1
@@ -396,7 +396,7 @@ def _grouped_sizes(bucket, family_prefix: str) -> dict:
 
 # 一个厂家下「新批次」数超过此值就改用一趟分组扫描（避免逐批次列举爆炸）
 _GROUPED_THRESHOLD = 30
-# 批次数超过此值判定为「平铺」：不再细分批次，只记厂家整体大小（一行 '(整体)'）
+# 批次数超过此值判定为「平铺」：不再细分批次，只记厂家整体大小（一行 'ALL'）
 _MAX_BATCHES = 200
 
 
@@ -408,7 +408,7 @@ def compute_nested_sizes(open_id: str, bucket: str, prefix: str = "", region: st
         {"厂家": name, "total_bytes": int, "total_count": int,
          "batches": [(批次名, bytes, count), ...]},
         ...
-    ]。厂家直属文件归入名为 '(根)' 的批次。凭证不可用返回 (None, None)。
+    ]。厂家直属文件归入名为 '/' 的批次。凭证不可用返回 (None, None)。
 
     cached: {"厂家/批次": (bytes, count)} 已扫过的不可变批次；命中则跳过逐对象求和。
     """
@@ -445,9 +445,9 @@ def _scan_family_oss(b, sub: str, vendor_name: str, cached: dict):
     """扫一个厂家，返回 (batches[(批次,bytes,count)], 新扫批次数, 是否平铺)。
 
     决策：上次判平铺 → 直接整体扫；有缓存 → 只实扫新批次；首扫 → 整体扫一趟。
-    整体扫后若批次数超 _MAX_BATCHES 判为平铺，折叠成单行 '(整体)'。
+    整体扫后若批次数超 _MAX_BATCHES 判为平铺，折叠成单行 'ALL'。
     """
-    if f"{vendor_name}/(整体)" in cached:           # 上次已判平铺，直接整体扫
+    if f"{vendor_name}/ALL" in cached:           # 上次已判平铺，直接整体扫
         use_grouped, batch_dirs = True, None
     else:
         fam_has_cache = any(k.startswith(vendor_name + "/") for k in cached)
@@ -461,11 +461,11 @@ def _scan_family_oss(b, sub: str, vendor_name: str, cached: dict):
 
     if use_grouped:
         grouped = _grouped_sizes(b, sub)
-        real = [n for n in grouped if n != "(根)"]
+        real = [n for n in grouped if n != "/"]
         if len(real) > _MAX_BATCHES:                # 平铺：不细分，只记整体
             tb = sum(s for s, _ in grouped.values())
             tc = sum(c for _, c in grouped.values())
-            return [("(整体)", tb, tc)], len(real), True
+            return [("ALL", tb, tc)], len(real), True
         return [(n, s, c) for n, (s, c) in grouped.items()], len(real), False
 
     batches, fresh = [], 0
@@ -480,7 +480,7 @@ def _scan_family_oss(b, sub: str, vendor_name: str, cached: dict):
         batches.append((batch_name, size_bytes, count))
     root_bytes, root_count = _direct_files_size(b, sub)
     if root_count:
-        batches.append(("(根)", root_bytes, root_count))
+        batches.append(("/", root_bytes, root_count))
     return batches, fresh, False
 
 

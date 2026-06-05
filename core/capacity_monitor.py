@@ -93,11 +93,11 @@ def _load_batch_cache(vendor: str, bucket: str, prefix: str) -> dict:
 
 
 def _save_family_cache(vendor: str, bucket: str, prefix: str, vendor_name: str, batches: list) -> None:
-    """单个厂家扫完即增量写入缓存（断点续传：中断后已完成厂家下次跳过）。排除 '(根)'。"""
+    """单个厂家扫完即增量写入缓存（断点续传：中断后已完成厂家下次跳过）。排除 '/'。"""
     if not settings.CAPACITY_BATCH_CACHE_ENABLED:
         return
     mapping = {f"{vendor_name}/{name}": f"{size}:{count}"
-               for name, size, count in batches if name != "(根)"}
+               for name, size, count in batches if name != "/"}
     if not mapping:
         return
     try:
@@ -110,13 +110,13 @@ def _save_family_cache(vendor: str, bucket: str, prefix: str, vendor_name: str, 
 
 
 def _save_batch_cache(vendor: str, bucket: str, prefix: str, entries: list) -> None:
-    """把本次各批次大小写回缓存（排除每次都实扫的 '(根)'）。整表重写以清掉已消失的批次。"""
+    """把本次各批次大小写回缓存（排除每次都实扫的 '/'）。整表重写以清掉已消失的批次。"""
     if not settings.CAPACITY_BATCH_CACHE_ENABLED:
         return
     mapping = {}
     for e in entries:
         for name, size, count in e["batches"]:
-            if name == "(根)":
+            if name == "/":
                 continue
             mapping[f"{e['厂家']}/{name}"] = f"{size}:{count}"
     if not mapping:

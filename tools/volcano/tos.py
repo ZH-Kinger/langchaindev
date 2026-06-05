@@ -96,7 +96,7 @@ def _direct_files_size(client, bucket: str, prefix: str):
 def _grouped_sizes(client, bucket: str, family_prefix: str) -> dict:
     """一趟连续扫描 family_prefix 下所有对象，按第二层目录(批次)归并求和（火山 TOS 版）。
 
-    返回 {批次名: (bytes, count)}；厂家直属文件归入 '(根)'。调用次数只与对象数有关。
+    返回 {批次名: (bytes, count)}；厂家直属文件归入 '/'。调用次数只与对象数有关。
     """
     sizes: dict = {}
     token = ""
@@ -107,7 +107,7 @@ def _grouped_sizes(client, bucket: str, family_prefix: str) -> dict:
             if obj.key.endswith("/") and obj.size == 0:
                 continue
             rel = obj.key[len(family_prefix):]
-            batch = rel.split("/", 1)[0] if "/" in rel else "(根)"
+            batch = rel.split("/", 1)[0] if "/" in rel else "/"
             slot = sizes.setdefault(batch, [0, 0])
             slot[0] += obj.size
             slot[1] += 1
@@ -124,7 +124,7 @@ _MAX_BATCHES = 200      # 批次数超此值判为「平铺」，只记整体不
 
 def _scan_family_tos(client, bucket: str, sub: str, vendor_name: str, cached: dict):
     """扫一个厂家，返回 (batches, 新扫批次数, 是否平铺)。逻辑同 OSS 版。"""
-    if f"{vendor_name}/(整体)" in cached:
+    if f"{vendor_name}/ALL" in cached:
         use_grouped, batch_dirs = True, None
     else:
         fam_has_cache = any(k.startswith(vendor_name + "/") for k in cached)
@@ -138,11 +138,11 @@ def _scan_family_tos(client, bucket: str, sub: str, vendor_name: str, cached: di
 
     if use_grouped:
         grouped = _grouped_sizes(client, bucket, sub)
-        real = [n for n in grouped if n != "(根)"]
+        real = [n for n in grouped if n != "/"]
         if len(real) > _MAX_BATCHES:
             tb = sum(s for s, _ in grouped.values())
             tc = sum(c for _, c in grouped.values())
-            return [("(整体)", tb, tc)], len(real), True
+            return [("ALL", tb, tc)], len(real), True
         return [(n, s, c) for n, (s, c) in grouped.items()], len(real), False
 
     batches, fresh = [], 0
@@ -157,7 +157,7 @@ def _scan_family_tos(client, bucket: str, sub: str, vendor_name: str, cached: di
         batches.append((batch_name, size_bytes, count))
     root_bytes, root_count = _direct_files_size(client, bucket, sub)
     if root_count:
-        batches.append(("(根)", root_bytes, root_count))
+        batches.append(("/", root_bytes, root_count))
     return batches, fresh, False
 
 
@@ -165,7 +165,7 @@ def compute_nested_sizes(bucket: str, prefix: str = "", cached: dict = None, on_
     """两级遍历：prefix 下每个「厂家」及其下「批次」的大小（火山 TOS 版）。
 
     返回 entries = [{"厂家":, "total_bytes":, "total_count":, "batches":[(批次,bytes,count)]}]；
-    厂家直属文件归入 '(根)'。凭证不可用返回 None。
+    厂家直属文件归入 '/'。凭证不可用返回 None。
 
     cached: {"厂家/批次": (bytes, count)} 已扫过的不可变批次；命中则跳过逐对象求和。
     """
