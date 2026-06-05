@@ -42,11 +42,41 @@ class Config:
     PAI_DSW_RESOURCE_ID       = os.environ.get("PAI_DSW_RESOURCE_ID", "")
     PAI_DSW_DEFAULT_IMAGE     = os.environ.get("PAI_DSW_DEFAULT_IMAGE", "")
 
+    # 阿里云 Bot Master 账号（用于 STS AssumeRole 和 RAM 查询）
+    # Master 账号只挂 AliyunSTSAssumeRoleAccess + AliyunRAMReadOnlyAccess
+    # 真正的资源操作权限挂在 BotRole-* 角色上，按用户/用户组动态选择
+    ALIYUN_BOT_MASTER_AK_ID     = os.environ.get("ALIYUN_BOT_MASTER_AK_ID", "")
+    ALIYUN_BOT_MASTER_AK_SECRET = os.environ.get("ALIYUN_BOT_MASTER_AK_SECRET", "")
+    ALIYUN_BOT_ACCOUNT_UID      = os.environ.get("ALIYUN_BOT_ACCOUNT_UID", "")
+    ALIYUN_STS_REGION_ID        = os.environ.get("ALIYUN_STS_REGION_ID", "cn-hangzhou")
+    ALIYUN_STS_DURATION_SECONDS = int(os.environ.get("ALIYUN_STS_DURATION_SECONDS", "3600"))
+
+    # 用户组 → 角色 ARN 映射（按声明顺序优先匹配，留空表示走 default）
+    # 格式：JSON 数组，例：[{"group":"algo-team","role":"acs:ram::UID:role/BotRole-Algo"}]
+    ALIYUN_BOT_ROLE_MAPPING_RAW = os.environ.get("ALIYUN_BOT_ROLE_MAPPING", "[]")
+    ALIYUN_BOT_ROLE_DEFAULT     = os.environ.get(
+        "ALIYUN_BOT_ROLE_DEFAULT",
+        f"acs:ram::{os.environ.get('ALIYUN_BOT_ACCOUNT_UID', '')}:role/BotRole-Default"
+        if os.environ.get("ALIYUN_BOT_ACCOUNT_UID") else "",
+    )
+
+    # 用户 AK/SK 加密 key（Fernet）— 用户在飞书表单卡片填入的 AK 用此 key 加密后存 Redis
+    # 生成命令：python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    # 缺失时 utils/crypto.py 会降级为透明传递并告警（建议生产必填）
+    BOT_CREDS_ENCRYPTION_KEY = os.environ.get("BOT_CREDS_ENCRYPTION_KEY", "")
+    # 用户 AK 30 天未使用自动清理（秒）
+    USER_AK_IDLE_TTL_SECONDS = int(os.environ.get("USER_AK_IDLE_TTL_SECONDS", str(30 * 86400)))
+
     # Jira（GPU 工单系统）
     JIRA_URL              = os.environ.get("JIRA_URL", "")               # e.g. https://jira.example.com
     JIRA_PAT              = os.environ.get("JIRA_PAT", "")               # Personal Access Token
-    JIRA_PROJECT_KEY      = os.environ.get("JIRA_PROJECT_KEY", "GPU")    # Jira 项目 Key
+    JIRA_PROJECT_KEY      = os.environ.get("JIRA_PROJECT_KEY", "GPU")    # GPU 工单项目 Key
     JIRA_ISSUE_TYPE       = os.environ.get("JIRA_ISSUE_TYPE", "Task")    # 工单类型
+    JIRA_WORKFLOW_PROJECT = os.environ.get("JIRA_WORKFLOW_PROJECT", "")  # 算法组工作流项目 Key（如 ALGO）
+
+    # GitHub（工作流查询）
+    GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")   # Personal Access Token（repo 权限）
+    GITHUB_ORG   = os.environ.get("GITHUB_ORG", "")     # 组织名，如 wuji-technology
     DSW_IDLE_WARN_HOURS   = float(os.environ.get("DSW_IDLE_WARN_HOURS", "1"))   # 空闲多久发警告（小时）
     DSW_IDLE_STOP_MINUTES = int(os.environ.get("DSW_IDLE_STOP_MINUTES", "30"))  # 警告后多久自动停止（分钟）
 
@@ -55,12 +85,42 @@ class Config:
     GRAFANA_API_KEY        = os.environ.get("GRAFANA_API_KEY", "")       # Bearer token
     GRAFANA_DATASOURCE_UID = os.environ.get("GRAFANA_DATASOURCE_UID", "") # Prometheus 数据源 UID
 
+    # 每日集群监控早报（9 点随 DSW 实例早报一起推送基础设施健康报告到群）
+    CLUSTER_MORNING_REPORT_ENABLED = os.environ.get("CLUSTER_MORNING_REPORT_ENABLED", "true").lower() == "true"
+
     # GPU 配额与运营
     ADMIN_FEISHU_OPEN_ID      = os.environ.get("ADMIN_FEISHU_OPEN_ID", "")
     GPU_PRICE_PER_HOUR        = float(os.environ.get("GPU_PRICE_PER_HOUR", "35.0"))
     GPU_QUOTA_HOURS_PER_MONTH = float(os.environ.get("GPU_QUOTA_HOURS_PER_MONTH", "200.0"))
     GPU_IDLE_THRESHOLD_PCT    = float(os.environ.get("GPU_IDLE_THRESHOLD_PCT", "5.0"))
     GPU_IDLE_WARN_MINUTES     = int(os.environ.get("GPU_IDLE_WARN_MINUTES", "30"))
+
+    # 火山引擎 TOS（对象存储，静态 AK，不走阿里云 STS）
+    TOS_ACCESS_KEY = os.environ.get("TOS_ACCESS_KEY", "")
+    TOS_SECRET_KEY = os.environ.get("TOS_SECRET_KEY", "")
+    TOS_ENDPOINT   = os.environ.get("TOS_ENDPOINT", "tos-cn-shanghai.volces.com")
+    TOS_REGION     = os.environ.get("TOS_REGION", "cn-shanghai")
+
+    # 容量巡检（OSS + TOS 目录大小定时盘点 → 飞书主动推送）
+    # 默认关闭，opt-in；TARGETS 为 JSON 数组，每项 {vendor,bucket,prefix[,region]}
+    CAPACITY_MONITOR_ENABLED = os.environ.get("CAPACITY_MONITOR_ENABLED", "false").lower() == "true"
+    CAPACITY_MONITOR_TARGETS_RAW = os.environ.get(
+        "CAPACITY_MONITOR_TARGETS",
+        '[{"vendor":"oss","bucket":"wuji-bucket-hangzhou","prefix":"third-party-data/"},'
+        '{"vendor":"tos","bucket":"wuji-egocentric-data","prefix":"third-party-data/"}]',
+    )
+    CAPACITY_MONITOR_INTERVAL_HOURS = float(os.environ.get("CAPACITY_MONITOR_INTERVAL_HOURS", "6"))
+    CAPACITY_ALERT_THRESHOLD_TB     = float(os.environ.get("CAPACITY_ALERT_THRESHOLD_TB", "0"))  # 0=不告警
+    CAPACITY_MONITOR_CHAT_ID        = os.environ.get("CAPACITY_MONITOR_CHAT_ID", "")  # 留空回退 FEISHU_CHAT_ID
+    # 增量缓存：已扫过的交付批次目录不再重扫（批次写完即不变），大幅提速；false=每次全量重算
+    CAPACITY_BATCH_CACHE_ENABLED    = os.environ.get("CAPACITY_BATCH_CACHE_ENABLED", "true").lower() == "true"
+
+    # 容量巡检结果写入飞书多维表格（Bitable）：快照→厂家总量→批次明细 三表关联
+    CAPACITY_BITABLE_ENABLED        = os.environ.get("CAPACITY_BITABLE_ENABLED", "false").lower() == "true"
+    CAPACITY_BITABLE_APP_TOKEN      = os.environ.get("CAPACITY_BITABLE_APP_TOKEN", "")
+    CAPACITY_BITABLE_TABLE_SNAPSHOT = os.environ.get("CAPACITY_BITABLE_TABLE_SNAPSHOT", "")  # 巡检快照表
+    CAPACITY_BITABLE_TABLE_VENDOR   = os.environ.get("CAPACITY_BITABLE_TABLE_VENDOR", "")    # 厂家总量表
+    CAPACITY_BITABLE_TABLE_BATCH    = os.environ.get("CAPACITY_BITABLE_TABLE_BATCH", "")     # 批次明细表
 
     # Redis
     REDIS_HOST     = os.environ.get("REDIS_HOST", "127.0.0.1")
@@ -96,6 +156,7 @@ class Config:
         ("PAI_DSW_WORKSPACE_ID",   "DSW 实例管理不可用"),
         ("REDIS_HOST",             "会话记忆 / 配额管理不可用（降级到内存）"),
         ("ADMIN_FEISHU_OPEN_ID",   "大规格申请审批流不可用（将自动批准）"),
+        ("TOS_ACCESS_KEY",         "火山 TOS 容量统计 / 巡检不可用"),
     ]
 
     def validate(self) -> list[tuple[str, str]]:

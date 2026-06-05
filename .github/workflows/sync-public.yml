@@ -1,0 +1,45 @@
+name: Sync to Public Repo
+
+# 推送 v* tag 时，将代码同步到对外仓库（去掉 -dev 后缀的同名仓库）
+# 同步前自动过滤掉内部文件（.env、secrets、内部文档等）
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    # 仅当配置了 PUBLIC_REPO_TOKEN 时才执行（未配置则跳过，不报错）
+    if: ${{ vars.PUBLIC_REPO != '' }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 删除不对外暴露的文件
+      - name: Strip internal files
+        run: |
+          rm -f .env .env.example
+          rm -rf sessions/ logs/ vector_db/ models/
+          # 保留 .env.example 的模板版本（若有）
+          if [ -f .env.template ]; then
+            cp .env.template .env.example
+          fi
+
+      # 强制推送到公开仓库的 main 分支
+      - name: Push to public repo
+        env:
+          PUBLIC_REPO: ${{ vars.PUBLIC_REPO }}           # e.g. ZH-Kinger/agent
+          TOKEN: ${{ secrets.PUBLIC_REPO_TOKEN }}        # 有 public repo 写权限的 PAT
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git remote add public "https://x-access-token:${TOKEN}@github.com/${PUBLIC_REPO}.git"
+
+          # 推送当前 tag 和 main 分支
+          git push public "HEAD:refs/heads/main" --force
+          git push public "${GITHUB_REF}" --force

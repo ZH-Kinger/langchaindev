@@ -1,0 +1,49 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"   # 推送 v1.2.3 这样的 tag 时触发
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # 允许创建 GitHub Release
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 拉取完整历史，供 CHANGELOG 解析
+
+      # 从 CHANGELOG.md 提取本次 tag 对应的发布说明
+      - name: Extract release notes
+        id: notes
+        run: |
+          TAG="${GITHUB_REF_NAME}"          # e.g. v1.2.3
+          VERSION="${TAG#v}"                # e.g. 1.2.3
+
+          # 提取 ## [1.2.3] 到下一个 ## 之间的内容
+          NOTES=$(awk "/^## \[?${VERSION}\]?/{found=1; next} found && /^## /{exit} found{print}" CHANGELOG.md)
+
+          if [ -z "$NOTES" ]; then
+            NOTES="详见 CHANGELOG.md"
+          fi
+
+          # 多行输出写入 GitHub 环境变量
+          {
+            echo "notes<<EOF"
+            echo "$NOTES"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # 创建 GitHub Release（Pre-release 供人工确认后手动发布）
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "v${{ steps.notes.outputs.version }}"
+          body: ${{ steps.notes.outputs.notes }}
+          prerelease: true   # 先创建为 Pre-release，人工确认后改为正式发布
+          generate_release_notes: false
