@@ -47,6 +47,7 @@ _FAST_PATH_TOKENS = (
     "jira", "工单", "gpu申请",
     "ecs", "云服务器",
     "oss", "bucket", "对象存储",
+    "tos", "火山", "volcano",
     "sls", "logstore", "日志服务",
     "k8s", "pod",
     "grafana", "prometheus",
@@ -120,7 +121,10 @@ def _legacy_keyword_route(text: str) -> list:
         names = TOOL_GROUPS["jira"] | TOOL_GROUPS["pai_dsw"]
     elif any(k in text for k in ("ecs", "云服务器", "重启服务器", "服务器列表", "服务器实例")):
         names = TOOL_GROUPS["ecs"]
-    elif any(k in text for k in ("oss", "对象存储", "bucket", "存储桶", "存储空间")):
+    elif any(k in text for k in ("tos", "火山", "volcano")):
+        names = TOOL_GROUPS["tos"]
+    elif any(k in text for k in ("oss", "对象存储", "bucket", "存储桶", "存储空间",
+                                  "目录大小", "目录结构", "目录树")):
         names = TOOL_GROUPS["oss"]
     elif any(k in text for k in ("sls", "日志服务", "查日志", "log service", "logstore", "日志查询")):
         names = TOOL_GROUPS["sls"]

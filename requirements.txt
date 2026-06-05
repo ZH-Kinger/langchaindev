@@ -29,6 +29,8 @@ alibabacloud-ram20150501>=1.0.0
 alibabacloud-ecs20140526>=4.1.0
 oss2>=2.18.0
 aliyun-log-python-sdk>=0.9.0
+# 火山引擎 TOS（对象存储容量盘点）
+tos>=2.6.0
 
 # Storage & Infrastructure
 redis==7.4.0

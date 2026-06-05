@@ -681,6 +681,7 @@ class DSWScheduler:
         self._ticket_thread:  threading.Thread | None = None
         self._instance_thread: threading.Thread | None = None
         self._morning_thread: threading.Thread | None = None
+        self._capacity_thread: threading.Thread | None = None
 
     def start(self) -> None:
         if self._running:
@@ -698,7 +699,14 @@ class DSWScheduler:
         self._ticket_thread.start()
         self._instance_thread.start()
         self._morning_thread.start()
-        logger.info("[Scheduler] 启动：Jira 轮询 + DSW 超时监控 + GPU 空转检测 + 每日早报")
+        extra = ""
+        if settings.CAPACITY_MONITOR_ENABLED:
+            self._capacity_thread = threading.Thread(
+                target=self._capacity_loop, name="capacity-monitor", daemon=True
+            )
+            self._capacity_thread.start()
+            extra = " + 容量巡检"
+        logger.info("[Scheduler] 启动：Jira 轮询 + DSW 超时监控 + GPU 空转检测 + 每日早报%s", extra)
 
     def stop(self) -> None:
         self._running = False
@@ -744,6 +752,22 @@ class DSWScheduler:
                     _send_morning_report()
                 except Exception as e:
                     logger.error("[Scheduler] 早报发送失败", exc_info=True)
+
+    def _capacity_loop(self) -> None:
+        """按 CAPACITY_MONITOR_INTERVAL_HOURS 巡检 OSS/TOS 容量并推送飞书。"""
+        from core.capacity_monitor import run_capacity_scan
+        interval = max(0.1, settings.CAPACITY_MONITOR_INTERVAL_HOURS) * 3600
+        time.sleep(30)  # 等 Flask 与其余线程初始化
+        while self._running:
+            try:
+                run_capacity_scan()
+            except Exception as e:
+                logger.error("[Scheduler] 容量巡检失败", exc_info=True)
+            slept = 0.0
+            while slept < interval and self._running:
+                chunk = min(60.0, interval - slept)
+                time.sleep(chunk)
+                slept += chunk
 
 
 # 全局单例

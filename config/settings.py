@@ -92,6 +92,33 @@ class Config:
     GPU_IDLE_THRESHOLD_PCT    = float(os.environ.get("GPU_IDLE_THRESHOLD_PCT", "5.0"))
     GPU_IDLE_WARN_MINUTES     = int(os.environ.get("GPU_IDLE_WARN_MINUTES", "30"))
 
+    # 火山引擎 TOS（对象存储，静态 AK，不走阿里云 STS）
+    TOS_ACCESS_KEY = os.environ.get("TOS_ACCESS_KEY", "")
+    TOS_SECRET_KEY = os.environ.get("TOS_SECRET_KEY", "")
+    TOS_ENDPOINT   = os.environ.get("TOS_ENDPOINT", "tos-cn-shanghai.volces.com")
+    TOS_REGION     = os.environ.get("TOS_REGION", "cn-shanghai")
+
+    # 容量巡检（OSS + TOS 目录大小定时盘点 → 飞书主动推送）
+    # 默认关闭，opt-in；TARGETS 为 JSON 数组，每项 {vendor,bucket,prefix[,region]}
+    CAPACITY_MONITOR_ENABLED = os.environ.get("CAPACITY_MONITOR_ENABLED", "false").lower() == "true"
+    CAPACITY_MONITOR_TARGETS_RAW = os.environ.get(
+        "CAPACITY_MONITOR_TARGETS",
+        '[{"vendor":"oss","bucket":"wuji-bucket-hangzhou","prefix":"third-party-data/"},'
+        '{"vendor":"tos","bucket":"wuji-egocentric-data","prefix":"third-party-data/"}]',
+    )
+    CAPACITY_MONITOR_INTERVAL_HOURS = float(os.environ.get("CAPACITY_MONITOR_INTERVAL_HOURS", "6"))
+    CAPACITY_ALERT_THRESHOLD_TB     = float(os.environ.get("CAPACITY_ALERT_THRESHOLD_TB", "0"))  # 0=不告警
+    CAPACITY_MONITOR_CHAT_ID        = os.environ.get("CAPACITY_MONITOR_CHAT_ID", "")  # 留空回退 FEISHU_CHAT_ID
+    # 增量缓存：已扫过的交付批次目录不再重扫（批次写完即不变），大幅提速；false=每次全量重算
+    CAPACITY_BATCH_CACHE_ENABLED    = os.environ.get("CAPACITY_BATCH_CACHE_ENABLED", "true").lower() == "true"
+
+    # 容量巡检结果写入飞书多维表格（Bitable）：快照→厂家总量→批次明细 三表关联
+    CAPACITY_BITABLE_ENABLED        = os.environ.get("CAPACITY_BITABLE_ENABLED", "false").lower() == "true"
+    CAPACITY_BITABLE_APP_TOKEN      = os.environ.get("CAPACITY_BITABLE_APP_TOKEN", "")
+    CAPACITY_BITABLE_TABLE_SNAPSHOT = os.environ.get("CAPACITY_BITABLE_TABLE_SNAPSHOT", "")  # 巡检快照表
+    CAPACITY_BITABLE_TABLE_VENDOR   = os.environ.get("CAPACITY_BITABLE_TABLE_VENDOR", "")    # 厂家总量表
+    CAPACITY_BITABLE_TABLE_BATCH    = os.environ.get("CAPACITY_BITABLE_TABLE_BATCH", "")     # 批次明细表
+
     # Redis
     REDIS_HOST     = os.environ.get("REDIS_HOST", "127.0.0.1")
     REDIS_PORT     = int(os.environ.get("REDIS_PORT", 6379))
@@ -126,6 +153,7 @@ class Config:
         ("PAI_DSW_WORKSPACE_ID",   "DSW 实例管理不可用"),
         ("REDIS_HOST",             "会话记忆 / 配额管理不可用（降级到内存）"),
         ("ADMIN_FEISHU_OPEN_ID",   "大规格申请审批流不可用（将自动批准）"),
+        ("TOS_ACCESS_KEY",         "火山 TOS 容量统计 / 巡检不可用"),
     ]
 
     def validate(self) -> list[tuple[str, str]]:

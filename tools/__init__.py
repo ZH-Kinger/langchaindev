@@ -11,6 +11,7 @@ from .aliyun import (
     gpu_training_advisor_tool,
     cluster_health_report_tool,
 )
+from .volcano import tos_tool
 from .feishu import feishu_tool
 from .jira import jira_tool, jira_workflow_tool
 from .github import github_workflow_tool
@@ -34,6 +35,8 @@ ALL_TOOLS = [
     gpu_advisor_tool,
     gpu_training_advisor_tool,
     cluster_health_report_tool,
+    # ── 火山引擎 ─────────────────────────────────────────────
+    tos_tool,
     # ── 飞书 / Jira / GitHub ─────────────────────────────────
     feishu_tool,
     jira_tool,
@@ -64,6 +67,7 @@ TOOL_GROUPS = {
     "ecs":       {"manage_ecs"},
     "oss":       {"manage_oss"},
     "sls":       {"manage_sls"},
+    "tos":       {"manage_tos"},
 }
 
 # 启动时校验 TOOL_GROUPS 中的名字与 ALL_TOOLS 一致，防止静默路由失效
