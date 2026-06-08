@@ -350,9 +350,41 @@ def compute_dir_sizes(open_id: str, bucket: str, prefix: str = "", region: str =
     return rows, b.endpoint
 
 
+# ── 数据结构判定 + 点目录过滤（供两级遍历共用）──────────────────────────────
+
+def _struct_of_key(key: str) -> str:
+    """按文件扩展名判定数据结构：.hdf5→ego；.parquet/.mcap→itw；其余→空。"""
+    k = key.lower()
+    if k.endswith(".hdf5"):
+        return "ego"
+    if k.endswith(".parquet") or k.endswith(".mcap"):
+        return "itw"
+    return ""
+
+
+_IGNORE_DIRNAMES = {"test"}   # 非交付数据目录：测试目录
+
+
+def _is_ignored_dirname(name: str) -> bool:
+    """该目录名是否忽略：. 开头（.cache/.deliver_server_preflight 等元数据）或正好叫 test。"""
+    return name.startswith(".") or name.lower() in _IGNORE_DIRNAMES
+
+
+def _has_ignored_dir(rel: str) -> bool:
+    """rel 为相对路径；任一“目录段”被忽略（. 开头 / test）→ True。"""
+    return any(_is_ignored_dirname(seg) for seg in rel.split("/")[:-1])
+
+
+def agg_struct(structs) -> str:
+    """聚合一组结构：单一→该值；混合→'ego/itw'；全空→空。"""
+    s = sorted({x for x in structs if x})
+    return "/".join(s)
+
+
 def _direct_files_size(bucket, prefix: str):
-    """只统计 prefix 直属文件（不含子目录里的），返回 (字节数, 对象数)。"""
+    """只统计 prefix 直属文件（不含子目录里的，跳过点文件），返回 (字节数, 对象数, struct)。"""
     total_bytes = count = 0
+    struct = ""
     token = ""
     while True:
         r = bucket.list_objects_v2(prefix=prefix, delimiter="/",
@@ -360,19 +392,27 @@ def _direct_files_size(bucket, prefix: str):
         for obj in r.object_list:
             if obj.key.endswith("/") and obj.size == 0:
                 continue
+            name = obj.key[len(prefix):]
+            if name.startswith("."):               # 点文件忽略
+                continue
             total_bytes += obj.size
             count += 1
+            if not struct:
+                st = _struct_of_key(obj.key)
+                if st:
+                    struct = st
         if r.is_truncated:
             token = r.next_continuation_token
         else:
             break
-    return total_bytes, count
+    return total_bytes, count, struct
 
 
 def _grouped_sizes(bucket, family_prefix: str) -> dict:
     """一趟连续扫描 family_prefix 下所有对象，按第二层目录(批次)归并求和。
 
-    返回 {批次名: (bytes, count)}；厂家直属文件归入 '/'。
+    返回 {批次名: (bytes, count, struct)}；厂家直属文件归入 '/'。
+    跳过任意层级的点目录（.cache/.deliver_server_preflight 等元数据噪音）。
     调用次数只与对象数有关、与批次数无关——批次极多时远快于逐批次扫描。
     """
     sizes: dict = {}
@@ -383,15 +423,46 @@ def _grouped_sizes(bucket, family_prefix: str) -> dict:
             if obj.key.endswith("/") and obj.size == 0:
                 continue
             rel = obj.key[len(family_prefix):]
+            if _has_ignored_dir(rel):                  # 忽略点目录
+                continue
             batch = rel.split("/", 1)[0] if "/" in rel else "/"
-            slot = sizes.setdefault(batch, [0, 0])
+            slot = sizes.setdefault(batch, [0, 0, ""])
             slot[0] += obj.size
             slot[1] += 1
+            if not slot[2]:
+                st = _struct_of_key(obj.key)
+                if st:
+                    slot[2] = st
         if r.is_truncated:
             token = r.next_continuation_token
         else:
             break
-    return {k: (v[0], v[1]) for k, v in sizes.items()}
+    return {k: (v[0], v[1], v[2]) for k, v in sizes.items()}
+
+
+def _batch_sum(bucket, batch_prefix: str):
+    """逐批次扫：累加 batch_prefix 下对象（跳过点目录），返回 (bytes, count, struct)。"""
+    total = count = 0
+    struct = ""
+    token = ""
+    while True:
+        r = bucket.list_objects_v2(prefix=batch_prefix, continuation_token=token, max_keys=1000)
+        for obj in r.object_list:
+            if obj.key.endswith("/") and obj.size == 0:
+                continue
+            if _has_ignored_dir(obj.key[len(batch_prefix):]):
+                continue
+            total += obj.size
+            count += 1
+            if not struct:
+                st = _struct_of_key(obj.key)
+                if st:
+                    struct = st
+        if r.is_truncated:
+            token = r.next_continuation_token
+        else:
+            break
+    return total, count, struct
 
 
 # 一个厂家下「新批次」数超过此值就改用一趟分组扫描（避免逐批次列举爆炸）
@@ -425,12 +496,13 @@ def compute_nested_sizes(open_id: str, bucket: str, prefix: str = "", region: st
         vendor_name = sub[len(prefix):].rstrip("/")
         t0 = time.time()
         batches, fresh, flat = _scan_family_oss(b, sub, vendor_name, cached)
-        total_bytes = sum(s for _, s, _ in batches)
-        total_count = sum(c for _, _, c in batches)
+        total_bytes = sum(x[1] for x in batches)
+        total_count = sum(x[2] for x in batches)
         entries.append({
             "厂家": vendor_name,
             "total_bytes": total_bytes,
             "total_count": total_count,
+            "struct": agg_struct(x[3] for x in batches),
             "batches": batches,
         })
         logger.info("[进度] OSS %s [%d/%d] %s%s：%d 批次(%d 新扫) %.2fGB %d 对象 用时%.0fs",
@@ -442,7 +514,7 @@ def compute_nested_sizes(open_id: str, bucket: str, prefix: str = "", region: st
 
 
 def _scan_family_oss(b, sub: str, vendor_name: str, cached: dict):
-    """扫一个厂家，返回 (batches[(批次,bytes,count)], 新扫批次数, 是否平铺)。
+    """扫一个厂家，返回 (batches[(批次,bytes,count,struct)], 新扫批次数, 是否平铺)。
 
     决策：上次判平铺 → 直接整体扫；有缓存 → 只实扫新批次；首扫 → 整体扫一趟。
     整体扫后若批次数超 _MAX_BATCHES 判为平铺，折叠成单行 'ALL'。
@@ -452,7 +524,8 @@ def _scan_family_oss(b, sub: str, vendor_name: str, cached: dict):
     else:
         fam_has_cache = any(k.startswith(vendor_name + "/") for k in cached)
         if fam_has_cache:
-            batch_dirs = _list_subdirs(b, sub)
+            batch_dirs = [bd for bd in _list_subdirs(b, sub)
+                          if not _is_ignored_dirname(bd[len(sub):].rstrip("/"))]   # 跳过点目录
             new_dirs = [bd for bd in batch_dirs
                         if f"{vendor_name}/{bd[len(sub):].rstrip('/')}" not in cached]
             use_grouped = len(new_dirs) > _GROUPED_THRESHOLD
@@ -463,24 +536,25 @@ def _scan_family_oss(b, sub: str, vendor_name: str, cached: dict):
         grouped = _grouped_sizes(b, sub)
         real = [n for n in grouped if n != "/"]
         if len(real) > _MAX_BATCHES:                # 平铺：不细分，只记整体
-            tb = sum(s for s, _ in grouped.values())
-            tc = sum(c for _, c in grouped.values())
-            return [("ALL", tb, tc)], len(real), True
-        return [(n, s, c) for n, (s, c) in grouped.items()], len(real), False
+            tb = sum(v[0] for v in grouped.values())
+            tc = sum(v[1] for v in grouped.values())
+            st = agg_struct(v[2] for v in grouped.values())
+            return [("ALL", tb, tc, st)], len(real), True
+        return [(n, s, c, st) for n, (s, c, st) in grouped.items()], len(real), False
 
     batches, fresh = [], 0
     for bd in batch_dirs:                           # 增量：逐新批次扫，老批次用缓存
         batch_name = bd[len(sub):].rstrip("/")
         ck = f"{vendor_name}/{batch_name}"
         if ck in cached:
-            size_bytes, count = cached[ck]
+            size_bytes, count, struct = cached[ck]
         else:
-            size_bytes, count = _prefix_size(b, bd)
+            size_bytes, count, struct = _batch_sum(b, bd)
             fresh += 1
-        batches.append((batch_name, size_bytes, count))
-    root_bytes, root_count = _direct_files_size(b, sub)
+        batches.append((batch_name, size_bytes, count, struct))
+    root_bytes, root_count, root_struct = _direct_files_size(b, sub)
     if root_count:
-        batches.append(("/", root_bytes, root_count))
+        batches.append(("/", root_bytes, root_count, root_struct))
     return batches, fresh, False
 
 

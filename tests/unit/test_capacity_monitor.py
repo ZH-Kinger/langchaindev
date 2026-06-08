@@ -9,16 +9,17 @@ import json
 import pytest
 
 
-def _entry(name, total, count, batches):
-    return {"厂家": name, "total_bytes": total, "total_count": count, "batches": batches}
+def _entry(name, total, count, batches, struct=""):
+    return {"厂家": name, "total_bytes": total, "total_count": count,
+            "struct": struct, "batches": batches}
 
 
 @pytest.fixture
 def patch_compute(monkeypatch):
-    """注入可控的 compute_nested_sizes 返回值（按 vendor），含厂家+批次两级。"""
+    """注入可控的 compute_nested_sizes 返回值（按 vendor），含厂家+批次两级（4 元组）。"""
     state = {
-        "oss": [_entry("aether", 100, 2, [("batch-a", 60, 1), ("batch-b", 40, 1)])],
-        "tos": [_entry("egodex", 300, 5, [("b1", 300, 5)])],
+        "oss": [_entry("aether", 100, 2, [("batch-a", 60, 1, ""), ("batch-b", 40, 1, "")])],
+        "tos": [_entry("egodex", 300, 5, [("b1", 300, 5, "")])],
     }
 
     from tools.aliyun import oss as oss_mod
@@ -74,7 +75,8 @@ def test_second_scan_computes_delta(patch_compute, capture_cards, two_targets, f
         "capacity:snapshot:oss:wuji-bucket-hangzhou:third-party-data/") is not None
 
     capture_cards.clear()
-    patch_compute["oss"] = [_entry("aether", 100 + 1024 ** 3, 3, [("batch-a", 100 + 1024 ** 3, 3)])]  # +1 GB
+    patch_compute["oss"] = [_entry("aether", 100 + 1024 ** 3, 3,
+                                   [("batch-a", 100 + 1024 ** 3, 3, "")])]  # +1 GB
     run_capacity_scan()                         # 第二次：应算出 +1.0 GB
 
     oss_card = next(card for _chat, card in capture_cards
@@ -84,7 +86,7 @@ def test_second_scan_computes_delta(patch_compute, capture_cards, two_targets, f
 
 def test_threshold_reds_header(patch_compute, capture_cards, two_targets, monkeypatch):
     from config.settings import settings
-    patch_compute["oss"] = [_entry("aether", 5 * 1024 ** 4, 9, [("b", 5 * 1024 ** 4, 9)])]  # 5 TB
+    patch_compute["oss"] = [_entry("aether", 5 * 1024 ** 4, 9, [("b", 5 * 1024 ** 4, 9, "")])]  # 5 TB
     monkeypatch.setattr(settings, "CAPACITY_ALERT_THRESHOLD_TB", 1.0)  # 阈值 1 TB → 必超
     from core.capacity_monitor import run_capacity_scan
     run_capacity_scan()
@@ -106,9 +108,9 @@ def test_batch_cache_roundtrip(patch_compute, capture_cards, two_targets, fake_r
     from core.capacity_monitor import run_capacity_scan, _load_batch_cache
     run_capacity_scan()
     cache = _load_batch_cache("oss", "wuji-bucket-hangzhou", "third-party-data/")
-    # aether 的两个批次应已缓存（/ 不缓存）
-    assert cache.get("aether/batch-a") == (60, 1)
-    assert cache.get("aether/batch-b") == (40, 1)
+    # aether 的两个批次应已缓存（/ 不缓存），值含 struct 段
+    assert cache.get("aether/batch-a") == (60, 1, "")
+    assert cache.get("aether/batch-b") == (40, 1, "")
 
 
 def test_batch_cache_passed_to_compute(patch_compute, capture_cards, two_targets, fake_redis, monkeypatch):
@@ -120,11 +122,11 @@ def test_batch_cache_passed_to_compute(patch_compute, capture_cards, two_targets
     from tools.aliyun import oss as oss_mod
     def spy(**k):
         seen["cached"] = k.get("cached")
-        return ([_entry("aether", 100, 2, [("batch-a", 60, 1), ("batch-b", 40, 1)])],
+        return ([_entry("aether", 100, 2, [("batch-a", 60, 1, ""), ("batch-b", 40, 1, "")])],
                 "https://oss-cn-hangzhou.aliyuncs.com")
     monkeypatch.setattr(oss_mod, "compute_nested_sizes", spy)
     run_capacity_scan()                       # 第二次：应带缓存
-    assert seen["cached"].get("aether/batch-a") == (60, 1)
+    assert seen["cached"].get("aether/batch-a") == (60, 1, "")
 
 
 def test_no_targets_noop(capture_cards, monkeypatch):
