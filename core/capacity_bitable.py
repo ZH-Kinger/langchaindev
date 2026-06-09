@@ -220,10 +220,11 @@ def write_scan(vendor_rows: list, readable_id: str, remark: str) -> bool:
         fam_hours = sum(h for h in hrs if h is not None) if any(h is not None for h in hrs) else None
 
         vkey = (row["云厂商"], row["Bucket"], row["厂家"])
+        # 数据结构 = 数据模态；读不出模态(hdf5/mcap 等)则回退用数据类型
         vfields = {
             "云厂商": row["云厂商"], "Bucket": row["Bucket"], "父目录": row["父目录"], "厂家": row["厂家"],
             "大小GB": _gb(row["total_bytes"]), "对象数": row["total_count"],
-            "数据结构": row.get("struct", ""), "关联巡检快照": [snap_id],
+            "数据结构": row.get("struct") or row.get("dtype", ""), "关联巡检快照": [snap_id],
         }
         if ven_has_dtype:
             vfields["数据类型"] = row.get("dtype", "")
@@ -250,7 +251,7 @@ def write_scan(vendor_rows: list, readable_id: str, remark: str) -> bool:
             bkey = (row["云厂商"], row["厂家"], batch_name)
             bfields = {
                 "批次": batch_name, "大小GB": _gb(bsize), "对象数": bcount,
-                "数据结构": bstruct, "关联厂家总量": [vid],
+                "数据结构": bstruct or bdtype, "关联厂家总量": [vid],   # 读不出模态→回退类型
             }
             if bat_has_dtype:
                 bfields["数据类型"] = bdtype

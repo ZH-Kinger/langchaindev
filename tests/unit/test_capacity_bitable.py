@@ -154,6 +154,21 @@ def test_hours_summed_at_vendor(fake):
     assert ven["数据时长"] == 200                 # 100 + 100
 
 
+def test_struct_falls_back_to_dtype_when_no_modality(fake):
+    """读不出模态(空 struct)时，数据结构列回退用数据类型(hdf5/mcap)。"""
+    from core.capacity_bitable import write_scan
+    _tables, calls = fake
+    rows = [{"云厂商": "TOS", "Bucket": "b", "父目录": "tp", "厂家": "lightwheel",
+             "total_bytes": 10, "total_count": 2, "struct": "", "dtype": "mcap",
+             "delta_bytes": None,
+             "batches": [("6-2-504h", 10, 2, "", "mcap")]}]
+    write_scan(rows, "id", "r")
+    ven = _created(calls, "tblVendor")[0]
+    bat = _created(calls, "tblBatch")[0]
+    assert ven["数据结构"] == "mcap"        # 模态空 → 回退数据类型
+    assert bat["数据结构"] == "mcap"
+
+
 def test_parse_hours_decimal_and_nested_path():
     """时长解析支持小数,且能从多层批次路径里取出。"""
     from core.capacity_bitable import _parse_hours
