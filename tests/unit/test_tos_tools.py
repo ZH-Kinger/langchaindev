@@ -96,7 +96,7 @@ def test_tos_compute_nested_sizes(patch_tos):
     by = {e["厂家"]: e for e in entries}
     eg = by["egodex"]
     assert eg["total_bytes"] == 360 and eg["total_count"] == 4
-    batches = {name: (b, c) for name, b, c, st in eg["batches"]}
+    batches = {name: (b, c) for name, b, c, st, dt, hrs in eg["batches"]}
     assert batches["2026-01"] == (150, 2) and batches["/"] == (10, 1)
     assert by["egoverse"]["total_bytes"] == 5
 

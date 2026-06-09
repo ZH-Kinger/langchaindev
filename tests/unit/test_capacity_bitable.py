@@ -26,6 +26,8 @@ def fake(monkeypatch, cfg):
 
     monkeypatch.setattr(cb, "_tenant_token", lambda: "tok")
     monkeypatch.setattr(cb, "_list_records", lambda h, t: [dict(r) for r in tables.get(t, [])])
+    # 默认两表都已建「数据类型」列（gate 放行，便于断言写入）
+    monkeypatch.setattr(cb, "_field_names", lambda h, t: {"数据类型"})
 
     def _create(h, t, fields):
         rid = f"{t}-{len(tables[t])}"
@@ -49,11 +51,13 @@ def fake(monkeypatch, cfg):
 def _rows():
     return [
         {"云厂商": "OSS", "Bucket": "bk1", "父目录": "tp", "厂家": "lightwheel",
-         "total_bytes": 2 * 1024 ** 3, "total_count": 5, "struct": "itw", "delta_bytes": None,
-         "batches": [("6-2-504h", 2 * 1024 ** 3, 5, "itw")]},
+         "total_bytes": 2 * 1024 ** 3, "total_count": 5, "struct": "itw",
+         "dtype": "lerobot v3.0", "delta_bytes": None,
+         "batches": [("6-2-504h", 2 * 1024 ** 3, 5, "itw", "lerobot v3.0")]},
         {"云厂商": "TOS", "Bucket": "bk2", "父目录": "tp", "厂家": "egodex",
-         "total_bytes": 3 * 1024 ** 3, "total_count": 7, "struct": "ego", "delta_bytes": 1 * 1024 ** 3,
-         "batches": [("part1", 3 * 1024 ** 3, 7, "ego")]},
+         "total_bytes": 3 * 1024 ** 3, "total_count": 7, "struct": "ego",
+         "dtype": "", "delta_bytes": 1 * 1024 ** 3,
+         "batches": [("part1", 3 * 1024 ** 3, 7, "ego", "")]},
     ]
 
 
@@ -73,14 +77,28 @@ def test_upsert_creates_when_empty(fake):
 
     lw = next(f for f in vens if f["厂家"] == "lightwheel")
     assert lw["数据结构"] == "itw" and lw["数据时长"] == 504        # 504h 解析
+    assert lw["数据类型"] == "lerobot v3.0"                        # 新列写入
     assert lw["关联巡检快照"] == ["tblSnap-0"]
     eg = next(f for f in vens if f["厂家"] == "egodex")
     assert "数据时长" not in eg                                    # part1 无 h → 留空
+    assert eg["数据类型"] == ""                                    # 未识别留空（列存在仍写空串）
     assert eg["较上次GB"] == 1.0
 
     b_lw = next(f for f in bats if f["批次"] == "6-2-504h")
     assert b_lw["数据结构"] == "itw" and b_lw["数据时长"] == 504
+    assert b_lw["数据类型"] == "lerobot v3.0"
     assert b_lw["关联厂家总量"] == ["tblVendor-0"]
+
+
+def test_dtype_skipped_when_column_absent(fake, monkeypatch):
+    """表里没有「数据类型」列时，gate 应让该字段不写入（避免整条失败）。"""
+    from core import capacity_bitable as cb
+    monkeypatch.setattr(cb, "_field_names", lambda h, t: set())   # 两表都无该列
+    from core.capacity_bitable import write_scan
+    _tables, calls = fake
+    write_scan(_rows(), "id", "r")
+    for _t, f in calls["create"]:
+        assert "数据类型" not in f
 
 
 def test_upsert_updates_existing(fake):
@@ -129,11 +147,21 @@ def test_hours_summed_at_vendor(fake):
     from core.capacity_bitable import write_scan
     _tables, calls = fake
     rows = [{"云厂商": "OSS", "Bucket": "b", "父目录": "tp", "厂家": "lingsheng",
-             "total_bytes": 10, "total_count": 2, "struct": "itw", "delta_bytes": None,
-             "batches": [("wuji_itw_100h_a", 5, 1, "itw"), ("wuji_itw_100h_b", 5, 1, "itw")]}]
+             "total_bytes": 10, "total_count": 2, "struct": "itw", "dtype": "", "delta_bytes": None,
+             "batches": [("wuji_itw_100h_a", 5, 1, "itw", ""), ("wuji_itw_100h_b", 5, 1, "itw", "")]}]
     write_scan(rows, "id", "r")
     ven = _created(calls, "tblVendor")[0]
     assert ven["数据时长"] == 200                 # 100 + 100
+
+
+def test_parse_hours_decimal_and_nested_path():
+    """时长解析支持小数,且能从多层批次路径里取出。"""
+    from core.capacity_bitable import _parse_hours
+    assert _parse_hours("6-2-504h") == 504
+    assert _parse_hours("wuji_itw_100h_202605271016") == 100
+    assert _parse_hours("wuji/26_0430/wuji_home_scene_19.75h") == 19.75
+    assert _parse_hours("wuji/26_0505/wuji_home_scene_85.11h") == 85.11
+    assert _parse_hours("no_duration_here") is None
 
 
 def test_not_configured(monkeypatch):

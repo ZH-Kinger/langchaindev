@@ -9,17 +9,17 @@ import json
 import pytest
 
 
-def _entry(name, total, count, batches, struct=""):
+def _entry(name, total, count, batches, struct="", dtype="", flat=False):
     return {"厂家": name, "total_bytes": total, "total_count": count,
-            "struct": struct, "batches": batches}
+            "struct": struct, "dtype": dtype, "flat": flat, "batches": batches}
 
 
 @pytest.fixture
 def patch_compute(monkeypatch):
-    """注入可控的 compute_nested_sizes 返回值（按 vendor），含厂家+批次两级（4 元组）。"""
+    """注入可控的 compute_nested_sizes 返回值（按 vendor），含厂家+批次两级（5 元组）。"""
     state = {
-        "oss": [_entry("aether", 100, 2, [("batch-a", 60, 1, ""), ("batch-b", 40, 1, "")])],
-        "tos": [_entry("egodex", 300, 5, [("b1", 300, 5, "")])],
+        "oss": [_entry("aether", 100, 2, [("batch-a", 60, 1, "", "", None), ("batch-b", 40, 1, "", "", None)])],
+        "tos": [_entry("egodex", 300, 5, [("b1", 300, 5, "", "", None)])],
     }
 
     from tools.aliyun import oss as oss_mod
@@ -76,7 +76,7 @@ def test_second_scan_computes_delta(patch_compute, capture_cards, two_targets, f
 
     capture_cards.clear()
     patch_compute["oss"] = [_entry("aether", 100 + 1024 ** 3, 3,
-                                   [("batch-a", 100 + 1024 ** 3, 3, "")])]  # +1 GB
+                                   [("batch-a", 100 + 1024 ** 3, 3, "", "", None)])]  # +1 GB
     run_capacity_scan()                         # 第二次：应算出 +1.0 GB
 
     oss_card = next(card for _chat, card in capture_cards
@@ -86,7 +86,7 @@ def test_second_scan_computes_delta(patch_compute, capture_cards, two_targets, f
 
 def test_threshold_reds_header(patch_compute, capture_cards, two_targets, monkeypatch):
     from config.settings import settings
-    patch_compute["oss"] = [_entry("aether", 5 * 1024 ** 4, 9, [("b", 5 * 1024 ** 4, 9, "")])]  # 5 TB
+    patch_compute["oss"] = [_entry("aether", 5 * 1024 ** 4, 9, [("b", 5 * 1024 ** 4, 9, "", "", None)])]  # 5 TB
     monkeypatch.setattr(settings, "CAPACITY_ALERT_THRESHOLD_TB", 1.0)  # 阈值 1 TB → 必超
     from core.capacity_monitor import run_capacity_scan
     run_capacity_scan()
@@ -108,9 +108,9 @@ def test_batch_cache_roundtrip(patch_compute, capture_cards, two_targets, fake_r
     from core.capacity_monitor import run_capacity_scan, _load_batch_cache
     run_capacity_scan()
     cache = _load_batch_cache("oss", "wuji-bucket-hangzhou", "third-party-data/")
-    # aether 的两个批次应已缓存（/ 不缓存），值含 struct 段
-    assert cache.get("aether/batch-a") == (60, 1, "")
-    assert cache.get("aether/batch-b") == (40, 1, "")
+    # aether 的两个批次应已缓存（/ 不缓存），值含 struct + dtype 段
+    assert cache.get("aether/batch-a") == (60, 1, "", "", None)
+    assert cache.get("aether/batch-b") == (40, 1, "", "", None)
 
 
 def test_batch_cache_passed_to_compute(patch_compute, capture_cards, two_targets, fake_redis, monkeypatch):
@@ -122,11 +122,48 @@ def test_batch_cache_passed_to_compute(patch_compute, capture_cards, two_targets
     from tools.aliyun import oss as oss_mod
     def spy(**k):
         seen["cached"] = k.get("cached")
-        return ([_entry("aether", 100, 2, [("batch-a", 60, 1, ""), ("batch-b", 40, 1, "")])],
+        return ([_entry("aether", 100, 2, [("batch-a", 60, 1, "", "", None), ("batch-b", 40, 1, "", "", None)])],
                 "https://oss-cn-hangzhou.aliyuncs.com")
     monkeypatch.setattr(oss_mod, "compute_nested_sizes", spy)
     run_capacity_scan()                       # 第二次：应带缓存
-    assert seen["cached"].get("aether/batch-a") == (60, 1, "")
+    assert seen["cached"].get("aether/batch-a") == (60, 1, "", "", None)
+
+
+def test_scan_skipped_when_locked(patch_compute, capture_cards, two_targets, fake_redis):
+    """单飞锁：锁已被占 → run_capacity_scan 直接跳过，不扫不推。"""
+    fake_redis.set("capacity:scan:lock", "1")
+    from core.capacity_monitor import run_capacity_scan
+    run_capacity_scan()
+    assert capture_cards == []
+
+
+def test_lock_released_after_scan(patch_compute, capture_cards, two_targets, fake_redis):
+    """扫完释放锁：连续两次都能跑。"""
+    from core.capacity_monitor import run_capacity_scan
+    run_capacity_scan()
+    assert fake_redis.get("capacity:scan:lock") is None    # finally 已释放
+    capture_cards.clear()
+    run_capacity_scan()
+    assert len(capture_cards) == 1
+
+
+def test_flat_skip_recent(fake_redis):
+    """平铺家：缓存有 ALL 且近期已全扫 → 本次跳过（进 skip_flat）。"""
+    from core.capacity_monitor import _compute_skip_flat, _mark_flat_scanned
+    cached = {"egoverse/ALL": (1000, 5, "itw", "zarr", None),
+              "lingsheng/wuji_100h": (50, 2, "itw", "lerobot v3.0", 100.0)}
+    assert _compute_skip_flat("oss", "bk", "tp/", cached) == set()   # 还没时间戳
+    _mark_flat_scanned("oss", "bk", "tp/", ["egoverse"])
+    assert _compute_skip_flat("oss", "bk", "tp/", cached) == {"egoverse"}   # 近期扫过 → 跳过
+
+
+def test_flat_skip_expired(fake_redis):
+    """时间戳过期(>20h) → 不跳过，需重扫。"""
+    import time
+    from core.capacity_monitor import _compute_skip_flat, _flat_ts_key
+    cached = {"egoverse/ALL": (1000, 5, "itw", "zarr", None)}
+    fake_redis.hset(_flat_ts_key("oss", "bk", "tp/"), "egoverse", str(time.time() - 21 * 3600))
+    assert _compute_skip_flat("oss", "bk", "tp/", cached) == set()
 
 
 def test_no_targets_noop(capture_cards, monkeypatch):

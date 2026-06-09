@@ -8,6 +8,7 @@
 必须 confirm=true。
 """
 import logging
+import re
 
 from pydantic import BaseModel, Field
 from langchain.tools import StructuredTool
@@ -362,6 +363,33 @@ def _struct_of_key(key: str) -> str:
     return ""
 
 
+def _struct_from_name(name: str) -> str:
+    """目录名兜底判数据结构：名字含 itw→itw，含 ego→ego。
+
+    仅在按文件扩展名判不出时用（如原始采集 mkv/csv/json 没有 parquet/hdf5）。
+    依赖目录命名约定（wuji-itw_500h_*、ego* 等）。
+    """
+    n = (name or "").lower()
+    if "itw" in n:
+        return "itw"
+    if "ego" in n:
+        return "ego"
+    return ""
+
+
+def apply_name_struct_fallback(batches, vendor_name: str):
+    """对批次列表逐项兜底：struct 为空时，依次用批次名、厂家名里的 itw/ego 关键词补。
+
+    已按文件判出 struct 的批次不动（不覆盖、不误伤）。返回新的批次列表。
+    """
+    out = []
+    for name, size, count, struct, dtype, hours in batches:
+        if not struct:
+            struct = _struct_from_name(name) or _struct_from_name(vendor_name)
+        out.append((name, size, count, struct, dtype, hours))
+    return out
+
+
 _IGNORE_DIRNAMES = {"test"}   # 非交付数据目录：测试目录
 
 
@@ -375,43 +403,138 @@ def _has_ignored_dir(rel: str) -> bool:
     return any(_is_ignored_dirname(seg) for seg in rel.split("/")[:-1])
 
 
+# 目录名里的时长 token：504h / 100h / 19.75h / 85.11h …
+_DUR_RE = re.compile(r"\d+(?:\.\d+)?\s*h(?:\b|_|$)", re.IGNORECASE)
+
+
+def _has_duration(name: str) -> bool:
+    return bool(_DUR_RE.search(name or ""))
+
+
+def _batch_key(rel: str) -> str:
+    """对象相对「厂家前缀」的路径 → 批次键（= 真实数据集根）。
+
+    取到「首个名字含时长 token（如 19.75h）的目录段」为止作为数据集根；
+    没有时长目录则退回第一段（与旧的「批次=第二层」一致）；厂家直属文件 �� '/'。
+    这样深层嵌套的数据集（如  shutu/wuji/26_0430/wuji_home_scene_19.75h/…）
+    会被识别成 `wuji/26_0430/wuji_home_scene_19.75h` 这一真实批次，而非容器 `wuji`。
+    """
+    parts = rel.split("/")
+    if len(parts) == 1:                       # 厂家直属文件
+        return "/"
+    for i in range(len(parts) - 1):           # 只看目录段（不含末尾文件名）
+        if _has_duration(parts[i]):
+            return "/".join(parts[:i + 1])
+    return parts[0]
+
+
 def agg_struct(structs) -> str:
     """聚合一组结构：单一→该值；混合→'ego/itw'；全空→空。"""
     s = sorted({x for x in structs if x})
     return "/".join(s)
 
 
-def _direct_files_size(bucket, prefix: str):
-    """只统计 prefix 直属文件（不含子目录里的，跳过点文件），返回 (字节数, 对象数, struct)。"""
-    total_bytes = count = 0
-    struct = ""
-    token = ""
-    while True:
-        r = bucket.list_objects_v2(prefix=prefix, delimiter="/",
-                                   continuation_token=token, max_keys=1000)
-        for obj in r.object_list:
-            if obj.key.endswith("/") and obj.size == 0:
-                continue
-            name = obj.key[len(prefix):]
-            if name.startswith("."):               # 点文件忽略
-                continue
-            total_bytes += obj.size
-            count += 1
-            if not struct:
-                st = _struct_of_key(obj.key)
-                if st:
-                    struct = st
-        if r.is_truncated:
-            token = r.next_continuation_token
-        else:
-            break
-    return total_bytes, count, struct
+# ── 数据集类型识别（按目录结构，list-only，不读文件内容）────────────────────────
+# LeRobot 结构标记（看 meta/ 关键文件）+ 其余常见格式（按扩展名）。
+_DT_LEROBOT, _DT_V3, _DT_V2, _DT_V21 = 1 << 0, 1 << 1, 1 << 2, 1 << 3
+_DT_RLDS, _DT_ROSBAG, _DT_MCAP, _DT_HDF5 = 1 << 4, 1 << 5, 1 << 6, 1 << 7
+_DT_ZARR, _DT_RAWCAP = 1 << 8, 1 << 9
+_DT_PARQUET, _DT_NUMPY, _DT_PCD = 1 << 10, 1 << 11, 1 << 12
+
+
+def _dataset_type_bits(within: str) -> int:
+    """从「相对批次根的对象路径」识别数据集结构标记位。
+
+    LeRobot 依据官方目录结构：v3.0 有 meta/tasks.parquet + meta/episodes/*.parquet；
+    v2.x 有 meta/episodes.jsonl / meta/tasks.jsonl；v2.1 多 meta/episodes_stats.jsonl；
+    都含 meta/info.json。其余格式按扩展名判。
+    """
+    r = within.lower()
+    bits = 0
+    if "meta/" in r:                                  # LeRobot：只看 meta/ 关键文件
+        if r.endswith("meta/info.json"):
+            bits |= _DT_LEROBOT
+        if r.endswith("meta/tasks.parquet") or "meta/episodes/" in r:
+            bits |= _DT_V3
+        if r.endswith("meta/episodes.jsonl") or r.endswith("meta/tasks.jsonl"):
+            bits |= _DT_V2
+        if r.endswith("meta/episodes_stats.jsonl"):
+            bits |= _DT_V21
+    # Zarr：v3 用 zarr.json；v2 用 .zarray/.zgroup/.zattrs；也可能整体打成 .zarr.zip 或 xxx.zarr/ 目录
+    if (r.endswith("zarr.json") or r.endswith(".zarray") or r.endswith(".zgroup")
+            or r.endswith(".zattrs") or r.endswith(".zarr.zip") or ".zarr/" in r):
+        bits |= _DT_ZARR
+    # 原始多传感采集（camera_params/ 标定目录 或 kalibr 标定文件）
+    if "camera_params/" in r or r.endswith("kalibr_parameters.yaml"):
+        bits |= _DT_RAWCAP
+    # RLDS/TFDS：分片 *.tfrecord-00000-of-00010 / dataset_info.json / features.json
+    if ".tfrecord" in r or r.endswith("dataset_info.json") or r.endswith("features.json"):
+        bits |= _DT_RLDS
+    elif r.endswith(".bag") or r.endswith(".db3"):
+        bits |= _DT_ROSBAG
+    elif r.endswith(".mcap"):
+        bits |= _DT_MCAP
+    elif r.endswith(".hdf5") or r.endswith(".h5"):
+        bits |= _DT_HDF5
+    elif r.endswith(".parquet"):                              # 裸 parquet（lerobot 的已被 meta/ 命中）
+        bits |= _DT_PARQUET
+    elif r.endswith(".npy") or r.endswith(".npz"):
+        bits |= _DT_NUMPY
+    elif r.endswith(".pcd") or r.endswith(".ply") or r.endswith(".las"):
+        bits |= _DT_PCD
+    return bits
+
+
+def _resolve_dataset_type(bits: int) -> str:
+    """标记位 → 数据集类型串；无可识别返回空。LeRobot 优先（其数据即 parquet）。"""
+    if bits & (_DT_LEROBOT | _DT_V3 | _DT_V2 | _DT_V21):
+        if bits & _DT_V3:
+            return "lerobot v3.0"
+        if bits & _DT_V21:
+            return "lerobot v2.1"
+        if bits & _DT_V2:
+            return "lerobot v2.0"
+        return "lerobot"                              # 仅见 info.json，版本未知
+    if bits & _DT_ZARR:
+        return "zarr"
+    if bits & _DT_RLDS:
+        return "rlds"
+    if bits & _DT_ROSBAG:
+        return "rosbag"
+    if bits & _DT_RAWCAP:                              # 自定义原始采集（结构特征，优先于裸扩展名）
+        return "raw-capture"
+    if bits & _DT_MCAP:
+        return "mcap"
+    if bits & _DT_HDF5:
+        return "hdf5"
+    if bits & _DT_PARQUET:
+        return "parquet"
+    if bits & _DT_NUMPY:
+        return "numpy"
+    if bits & _DT_PCD:
+        return "pointcloud"
+    return ""                                          # 无识别：批次级由 resolve_dtype 兜底成 other
+
+
+def resolve_dtype(bits: int) -> str:
+    """批次级解析：识别到→具体类型；有对象但啥都没识别到→'other'（散数据）。"""
+    return _resolve_dataset_type(bits) or "other"
+
+
+def agg_dtype(types) -> str:
+    """聚合一组数据集类型：有具体类型→去重 join（丢掉 other）；全是 other/空→other 或空。"""
+    s = {x for x in types if x}
+    real = sorted(x for x in s if x != "other")
+    if real:
+        return "/".join(real)
+    return "other" if "other" in s else ""
 
 
 def _grouped_sizes(bucket, family_prefix: str) -> dict:
     """一趟连续扫描 family_prefix 下所有对象，按第二层目录(批次)归并求和。
 
-    返回 {批次名: (bytes, count, struct)}；厂家直属文件归入 '/'。
+    返回 {批次名: (bytes, count, struct, dtype, info_key)}；厂家直属文件归入 '/'。
+    info_key = 该批次下 meta/info.json 的完整 key（LeRobot 才有，供后续读取精确时长/版本），无则 ""。
     跳过任意层级的点目录（.cache/.deliver_server_preflight 等元数据噪音）。
     调用次数只与对象数有关、与批次数无关——批次极多时远快于逐批次扫描。
     """
@@ -425,54 +548,61 @@ def _grouped_sizes(bucket, family_prefix: str) -> dict:
             rel = obj.key[len(family_prefix):]
             if _has_ignored_dir(rel):                  # 忽略点目录
                 continue
-            batch = rel.split("/", 1)[0] if "/" in rel else "/"
-            slot = sizes.setdefault(batch, [0, 0, ""])
+            batch = _batch_key(rel)                    # 自适应：下钻到真实数据集根
+            within = rel[len(batch) + 1:] if batch != "/" else rel
+            slot = sizes.setdefault(batch, [0, 0, "", 0, ""])
             slot[0] += obj.size
             slot[1] += 1
             if not slot[2]:
                 st = _struct_of_key(obj.key)
                 if st:
                     slot[2] = st
+            slot[3] |= _dataset_type_bits(within)
+            if not slot[4] and within.endswith("meta/info.json"):
+                slot[4] = obj.key
         if r.is_truncated:
             token = r.next_continuation_token
         else:
             break
-    return {k: (v[0], v[1], v[2]) for k, v in sizes.items()}
+    return {k: (v[0], v[1], v[2], resolve_dtype(v[3]), v[4]) for k, v in sizes.items()}
 
 
-def _batch_sum(bucket, batch_prefix: str):
-    """逐批次扫：累加 batch_prefix 下对象（跳过点目录），返回 (bytes, count, struct)。"""
-    total = count = 0
-    struct = ""
-    token = ""
-    while True:
-        r = bucket.list_objects_v2(prefix=batch_prefix, continuation_token=token, max_keys=1000)
-        for obj in r.object_list:
-            if obj.key.endswith("/") and obj.size == 0:
-                continue
-            if _has_ignored_dir(obj.key[len(batch_prefix):]):
-                continue
-            total += obj.size
-            count += 1
-            if not struct:
-                st = _struct_of_key(obj.key)
-                if st:
-                    struct = st
-        if r.is_truncated:
-            token = r.next_continuation_token
-        else:
-            break
-    return total, count, struct
+import json as _json
 
 
-# 一个厂家下「新批次」数超过此值就改用一趟分组扫描（避免逐批次列举爆炸）
-_GROUPED_THRESHOLD = 30
+def parse_lerobot_info(raw):
+    """LeRobot `meta/info.json` 原始字节/字符串 → (hours, version)。
+
+    时长 = total_frames / fps / 3600（小时）；版本来自 codebase_version（v3.0 → 'lerobot v3.0'）。
+    解析失败 → (None, None)。供 OSS / TOS 各自取到字节后共用。
+    """
+    try:
+        info = _json.loads(raw)
+        fps, frames = info.get("fps"), info.get("total_frames")
+        hours = round(frames / float(fps) / 3600, 2) if (fps and frames) else None
+        ver = info.get("codebase_version")
+        return hours, (f"lerobot {ver}" if ver else None)
+    except Exception:
+        return None, None
+
+
+def _read_lerobot_info(bucket, info_key: str):
+    """OSS：GetObject `meta/info.json` 并解析 → (hours, version)。失败静默降级 (None, None)。
+
+    仅在已确认是 LeRobot 数据集（扫到 meta/info.json）时调用；结果随批次缓存，不每次重读。
+    """
+    try:
+        return parse_lerobot_info(bucket.get_object(info_key).read())
+    except Exception:
+        return None, None
+
+
 # 批次数超过此值判定为「平铺」：不再细分批次，只记厂家整体大小（一行 'ALL'）
 _MAX_BATCHES = 200
 
 
 def compute_nested_sizes(open_id: str, bucket: str, prefix: str = "", region: str = "",
-                         cached: dict = None, on_family=None):
+                         cached: dict = None, on_family=None, skip_flat=None):
     """两级遍历：prefix 下每个「厂家」(一级子目录) 及其下「批次」(二级子目录) 的大小。
 
     返回 (entries, endpoint)，entries = [
@@ -495,7 +625,8 @@ def compute_nested_sizes(open_id: str, bucket: str, prefix: str = "", region: st
     for idx, sub in enumerate(families, 1):         # 厂家
         vendor_name = sub[len(prefix):].rstrip("/")
         t0 = time.time()
-        batches, fresh, flat = _scan_family_oss(b, sub, vendor_name, cached)
+        batches, fresh, flat = _scan_family_oss(b, sub, vendor_name, cached, skip_flat)
+        batches = apply_name_struct_fallback(batches, vendor_name)  # 目录名兜底补 itw/ego
         total_bytes = sum(x[1] for x in batches)
         total_count = sum(x[2] for x in batches)
         entries.append({
@@ -503,6 +634,8 @@ def compute_nested_sizes(open_id: str, bucket: str, prefix: str = "", region: st
             "total_bytes": total_bytes,
             "total_count": total_count,
             "struct": agg_struct(x[3] for x in batches),
+            "dtype": agg_dtype(x[4] for x in batches),
+            "flat": flat,
             "batches": batches,
         })
         logger.info("[进度] OSS %s [%d/%d] %s%s：%d 批次(%d 新扫) %.2fGB %d 对象 用时%.0fs",
@@ -513,49 +646,42 @@ def compute_nested_sizes(open_id: str, bucket: str, prefix: str = "", region: st
     return entries, b.endpoint
 
 
-def _scan_family_oss(b, sub: str, vendor_name: str, cached: dict):
-    """扫一个厂家，返回 (batches[(批次,bytes,count,struct)], 新扫批次数, 是否平铺)。
+def _scan_family_oss(b, sub: str, vendor_name: str, cached: dict = None, skip_flat=None):
+    """扫一个厂家，返回 (batches[(批次,bytes,count,struct,dtype,hours)], 新扫批次数, 是否平铺)。
 
-    决策：上次判平铺 → 直接整体扫；有缓存 → 只实扫新批次；首扫 → 整体扫一趟。
-    整体扫后若批次数超 _MAX_BATCHES 判为平铺，折叠成单行 'ALL'。
+    一趟分组扫描：`_grouped_sizes` 用 `_batch_key` 把对象归并到「真实数据集根」
+    （时长目录或第二层），任意深度都对齐到真实批次（如 shutu 的 wuji/26_0430/…_19.75h）。
+    批次数超 _MAX_BATCHES 判为平铺，折叠成单行 'ALL'。
+    `skip_flat`：本次可跳过重扫的平铺家集合（近期已全扫过）→ 直接复用缓存的 ALL 总量。
+    LeRobot 批次额外读 meta/info.json 拿精确时长 + 版本。
     """
-    if f"{vendor_name}/ALL" in cached:           # 上次已判平铺，直接整体扫
-        use_grouped, batch_dirs = True, None
-    else:
-        fam_has_cache = any(k.startswith(vendor_name + "/") for k in cached)
-        if fam_has_cache:
-            batch_dirs = [bd for bd in _list_subdirs(b, sub)
-                          if not _is_ignored_dirname(bd[len(sub):].rstrip("/"))]   # 跳过点目录
-            new_dirs = [bd for bd in batch_dirs
-                        if f"{vendor_name}/{bd[len(sub):].rstrip('/')}" not in cached]
-            use_grouped = len(new_dirs) > _GROUPED_THRESHOLD
-        else:
-            use_grouped, batch_dirs = True, None
+    cached = cached or {}
+    # 近期扫过的平铺家：复用缓存 ALL，跳过 1.6M 对象全扫
+    if skip_flat and vendor_name in skip_flat:
+        allk = f"{vendor_name}/ALL"
+        if allk in cached:
+            s, c, st, dt, hrs = cached[allk]
+            return [("ALL", s, c, st, dt, hrs)], 0, True
 
-    if use_grouped:
-        grouped = _grouped_sizes(b, sub)
-        real = [n for n in grouped if n != "/"]
-        if len(real) > _MAX_BATCHES:                # 平铺：不细分，只记整体
-            tb = sum(v[0] for v in grouped.values())
-            tc = sum(v[1] for v in grouped.values())
-            st = agg_struct(v[2] for v in grouped.values())
-            return [("ALL", tb, tc, st)], len(real), True
-        return [(n, s, c, st) for n, (s, c, st) in grouped.items()], len(real), False
+    grouped = _grouped_sizes(b, sub)
+    real = [n for n in grouped if n != "/"]
+    if len(real) > _MAX_BATCHES:                    # 平铺：不细分，只记整体
+        tb = sum(v[0] for v in grouped.values())
+        tc = sum(v[1] for v in grouped.values())
+        st = agg_struct(v[2] for v in grouped.values())
+        dt = agg_dtype(v[3] for v in grouped.values())
+        return [("ALL", tb, tc, st, dt, None)], len(real), True
 
-    batches, fresh = [], 0
-    for bd in batch_dirs:                           # 增量：逐新批次扫，老批次用缓存
-        batch_name = bd[len(sub):].rstrip("/")
-        ck = f"{vendor_name}/{batch_name}"
-        if ck in cached:
-            size_bytes, count, struct = cached[ck]
-        else:
-            size_bytes, count, struct = _batch_sum(b, bd)
-            fresh += 1
-        batches.append((batch_name, size_bytes, count, struct))
-    root_bytes, root_count, root_struct = _direct_files_size(b, sub)
-    if root_count:
-        batches.append(("/", root_bytes, root_count, root_struct))
-    return batches, fresh, False
+    batches = []
+    for name, (s, c, st, dt, info_key) in grouped.items():
+        hrs = None
+        if info_key:                                # LeRobot：读 info.json 拿精确时长+版本
+            h, ver = _read_lerobot_info(b, info_key)
+            if ver:
+                dt = ver
+            hrs = h
+        batches.append((name, s, c, st, dt, hrs))
+    return batches, len(real), False
 
 
 def build_tree(open_id: str, bucket: str, prefix: str = "",
