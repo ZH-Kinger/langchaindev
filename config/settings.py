@@ -88,6 +88,10 @@ class Config:
     # 每日集群监控早报（9 点随 DSW 实例早报一起推送基础设施健康报告到群）
     CLUSTER_MORNING_REPORT_ENABLED = os.environ.get("CLUSTER_MORNING_REPORT_ENABLED", "true").lower() == "true"
 
+    # OSS 权限同步：每日对账推卡片到群，管理员点「批准」按钮自动下发（用 ALIYUN_ACCESS_KEY 调 RAM）
+    OSS_PERM_PUSH_ENABLED = os.environ.get("OSS_PERM_PUSH_ENABLED", "false").lower() == "true"
+    OSS_PERM_PUSH_HOUR    = int(os.environ.get("OSS_PERM_PUSH_HOUR", "9"))
+
     # GPU 配额与运营
     ADMIN_FEISHU_OPEN_ID      = os.environ.get("ADMIN_FEISHU_OPEN_ID", "")
     GPU_PRICE_PER_HOUR        = float(os.environ.get("GPU_PRICE_PER_HOUR", "35.0"))

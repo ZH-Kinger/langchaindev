@@ -1012,6 +1012,30 @@ def _process_action(action_name: str, action_val: dict, open_id: str, chat_id: s
             },
         }
 
+    # ── OSS 权限同步：管理员批准 → 后台下发 → 回结果卡片 ───────────────────────
+    if action_name == "approve_oss_perm":
+        from config.settings import settings as _cfg
+        if open_id != _cfg.ADMIN_FEISHU_OPEN_ID:
+            return {"toast": {"type": "error", "content": "仅管理员可批准下发"}}
+
+        def _do_oss_perm_apply() -> None:
+            from core.dsw_scheduler import _send_card, _send_text
+            try:
+                from core.oss_perm import permsync
+                from core.oss_perm.cards import result_card
+                members, combos = permsync.load_members()
+                plan = permsync.build_plan(members, combos)
+                summary = permsync.apply_all(plan)
+                _send_card("", _cfg.FEISHU_CHAT_ID, result_card(summary))
+                logger.info("[OSSPerm] 下发完成：成功 %d 失败 %d 无用户 %d",
+                            summary["ok"], summary["fail"], summary["no_user"])
+            except Exception as e:
+                logger.error("[OSSPerm] 下发失败", exc_info=True)
+                _send_text("", _cfg.FEISHU_CHAT_ID, f"❌ OSS 权限下发失败：{e}")
+
+        threading.Thread(target=_do_oss_perm_apply, daemon=True).start()
+        return {"toast": {"type": "success", "content": "已开始下发，完成后推送结果到群"}}
+
     return {}
 
 
