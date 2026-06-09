@@ -202,51 +202,33 @@ def test_dot_and_test_dirs_ignored(patch_bucket):
     assert lw["total_bytes"] == 100 and lw["total_count"] == 1
 
 
-def test_struct_detection(patch_bucket):
-    """按扩展名判数据结构：hdf5→ego，parquet/mcap→itw。"""
+def test_modality_from_raw_capture_filenames(patch_bucket):
+    """原始采集：从文件名读模态（rgb/depth/imu/audio/手部关键点）。"""
     patch_bucket([
-        ("tp/egodex/p1/0.hdf5", 10), ("tp/egodex/p1/0.mp4", 5),
-        ("tp/lingsheng/itw1/data/chunk-000/f.parquet", 20),
-        ("tp/lightwheel/6-2-504h/u/x.mcap", 30),
+        ("tp/nuoyiteng/wuji-itw_500h/uuid1/rgb_head.mp4", 9999),
+        ("tp/nuoyiteng/wuji-itw_500h/uuid1/depth_head.mkv", 20),
+        ("tp/nuoyiteng/wuji-itw_500h/uuid1/imu.txt", 5),
+        ("tp/nuoyiteng/wuji-itw_500h/uuid1/mic.wav", 5),
+        ("tp/nuoyiteng/wuji-itw_500h/uuid1/hands_keypoint_3d.json", 5),
     ])
     from tools.aliyun.oss import compute_nested_sizes
-    by = {e["厂家"]: e for e in compute_nested_sizes("", "bkt", "tp/")[0]}
-    assert by["egodex"]["struct"] == "ego"
-    assert by["lingsheng"]["struct"] == "itw"
-    assert by["lightwheel"]["struct"] == "itw"
-    assert {b[0]: b[3] for b in by["egodex"]["batches"]}["p1"] == "ego"
+    st = compute_nested_sizes("", "bkt", "tp/")[0][0]["struct"]
+    assert st == "RGB/深度/IMU/音频/手部关键点"
 
 
-def test_struct_from_name_fallback_unit():
-    """目录名兜底：含 itw→itw、含 ego→ego、其余→空。"""
-    from tools.aliyun.oss import _struct_from_name
-    assert _struct_from_name("wuji-itw_500h_200items-202605181031") == "itw"
-    assert _struct_from_name("egodex") == "ego"
-    assert _struct_from_name("nuoyiteng") == ""
-    assert _struct_from_name("larybench") == ""
-
-
-def test_struct_name_fallback_fills_raw_capture(patch_bucket):
-    """原始采集（mkv/csv/json，无 parquet/hdf5）→ 扩展名判不出，靠批次名 itw 兜底。"""
+def test_modality_from_zarr_array_paths(patch_bucket):
+    """Zarr：从 episode 下的数组名(路径段)读模态（egoverse 风格）。"""
     patch_bucket([
-        ("tp/nuoyiteng/wuji-itw_500h_200items/uuid1/config.json", 10),
-        ("tp/nuoyiteng/wuji-itw_500h_200items/uuid1/depth_head.mkv", 9999),
-        ("tp/nuoyiteng/wuji-itw_500h_200items/uuid1/depth_head.csv", 20),
+        ("tp/egoverse/ep1/images.front_1/zarr.json", 1),
+        ("tp/egoverse/ep1/obs_eye_gaze/zarr.json", 1),
+        ("tp/egoverse/ep1/obs_head_pose/zarr.json", 1),
+        ("tp/egoverse/ep1/left.obs_ee_pose/c/0", 1),
+        ("tp/egoverse/ep1/left.obs_wrist_pose/zarr.json", 1),
+        ("tp/egoverse/ep1/left.obs_keypoints/zarr.json", 1),
     ])
     from tools.aliyun.oss import compute_nested_sizes
-    by = {e["厂家"]: e for e in compute_nested_sizes("", "bkt", "tp/")[0]}
-    assert by["nuoyiteng"]["struct"] == "itw"      # 名字含 itw → 兜底判 itw
-    assert {b[0]: b[3] for b in by["nuoyiteng"]["batches"]}["wuji-itw_500h_200items"] == "itw"
-
-
-def test_struct_extension_not_overridden_by_name(patch_bucket):
-    """已按文件扩展名判出的不被目录名兜底覆盖（egoverse 文件是 parquet→itw，名字含 ego 不改成 ego）。"""
-    patch_bucket([
-        ("tp/egoverse/batch1/data/chunk-000/f.parquet", 100),   # 文件→itw
-    ])
-    from tools.aliyun.oss import compute_nested_sizes
-    by = {e["厂家"]: e for e in compute_nested_sizes("", "bkt", "tp/")[0]}
-    assert by["egoverse"]["struct"] == "itw"       # 不因厂家名含 ego 变成 ego/itw
+    st = compute_nested_sizes("", "bkt", "tp/")[0][0]["struct"]
+    assert st == "RGB/眼动/头部位姿/末端位姿/手腕/手部关键点"
 
 
 def test_scan_reads_info_json_for_lerobot(patch_bucket):

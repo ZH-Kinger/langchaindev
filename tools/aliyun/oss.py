@@ -351,43 +351,64 @@ def compute_dir_sizes(open_id: str, bucket: str, prefix: str = "", region: str =
     return rows, b.endpoint
 
 
-# ── 数据结构判定 + 点目录过滤（供两级遍历共用）──────────────────────────────
+# ── 数据模态判定（读对象路径/文件名 + LeRobot info.json features）+ 点目录过滤 ──
+# 「数据结构」列改为如实列出数据集含哪些模态（取代过去靠扩展名猜 itw/ego 的做法）。
+# 标签按此固定顺序输出，便于稳定展示。
+_MODALITY_ORDER = [
+    "RGB", "深度", "IMU", "音频", "眼动", "头部位姿",
+    "末端位姿", "手腕", "手部关键点", "手部MANO", "动作", "状态", "关节", "夹爪",
+]
+# 标签 → 命中关键词（子串，匹配时对象已转小写）
+_MODALITY_KW = {
+    "RGB":       ("front_camera", "camera", "images", "image", "rgb", ".mp4", ".mkv", "video"),
+    "深度":      ("depth",),
+    "IMU":       ("imu",),
+    "音频":      ("mic", ".wav", "audio"),
+    "眼动":      ("gaze",),
+    "头部位姿":  ("head_pose", "obs_head", "head_hands"),
+    "末端位姿":  ("ee_pose", "eef", "end_effector"),
+    "手腕":      ("wrist",),
+    "手部关键点": ("keypoint", "joints2d"),
+    "手部MANO":  ("mano",),
+    "动作":      ("action",),
+    "状态":      (".state", "/state", "observation.state", "qpos"),
+    "关节":      ("joint_pos", "joint_state", "joint_angle"),
+    "夹爪":      ("gripper",),
+}
+_MODALITY_SAMPLE_CAP = 800   # 每批次只对前 N 个对象采模态（模态在数据集内同质，足够稳定）
 
-def _struct_of_key(key: str) -> str:
-    """按文件扩展名判定数据结构：.hdf5→ego；.parquet/.mcap→itw；其余→空。"""
-    k = key.lower()
-    if k.endswith(".hdf5"):
-        return "ego"
-    if k.endswith(".parquet") or k.endswith(".mcap"):
-        return "itw"
-    return ""
+
+def _modality_bits(s: str) -> int:
+    """从一个路径段/文件名/字段名（小写）命中的模态 → bit 集合。"""
+    bits = 0
+    for i, label in enumerate(_MODALITY_ORDER):
+        for kw in _MODALITY_KW[label]:
+            if kw in s:
+                bits |= (1 << i)
+                break
+    return bits
 
 
-def _struct_from_name(name: str) -> str:
-    """目录名兜底判数据结构：名字含 itw→itw，含 ego→ego。
-
-    仅在按文件扩展名判不出时用（如原始采集 mkv/csv/json 没有 parquet/hdf5）。
-    依赖目录命名约定（wuji-itw_500h_*、ego* 等）。
-    """
-    n = (name or "").lower()
-    if "itw" in n:
-        return "itw"
-    if "ego" in n:
-        return "ego"
-    return ""
+def _resolve_modalities(bits: int) -> str:
+    """bit 集合 → 固定顺序的模态串，如 'RGB/手部MANO/动作/状态'。"""
+    return "/".join(_MODALITY_ORDER[i] for i in range(len(_MODALITY_ORDER)) if bits & (1 << i))
 
 
-def apply_name_struct_fallback(batches, vendor_name: str):
-    """对批次列表逐项兜底：struct 为空时，依次用批次名、厂家名里的 itw/ego 关键词补。
+def _features_modality_bits(feature_keys) -> int:
+    """LeRobot info.json 的 features 键集合 → 模态 bit。"""
+    bits = 0
+    for k in feature_keys:
+        bits |= _modality_bits(str(k).lower())
+    return bits
 
-    已按文件判出 struct 的批次不动（不覆盖、不误伤）。返回新的批次列表。
-    """
-    out = []
-    for name, size, count, struct, dtype, hours in batches:
-        if not struct:
-            struct = _struct_from_name(name) or _struct_from_name(vendor_name)
-        out.append((name, size, count, struct, dtype, hours))
-    return out
+
+def agg_modalities(mods) -> str:
+    """聚合一组模态串（各为 '/'-join）→ 并集，按固定顺序。"""
+    labels = set()
+    for m in mods:
+        if m:
+            labels.update(m.split("/"))
+    return "/".join(l for l in _MODALITY_ORDER if l in labels)
 
 
 _IGNORE_DIRNAMES = {"test"}   # 非交付数据目录：测试目录
@@ -426,12 +447,6 @@ def _batch_key(rel: str) -> str:
         if _has_duration(parts[i]):
             return "/".join(parts[:i + 1])
     return parts[0]
-
-
-def agg_struct(structs) -> str:
-    """聚合一组结构：单一→该值；混合→'ego/itw'；全空→空。"""
-    s = sorted({x for x in structs if x})
-    return "/".join(s)
 
 
 # ── 数据集类型识别（按目录结构，list-only，不读文件内容）────────────────────────
@@ -550,13 +565,11 @@ def _grouped_sizes(bucket, family_prefix: str) -> dict:
                 continue
             batch = _batch_key(rel)                    # 自适应：下钻到真实数据集根
             within = rel[len(batch) + 1:] if batch != "/" else rel
-            slot = sizes.setdefault(batch, [0, 0, "", 0, ""])
+            slot = sizes.setdefault(batch, [0, 0, 0, 0, ""])   # [bytes,count,modbits,dtbits,info_key]
             slot[0] += obj.size
             slot[1] += 1
-            if not slot[2]:
-                st = _struct_of_key(obj.key)
-                if st:
-                    slot[2] = st
+            if slot[1] <= _MODALITY_SAMPLE_CAP:        # 模态：只采前 N 个对象（同质，够稳）
+                slot[2] |= _modality_bits(within.lower())
             slot[3] |= _dataset_type_bits(within)
             if not slot[4] and within.endswith("meta/info.json"):
                 slot[4] = obj.key
@@ -564,6 +577,7 @@ def _grouped_sizes(bucket, family_prefix: str) -> dict:
             token = r.next_continuation_token
         else:
             break
+    # 返回 {批次: (bytes, count, modbits, dtype串, info_key)}；modbits 留待 _scan_family 合并 features 后再解析
     return {k: (v[0], v[1], v[2], resolve_dtype(v[3]), v[4]) for k, v in sizes.items()}
 
 
@@ -571,30 +585,32 @@ import json as _json
 
 
 def parse_lerobot_info(raw):
-    """LeRobot `meta/info.json` 原始字节/字符串 → (hours, version)。
+    """LeRobot `meta/info.json` 原始字节/字符串 → (hours, version, modality_bits)。
 
-    时长 = total_frames / fps / 3600（小时）；版本来自 codebase_version（v3.0 → 'lerobot v3.0'）。
-    解析失败 → (None, None)。供 OSS / TOS 各自取到字节后共用。
+    时长 = total_frames / fps / 3600；版本来自 codebase_version；模态来自 features 键。
+    解析失败 → (None, None, 0)。供 OSS / TOS 各自取到字节后共用。
     """
     try:
         info = _json.loads(raw)
         fps, frames = info.get("fps"), info.get("total_frames")
         hours = round(frames / float(fps) / 3600, 2) if (fps and frames) else None
         ver = info.get("codebase_version")
-        return hours, (f"lerobot {ver}" if ver else None)
+        feats = info.get("features") or {}
+        modbits = _features_modality_bits(feats.keys() if isinstance(feats, dict) else feats)
+        return hours, (f"lerobot {ver}" if ver else None), modbits
     except Exception:
-        return None, None
+        return None, None, 0
 
 
 def _read_lerobot_info(bucket, info_key: str):
-    """OSS：GetObject `meta/info.json` 并解析 → (hours, version)。失败静默降级 (None, None)。
+    """OSS：GetObject `meta/info.json` 并解析 → (hours, version, modbits)。失败 (None, None, 0)。
 
     仅在已确认是 LeRobot 数据集（扫到 meta/info.json）时调用；结果随批次缓存，不每次重读。
     """
     try:
         return parse_lerobot_info(bucket.get_object(info_key).read())
     except Exception:
-        return None, None
+        return None, None, 0
 
 
 # 批次数超过此值判定为「平铺」：不再细分批次，只记厂家整体大小（一行 'ALL'）
@@ -626,14 +642,13 @@ def compute_nested_sizes(open_id: str, bucket: str, prefix: str = "", region: st
         vendor_name = sub[len(prefix):].rstrip("/")
         t0 = time.time()
         batches, fresh, flat = _scan_family_oss(b, sub, vendor_name, cached, skip_flat)
-        batches = apply_name_struct_fallback(batches, vendor_name)  # 目录名兜底补 itw/ego
         total_bytes = sum(x[1] for x in batches)
         total_count = sum(x[2] for x in batches)
         entries.append({
             "厂家": vendor_name,
             "total_bytes": total_bytes,
             "total_count": total_count,
-            "struct": agg_struct(x[3] for x in batches),
+            "struct": agg_modalities(x[3] for x in batches),   # 数据结构列=数据模态
             "dtype": agg_dtype(x[4] for x in batches),
             "flat": flat,
             "batches": batches,
@@ -663,24 +678,27 @@ def _scan_family_oss(b, sub: str, vendor_name: str, cached: dict = None, skip_fl
             s, c, st, dt, hrs = cached[allk]
             return [("ALL", s, c, st, dt, hrs)], 0, True
 
-    grouped = _grouped_sizes(b, sub)
+    grouped = _grouped_sizes(b, sub)                # {批次: (bytes,count,modbits,dtype,info_key)}
     real = [n for n in grouped if n != "/"]
     if len(real) > _MAX_BATCHES:                    # 平铺：不细分，只记整体
         tb = sum(v[0] for v in grouped.values())
         tc = sum(v[1] for v in grouped.values())
-        st = agg_struct(v[2] for v in grouped.values())
+        mbits = 0
+        for v in grouped.values():
+            mbits |= v[2]
         dt = agg_dtype(v[3] for v in grouped.values())
-        return [("ALL", tb, tc, st, dt, None)], len(real), True
+        return [("ALL", tb, tc, _resolve_modalities(mbits), dt, None)], len(real), True
 
     batches = []
-    for name, (s, c, st, dt, info_key) in grouped.items():
+    for name, (s, c, mbits, dt, info_key) in grouped.items():
         hrs = None
-        if info_key:                                # LeRobot：读 info.json 拿精确时长+版本
-            h, ver = _read_lerobot_info(b, info_key)
+        if info_key:                                # LeRobot：读 info.json 拿精确时长+版本+模态
+            h, ver, feat_mbits = _read_lerobot_info(b, info_key)
             if ver:
                 dt = ver
             hrs = h
-        batches.append((name, s, c, st, dt, hrs))
+            mbits |= feat_mbits
+        batches.append((name, s, c, _resolve_modalities(mbits), dt, hrs))
     return batches, len(real), False
 
 

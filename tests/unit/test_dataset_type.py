@@ -136,16 +136,47 @@ def test_resolve_dtype_other_fallback():
     assert resolve_dtype(_dataset_type_bits("meta/tasks.parquet")) == "lerobot v3.0"
 
 
+def test_modality_bits_and_resolve():
+    from tools.aliyun.oss import _modality_bits, _resolve_modalities
+    def m(s): return _resolve_modalities(_modality_bits(s))
+    assert m("uuid/rgb_head.mp4") == "RGB"
+    assert m("uuid/depth_head.mkv") == "RGB/深度"          # .mkv→RGB, depth→深度
+    assert m("uuid/imu.txt") == "IMU"
+    assert m("uuid/mic.wav") == "音频"
+    assert m("ep/obs_eye_gaze/zarr.json") == "眼动"
+    assert m("ep/obs_head_pose/zarr.json") == "头部位姿"
+    assert m("ep/left.obs_ee_pose/c/0") == "末端位姿"
+    assert m("ep/left.obs_wrist_pose/x") == "手腕"
+    assert m("ep/left.obs_keypoints/x") == "手部关键点"
+    assert m("observation.mano.left.state") == "手部MANO/状态"
+    assert m("readme.txt") == ""
+
+
+def test_resolve_modalities_canonical_order():
+    from tools.aliyun.oss import _modality_bits, _resolve_modalities
+    bits = _modality_bits("obs_eye_gaze") | _modality_bits("images.front") | _modality_bits("action")
+    assert _resolve_modalities(bits) == "RGB/眼动/动作"     # 固定顺序，与输入顺序无关
+
+
+def test_agg_modalities_union():
+    from tools.aliyun.oss import agg_modalities
+    assert agg_modalities(["RGB/眼动", "RGB/动作", ""]) == "RGB/眼动/动作"
+    assert agg_modalities(["", ""]) == ""
+
+
 def test_parse_lerobot_info():
     import json
-    from tools.aliyun.oss import parse_lerobot_info
-    hours, ver = parse_lerobot_info(json.dumps(
-        {"codebase_version": "v2.1", "fps": 30, "total_frames": 1080000}))
+    from tools.aliyun.oss import parse_lerobot_info, _resolve_modalities
+    hours, ver, modbits = parse_lerobot_info(json.dumps({
+        "codebase_version": "v2.1", "fps": 30, "total_frames": 1080000,
+        "features": {"observation.mano.left.state": {}, "front_camera": {},
+                     "action": {}, "observation.state": {}},
+    }))
     assert ver == "lerobot v2.1"
     assert hours == 10.0                         # 1080000/30/3600
-    assert parse_lerobot_info("not json") == (None, None)
-    assert parse_lerobot_info(json.dumps({})) == (None, None)         # 无字段
-    assert parse_lerobot_info(json.dumps({"codebase_version": "v3.0"})) == (None, "lerobot v3.0")  # 有版本无帧数
+    assert _resolve_modalities(modbits) == "RGB/手部MANO/动作/状态"   # 从 features 键读模态
+    assert parse_lerobot_info("not json") == (None, None, 0)
+    assert parse_lerobot_info(json.dumps({})) == (None, None, 0)
 
 
 def test_agg_dtype_other_semantics():

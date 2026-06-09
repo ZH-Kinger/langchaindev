@@ -14,10 +14,10 @@ from pydantic import BaseModel, Field
 from langchain.tools import StructuredTool
 
 from utils.volcano_client_factory import get_tos_client
-from tools.aliyun.oss import (  # 复用结构判定/忽略目录过滤/数据集类型识别
-    _struct_of_key, _has_ignored_dir, _is_ignored_dirname, agg_struct,
-    _dataset_type_bits, resolve_dtype, agg_dtype, apply_name_struct_fallback, _batch_key,
-    parse_lerobot_info,
+from tools.aliyun.oss import (  # 复用模态/忽略目录过滤/数据类型识别
+    _has_ignored_dir, _is_ignored_dirname, _dataset_type_bits, resolve_dtype, agg_dtype,
+    _batch_key, parse_lerobot_info, _modality_bits, _resolve_modalities, agg_modalities,
+    _MODALITY_SAMPLE_CAP,
 )
 
 logger = logging.getLogger(__name__)
@@ -80,17 +80,17 @@ def compute_dir_sizes(bucket: str, prefix: str = ""):
 
 
 def _read_lerobot_info_tos(client, bucket: str, info_key: str):
-    """TOS：get_object `meta/info.json` 并解析 → (hours, version)。失败 (None, None)。"""
+    """TOS：get_object `meta/info.json` 并解析 → (hours, version, modbits)。失败 (None, None, 0)。"""
     try:
         return parse_lerobot_info(client.get_object(bucket, info_key).read())
     except Exception:
-        return None, None
+        return None, None, 0
 
 
 def _grouped_sizes(client, bucket: str, family_prefix: str) -> dict:
     """一趟连续扫描 family_prefix 下所有对象，按数据集根归并求和（火山 TOS 版）。
 
-    返回 {批次名: (bytes, count, struct, dtype, info_key)}；厂家直属文件归入 '/'；跳过点目录。
+    返回 {批次名: (bytes, count, modbits, dtype, info_key)}；厂家直属文件归入 '/'；跳过点目录。
     """
     sizes: dict = {}
     token = ""
@@ -105,13 +105,11 @@ def _grouped_sizes(client, bucket: str, family_prefix: str) -> dict:
                 continue
             batch = _batch_key(rel)                    # 自适应：下钻到真实数据集根
             within = rel[len(batch) + 1:] if batch != "/" else rel
-            slot = sizes.setdefault(batch, [0, 0, "", 0, ""])
+            slot = sizes.setdefault(batch, [0, 0, 0, 0, ""])   # [bytes,count,modbits,dtbits,info_key]
             slot[0] += obj.size
             slot[1] += 1
-            if not slot[2]:
-                st = _struct_of_key(obj.key)
-                if st:
-                    slot[2] = st
+            if slot[1] <= _MODALITY_SAMPLE_CAP:
+                slot[2] |= _modality_bits(within.lower())
             slot[3] |= _dataset_type_bits(within)
             if not slot[4] and within.endswith("meta/info.json"):
                 slot[4] = obj.key
@@ -137,24 +135,27 @@ def _scan_family_tos(client, bucket: str, sub: str, vendor_name: str, cached: di
             s, c, st, dt, hrs = cached[allk]
             return [("ALL", s, c, st, dt, hrs)], 0, True
 
-    grouped = _grouped_sizes(client, bucket, sub)
+    grouped = _grouped_sizes(client, bucket, sub)   # {批次: (bytes,count,modbits,dtype,info_key)}
     real = [n for n in grouped if n != "/"]
     if len(real) > _MAX_BATCHES:
         tb = sum(v[0] for v in grouped.values())
         tc = sum(v[1] for v in grouped.values())
-        st = agg_struct(v[2] for v in grouped.values())
+        mbits = 0
+        for v in grouped.values():
+            mbits |= v[2]
         dt = agg_dtype(v[3] for v in grouped.values())
-        return [("ALL", tb, tc, st, dt, None)], len(real), True
+        return [("ALL", tb, tc, _resolve_modalities(mbits), dt, None)], len(real), True
 
     batches = []
-    for name, (s, c, st, dt, info_key) in grouped.items():
+    for name, (s, c, mbits, dt, info_key) in grouped.items():
         hrs = None
         if info_key:
-            h, ver = _read_lerobot_info_tos(client, bucket, info_key)
+            h, ver, feat_mbits = _read_lerobot_info_tos(client, bucket, info_key)
             if ver:
                 dt = ver
             hrs = h
-        batches.append((name, s, c, st, dt, hrs))
+            mbits |= feat_mbits
+        batches.append((name, s, c, _resolve_modalities(mbits), dt, hrs))
     return batches, len(real), False
 
 
@@ -179,14 +180,13 @@ def compute_nested_sizes(bucket: str, prefix: str = "", cached: dict = None, on_
             vendor_name = sub[len(prefix):].rstrip("/")
             t0 = time.time()
             batches, fresh, flat = _scan_family_tos(client, bucket, sub, vendor_name, cached, skip_flat)
-            batches = apply_name_struct_fallback(batches, vendor_name)  # 目录名兜底补 itw/ego
             total_bytes = sum(x[1] for x in batches)
             total_count = sum(x[2] for x in batches)
             entries.append({
                 "厂家": vendor_name,
                 "total_bytes": total_bytes,
                 "total_count": total_count,
-                "struct": agg_struct(x[3] for x in batches),
+                "struct": agg_modalities(x[3] for x in batches),   # 数据结构列=数据模态
                 "dtype": agg_dtype(x[4] for x in batches),
                 "flat": flat,
                 "batches": batches,
