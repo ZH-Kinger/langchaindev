@@ -22,12 +22,26 @@ class _FakeResult:
         self.next_continuation_token = ""
 
 
+class _FakeGetResult:
+    def __init__(self, content):
+        self._content = content
+
+    def read(self):
+        return self._content
+
+
 class _FakeBucket:
-    """按 (key, size) 列表模拟对象存储；支持 delimiter='/' 列子目录。"""
+    """按 (key, size) 列表模拟对象存储；支持 delimiter='/' 列子目录、get_object 取内容。"""
     endpoint = "https://oss-cn-hangzhou.aliyuncs.com"
 
-    def __init__(self, objects):
+    def __init__(self, objects, contents=None):
         self.objects = objects
+        self.contents = contents or {}     # {key: bytes/str}，供 get_object
+
+    def get_object(self, key):
+        if key not in self.contents:
+            raise KeyError(key)
+        return _FakeGetResult(self.contents[key])
 
     def list_objects_v2(self, prefix="", delimiter="", continuation_token="", max_keys=1000):
         if delimiter == "/":
@@ -48,9 +62,9 @@ class _FakeBucket:
 @pytest.fixture
 def patch_bucket(monkeypatch):
     """把 _resolve_bucket 替换为返回指定 FakeBucket。"""
-    def _install(objects):
+    def _install(objects, contents=None):
         from tools.aliyun import oss
-        monkeypatch.setattr(oss, "_resolve_bucket", lambda *a, **k: _FakeBucket(objects))
+        monkeypatch.setattr(oss, "_resolve_bucket", lambda *a, **k: _FakeBucket(objects, contents))
     return _install
 
 
@@ -132,7 +146,7 @@ def test_compute_nested_sizes_two_levels(patch_bucket):
 
     lw = by["lightwheel"]
     assert lw["total_bytes"] == 360 and lw["total_count"] == 4
-    batches = {name: (b, c) for name, b, c, st in lw["batches"]}
+    batches = {name: (b, c) for name, b, c, st, dt, hrs in lw["batches"]}
     assert batches["2026-01"] == (150, 2)
     assert batches["2026-02"] == (200, 1)
     assert batches["/"] == (10, 1)            # 直属文件归入 /
@@ -140,24 +154,36 @@ def test_compute_nested_sizes_two_levels(patch_bucket):
     assert by["aether"]["total_bytes"] == 5
 
 
-def test_compute_nested_sizes_uses_cache(monkeypatch, patch_bucket):
-    """已缓存的批次应复用缓存、不再实扫；新批次仍实扫。"""
-    patch_bucket([
-        ("tp/lw/2026-01/a.bin", 100),     # 已交付（缓存）
-        ("tp/lw/2026-02/b.bin", 200),     # 新批次（须实扫）
-    ])
-    from tools.aliyun import oss as oss_mod
-    calls = []
-    real_batch_sum = oss_mod._batch_sum
-    monkeypatch.setattr(oss_mod, "_batch_sum",
-                        lambda b, p: calls.append(p) or real_batch_sum(b, p))
+def test_batch_key_descends_to_dataset_root():
+    """_batch_key：含时长目录段 → 下钻到该层；否则退回第一段；家直属文件 → '/'。"""
+    from tools.aliyun.oss import _batch_key
+    # 深层嵌套（shutu 风格）：批次 = 真实数据集根
+    assert _batch_key("wuji/26_0430/wuji_home_scene_19.75h/meta/tasks.parquet") \
+        == "wuji/26_0430/wuji_home_scene_19.75h"
+    # 时长在第一层（lingsheng/lightwheel 风格）：保持第一段
+    assert _batch_key("wuji_itw_100h_202605271016/data/x.parquet") == "wuji_itw_100h_202605271016"
+    # 无时长目录（egodex/egoverse 风格）：退回第一段
+    assert _batch_key("part1/0.hdf5") == "part1"
+    # 家直属文件
+    assert _batch_key("readme.txt") == "/"
 
-    cached = {"lw/2026-01": (100, 1, "")}     # 2026-01 已缓存（含 struct 段）
-    entries, _ = oss_mod.compute_nested_sizes("", "bkt", "tp/", cached=cached)
-    lw = entries[0]
-    assert lw["total_bytes"] == 300       # 100(缓存) + 200(实扫)
-    assert any("2026-02" in p for p in calls)
-    assert not any("2026-01" in p for p in calls)
+
+def test_compute_nested_sizes_deep_dataset_roots(patch_bucket):
+    """深层嵌套的家（容器/容器/数据集_NNh）应拆成各真实数据集为批次,而非停在容器层。"""
+    patch_bucket([
+        ("tp/shutu/wuji/26_0430/wuji_home_scene_19.75h/meta/tasks.parquet", 10),
+        ("tp/shutu/wuji/26_0430/wuji_home_scene_19.75h/data/chunk-000/file-000.parquet", 500),
+        ("tp/shutu/wuji/26_0505/wuji_home_scene_85.11h/meta/tasks.parquet", 10),
+        ("tp/shutu/wuji/26_0505/wuji_home_scene_85.11h/data/chunk-000/file-000.parquet", 800),
+    ])
+    from tools.aliyun.oss import compute_nested_sizes
+    by = {e["厂家"]: e for e in compute_nested_sizes("", "bkt", "tp/")[0]}
+    batches = {n: dt for n, b, c, st, dt, hrs in by["shutu"]["batches"]}
+    # 不再是一个容器批次 "wuji",而是两个真实数据集根
+    assert "wuji/26_0430/wuji_home_scene_19.75h" in batches
+    assert "wuji/26_0505/wuji_home_scene_85.11h" in batches
+    assert "wuji" not in batches
+    assert batches["wuji/26_0430/wuji_home_scene_19.75h"] == "lerobot v3.0"
 
 
 def test_dot_and_test_dirs_ignored(patch_bucket):
@@ -176,19 +202,88 @@ def test_dot_and_test_dirs_ignored(patch_bucket):
     assert lw["total_bytes"] == 100 and lw["total_count"] == 1
 
 
-def test_struct_detection(patch_bucket):
-    """按扩展名判数据结构：hdf5→ego，parquet/mcap→itw。"""
+def test_modality_from_raw_capture_filenames(patch_bucket):
+    """原始采集：从文件名读模态（rgb/depth/imu/audio/手部关键点）。"""
     patch_bucket([
-        ("tp/egodex/p1/0.hdf5", 10), ("tp/egodex/p1/0.mp4", 5),
-        ("tp/lingsheng/itw1/data/chunk-000/f.parquet", 20),
-        ("tp/lightwheel/6-2-504h/u/x.mcap", 30),
+        ("tp/nuoyiteng/wuji-itw_500h/uuid1/rgb_head.mp4", 9999),
+        ("tp/nuoyiteng/wuji-itw_500h/uuid1/depth_head.mkv", 20),
+        ("tp/nuoyiteng/wuji-itw_500h/uuid1/imu.txt", 5),
+        ("tp/nuoyiteng/wuji-itw_500h/uuid1/mic.wav", 5),
+        ("tp/nuoyiteng/wuji-itw_500h/uuid1/hands_keypoint_3d.json", 5),
     ])
     from tools.aliyun.oss import compute_nested_sizes
-    by = {e["厂家"]: e for e in compute_nested_sizes("", "bkt", "tp/")[0]}
-    assert by["egodex"]["struct"] == "ego"
-    assert by["lingsheng"]["struct"] == "itw"
-    assert by["lightwheel"]["struct"] == "itw"
-    assert {b[0]: b[3] for b in by["egodex"]["batches"]}["p1"] == "ego"
+    st = compute_nested_sizes("", "bkt", "tp/")[0][0]["struct"]
+    assert st == "rgb/depth/imu/audio/hand_keypoints"
+
+
+def test_modality_from_zarr_array_paths(patch_bucket):
+    """Zarr：从 episode 下的数组名(路径段)读模态（egoverse 风格）。"""
+    patch_bucket([
+        ("tp/egoverse/ep1/images.front_1/zarr.json", 1),
+        ("tp/egoverse/ep1/obs_eye_gaze/zarr.json", 1),
+        ("tp/egoverse/ep1/obs_head_pose/zarr.json", 1),
+        ("tp/egoverse/ep1/left.obs_ee_pose/c/0", 1),
+        ("tp/egoverse/ep1/left.obs_wrist_pose/zarr.json", 1),
+        ("tp/egoverse/ep1/left.obs_keypoints/zarr.json", 1),
+    ])
+    from tools.aliyun.oss import compute_nested_sizes
+    st = compute_nested_sizes("", "bkt", "tp/")[0][0]["struct"]
+    assert st == "rgb/gaze/head_pose/ee_pose/wrist/hand_keypoints"
+
+
+def test_scan_reads_info_json_for_lerobot(patch_bucket):
+    """LeRobot 批次读 meta/info.json：精确时长(total_frames/fps) + 权威版本(codebase_version)。"""
+    import json
+    info = json.dumps({"codebase_version": "v3.0", "fps": 30, "total_frames": 2160000})  # 20h
+    patch_bucket(
+        [("tp/lr/ds_a/meta/info.json", 5), ("tp/lr/ds_a/data/chunk-000/file-000.parquet", 100)],
+        contents={"tp/lr/ds_a/meta/info.json": info},
+    )
+    from tools.aliyun.oss import compute_nested_sizes
+    lr = compute_nested_sizes("", "bkt", "tp/")[0][0]
+    bat = {b[0]: b for b in lr["batches"]}["ds_a"]
+    assert bat[4] == "lerobot v3.0"        # 来自 codebase_version（即便结构只见 info.json）
+    assert bat[5] == 20.0                  # 2160000/30/3600
+
+
+def test_scan_info_json_read_failure_degrades(patch_bucket):
+    """info.json 读取失败（无内容）→ 时长 None、版本退回结构启发式，不报错。"""
+    patch_bucket([
+        ("tp/lr/ds_b/meta/info.json", 5),
+        ("tp/lr/ds_b/meta/tasks.parquet", 5),
+    ])  # 没给 contents → get_object 抛错
+    from tools.aliyun.oss import compute_nested_sizes
+    lr = compute_nested_sizes("", "bkt", "tp/")[0][0]
+    bat = {b[0]: b for b in lr["batches"]}["ds_b"]
+    assert bat[4] == "lerobot v3.0"        # 结构兜底（tasks.parquet）
+    assert bat[5] is None                  # 读不到 → 时长空
+
+
+def test_scan_sums_all_info_json_in_batch(patch_bucket):
+    """一个批次含多个 LeRobot 数据集时，时长 = 所有 info.json 之和（修复只读首个的严重少算）。
+
+    复现 lingsheng：批次 `*_100h_*` 下有几十个子数据集，旧逻辑只读第一个 info.json
+    导致 100h 报成 0.22h。现应累加全部。
+    """
+    import json
+    info1 = json.dumps({"codebase_version": "v3.0", "fps": 30, "total_frames": 1080000})  # 10h
+    info2 = json.dumps({"codebase_version": "v3.0", "fps": 30, "total_frames": 3240000})  # 30h
+    patch_bucket(
+        [   # _batch_key 因首段含 100h token 停在 d_100h_x，两个数据集归入同一批次
+            ("tp/lr/d_100h_x/sess/ds1/meta/info.json", 5),
+            ("tp/lr/d_100h_x/sess/ds1/data/c/f.parquet", 100),
+            ("tp/lr/d_100h_x/sess/ds2/meta/info.json", 5),
+            ("tp/lr/d_100h_x/sess/ds2/data/c/f.parquet", 100),
+        ],
+        contents={
+            "tp/lr/d_100h_x/sess/ds1/meta/info.json": info1,
+            "tp/lr/d_100h_x/sess/ds2/meta/info.json": info2,
+        },
+    )
+    from tools.aliyun.oss import compute_nested_sizes
+    lr = compute_nested_sizes("", "bkt", "tp/")[0][0]
+    bat = {b[0]: b for b in lr["batches"]}["d_100h_x"]
+    assert bat[5] == 40.0          # 10 + 30，而非只读首个的 10
 
 
 def test_flat_family_collapses_to_total(patch_bucket):

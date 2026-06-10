@@ -16,13 +16,29 @@ DSW 工单调度器。
 import json
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from config.settings import settings
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# 容器跑在 UTC，但所有「每日 N 点」都按北京时间。中国无夏令时，固定 UTC+8 最稳（不依赖 tzdata）。
+_BEIJING = timezone(timedelta(hours=8))
+
+
+def _bj_now() -> datetime:
+    return datetime.now(_BEIJING)
+
+
+def _sleep_until(target: datetime, running) -> bool:
+    """分块睡到 target（北京时区 aware）。中途 running() 变 False 则提前返回 False。"""
+    wait, slept = (target - _bj_now()).total_seconds(), 0.0
+    while slept < wait and running():
+        time.sleep(min(60.0, wait - slept))
+        slept += min(60.0, wait - slept)
+    return running()
 from tools.jira.ticket import (
     get_gpu_tickets, add_comment, transition_ticket,
     parse_ticket_metadata, update_ticket_field,
@@ -337,6 +353,27 @@ def _send_cluster_morning_report() -> None:
         logger.info("[Scheduler] 集群 MFU 早报已推送")
     except Exception:
         logger.error("[Scheduler] 集群 MFU 早报失败", exc_info=True)
+
+
+def _run_oss_perm_audit_push() -> None:
+    """OSS 权限每日对账：有待同步/孤儿则把带「批准」按钮的卡片推到群。"""
+    if not settings.OSS_PERM_PUSH_ENABLED:
+        return
+    try:
+        from core.oss_perm import permsync
+        from core.oss_perm.cards import audit_card
+        members, combos = permsync.load_members()
+        plan = permsync.build_plan(members, combos)
+        active = {m["username"] for m in members if m["username"]}
+        diff = permsync.audit_diff(plan, active)
+        if diff["n_diff"] == 0 and not diff["orphans"]:
+            logger.info("[OSSPerm] 权限与表格一致，跳过推送")
+            return
+        _send_card("", settings.FEISHU_CHAT_ID, audit_card(diff))
+        logger.info("[OSSPerm] 已推送对账卡片：%d 人待同步，%d 孤儿",
+                    diff["n_diff"], len(diff["orphans"]))
+    except Exception as e:
+        logger.error("[OSSPerm] 对账推送失败: %s", e, exc_info=True)
 
 
 def _all_tracked_keys() -> list[str]:
@@ -702,6 +739,7 @@ class DSWScheduler:
         self._instance_thread: threading.Thread | None = None
         self._morning_thread: threading.Thread | None = None
         self._capacity_thread: threading.Thread | None = None
+        self._oss_perm_thread: threading.Thread | None = None
 
     def start(self) -> None:
         if self._running:
@@ -726,6 +764,12 @@ class DSWScheduler:
             )
             self._capacity_thread.start()
             extra = " + 容量巡检"
+        if settings.OSS_PERM_PUSH_ENABLED:
+            self._oss_perm_thread = threading.Thread(
+                target=self._oss_perm_loop, name="oss-perm-push", daemon=True
+            )
+            self._oss_perm_thread.start()
+            extra += " + OSS权限对账推送"
         logger.info("[Scheduler] 启动：Jira 轮询 + DSW 超时监控 + GPU 空转检测 + 每日早报(实例+集群)%s", extra)
 
     def stop(self) -> None:
@@ -755,43 +799,55 @@ class DSWScheduler:
             time.sleep(self.INSTANCE_CHECK_INTERVAL)
 
     def _morning_loop(self) -> None:
-        from datetime import datetime, timedelta
+        """每日北京时间 9:00 推送实例 + 集群早报。"""
         while self._running:
-            now_dt = datetime.now()
-            target = now_dt.replace(hour=9, minute=0, second=0, microsecond=0)
-            if now_dt >= target:
+            now = _bj_now()
+            target = now.replace(hour=9, minute=0, second=0, microsecond=0)
+            if now >= target:
                 target += timedelta(days=1)
-            wait   = (target - now_dt).total_seconds()
-            slept  = 0.0
-            while slept < wait and self._running:
-                chunk = min(60.0, wait - slept)
-                time.sleep(chunk)
-                slept += chunk
-            if self._running:
-                try:
-                    _send_morning_report()
-                except Exception as e:
-                    logger.error("[Scheduler] 早报发送失败", exc_info=True)
-                try:
-                    _send_cluster_morning_report()
-                except Exception as e:
-                    logger.error("[Scheduler] 集群监控早报发送失败", exc_info=True)
+            if not _sleep_until(target, lambda: self._running):
+                break
+            try:
+                _send_morning_report()
+            except Exception:
+                logger.error("[Scheduler] 早报发送失败", exc_info=True)
+            try:
+                _send_cluster_morning_report()
+            except Exception:
+                logger.error("[Scheduler] 集群监控早报发送失败", exc_info=True)
 
     def _capacity_loop(self) -> None:
-        """按 CAPACITY_MONITOR_INTERVAL_HOURS 巡检 OSS/TOS 容量并推送飞书。"""
+        """容量巡检：对齐到北京整点的 CAPACITY_MONITOR_INTERVAL_HOURS 倍数（如 6h → 0/6/12/18 点）。"""
         from core.capacity_monitor import run_capacity_scan
-        interval = max(0.1, settings.CAPACITY_MONITOR_INTERVAL_HOURS) * 3600
-        time.sleep(30)  # 等 Flask 与其余线程初始化
+        step = max(1, min(24, int(settings.CAPACITY_MONITOR_INTERVAL_HOURS)))
         while self._running:
+            now = _bj_now()
+            nh = ((now.hour // step) + 1) * step          # 下一个对齐整点
+            if nh >= 24:
+                target = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            else:
+                target = now.replace(hour=nh, minute=0, second=0, microsecond=0)
+            if not _sleep_until(target, lambda: self._running):
+                break
             try:
                 run_capacity_scan()
-            except Exception as e:
+            except Exception:
                 logger.error("[Scheduler] 容量巡检失败", exc_info=True)
-            slept = 0.0
-            while slept < interval and self._running:
-                chunk = min(60.0, interval - slept)
-                time.sleep(chunk)
-                slept += chunk
+
+    def _oss_perm_loop(self) -> None:
+        """每日北京时间 OSS_PERM_PUSH_HOUR:20 对账，把待同步权限推到群（带批准按钮）。"""
+        hour = max(0, min(23, settings.OSS_PERM_PUSH_HOUR))
+        while self._running:
+            now = _bj_now()
+            target = now.replace(hour=hour, minute=20, second=0, microsecond=0)
+            if now >= target:
+                target += timedelta(days=1)
+            if not _sleep_until(target, lambda: self._running):
+                break
+            try:
+                _run_oss_perm_audit_push()
+            except Exception:
+                logger.error("[Scheduler] OSS 权限对账推送失败", exc_info=True)
 
 
 # 全局单例

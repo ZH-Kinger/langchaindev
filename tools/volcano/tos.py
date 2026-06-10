@@ -14,7 +14,11 @@ from pydantic import BaseModel, Field
 from langchain.tools import StructuredTool
 
 from utils.volcano_client_factory import get_tos_client
-from tools.aliyun.oss import _struct_of_key, _has_ignored_dir, _is_ignored_dirname, agg_struct  # 复用结构判定/忽略目录过滤
+from tools.aliyun.oss import (  # 复用模态/忽略目录过滤/数据类型识别
+    _has_ignored_dir, _is_ignored_dirname, _dataset_type_bits, resolve_dtype, agg_dtype,
+    _batch_key, parse_lerobot_info, _modality_bits, _resolve_modalities, agg_modalities,
+    _MODALITY_SAMPLE_CAP, hdf5_modality_bits, _HDF5_MAX_READ, _INFO_KEYS_CAP,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,36 +79,27 @@ def compute_dir_sizes(bucket: str, prefix: str = ""):
         client.close()
 
 
-def _direct_files_size(client, bucket: str, prefix: str):
-    """只统计 prefix 直属文件（跳过点文件），返回 (字节数, 对象数, struct)。"""
-    total_bytes = count = 0
-    struct = ""
-    token = ""
-    while True:
-        r = client.list_objects_type2(bucket, prefix=prefix, delimiter="/",
-                                      continuation_token=token, max_keys=1000)
-        for obj in r.contents:
-            if obj.key.endswith("/") and obj.size == 0:
-                continue
-            if obj.key[len(prefix):].startswith("."):
-                continue
-            total_bytes += obj.size
-            count += 1
-            if not struct:
-                st = _struct_of_key(obj.key)
-                if st:
-                    struct = st
-        if r.is_truncated:
-            token = r.next_continuation_token
-        else:
-            break
-    return total_bytes, count, struct
+def _read_lerobot_info_tos(client, bucket: str, info_key: str):
+    """TOS：get_object `meta/info.json` 并解析 → (hours, version, modbits)。失败 (None, None, 0)。"""
+    try:
+        return parse_lerobot_info(client.get_object(bucket, info_key).read())
+    except Exception:
+        return None, None, 0
+
+
+def _read_hdf5_modalities_tos(client, bucket: str, key: str) -> int:
+    """TOS：get_object 一个小 .hdf5 → 内部字段模态 bit。失败 0。"""
+    try:
+        return hdf5_modality_bits(client.get_object(bucket, key).read())
+    except Exception:
+        return 0
 
 
 def _grouped_sizes(client, bucket: str, family_prefix: str) -> dict:
-    """一趟连续扫描 family_prefix 下所有对象，按第二层目录(批次)归并求和（火山 TOS 版）。
+    """一趟连续扫描 family_prefix 下所有对象，按数据集根归并求和（火山 TOS 版）。
 
-    返回 {批次名: (bytes, count, struct)}；厂家直属文件归入 '/'；跳过点目录。
+    返回 {批次名: (bytes, count, modbits, dtype, info_keys)}；厂家直属文件归入 '/'；跳过点目录。
+    info_keys = 本批次下「所有」数据集的 meta/info.json key 列表（须全部读出时长再求和）。
     """
     sizes: dict = {}
     token = ""
@@ -117,93 +112,73 @@ def _grouped_sizes(client, bucket: str, family_prefix: str) -> dict:
             rel = obj.key[len(family_prefix):]
             if _has_ignored_dir(rel):
                 continue
-            batch = rel.split("/", 1)[0] if "/" in rel else "/"
-            slot = sizes.setdefault(batch, [0, 0, ""])
+            batch = _batch_key(rel)                    # 自适应：下钻到真实数据集根
+            within = rel[len(batch) + 1:] if batch != "/" else rel
+            slot = sizes.setdefault(batch, [0, 0, 0, 0, [], ""])   # [bytes,count,modbits,dtbits,info_keys,hdf5_key]
             slot[0] += obj.size
             slot[1] += 1
-            if not slot[2]:
-                st = _struct_of_key(obj.key)
-                if st:
-                    slot[2] = st
+            if slot[1] <= _MODALITY_SAMPLE_CAP:
+                slot[2] |= _modality_bits(within.lower())
+            slot[3] |= _dataset_type_bits(within)
+            if within.endswith("meta/info.json") and len(slot[4]) < _INFO_KEYS_CAP:
+                slot[4].append(obj.key)                # 收集本批次下「所有」数据集的 info.json
+            if not slot[5] and within.lower().endswith(".hdf5") and obj.size < _HDF5_MAX_READ:
+                slot[5] = obj.key
         if r.is_truncated:
             token = r.next_continuation_token
         else:
             break
-    return {k: (v[0], v[1], v[2]) for k, v in sizes.items()}
+    return {k: (v[0], v[1], v[2], resolve_dtype(v[3]), v[4], v[5]) for k, v in sizes.items()}
 
 
-def _batch_sum(client, bucket: str, batch_prefix: str):
-    """逐批次扫：累加 batch_prefix 下对象（跳过点目录），返回 (bytes, count, struct)。"""
-    total = count = 0
-    struct = ""
-    token = ""
-    while True:
-        r = client.list_objects_type2(bucket, prefix=batch_prefix,
-                                      continuation_token=token, max_keys=1000)
-        for obj in r.contents:
-            if obj.key.endswith("/") and obj.size == 0:
-                continue
-            if _has_ignored_dir(obj.key[len(batch_prefix):]):
-                continue
-            total += obj.size
-            count += 1
-            if not struct:
-                st = _struct_of_key(obj.key)
-                if st:
-                    struct = st
-        if r.is_truncated:
-            token = r.next_continuation_token
-        else:
-            break
-    return total, count, struct
-
-
-_GROUPED_THRESHOLD = 30
 _MAX_BATCHES = 200      # 批次数超此值判为「平铺」，只记整体不细分
 
 
-def _scan_family_tos(client, bucket: str, sub: str, vendor_name: str, cached: dict):
-    """扫一个厂家，返回 (batches, 新扫批次数, 是否平铺)。逻辑同 OSS 版。"""
-    if f"{vendor_name}/ALL" in cached:
-        use_grouped, batch_dirs = True, None
-    else:
-        fam_has_cache = any(k.startswith(vendor_name + "/") for k in cached)
-        if fam_has_cache:
-            batch_dirs = [bd for bd in _list_subdirs(client, bucket, sub)
-                          if not _is_ignored_dirname(bd[len(sub):].rstrip("/"))]   # 跳过点目录
-            new_dirs = [bd for bd in batch_dirs
-                        if f"{vendor_name}/{bd[len(sub):].rstrip('/')}" not in cached]
-            use_grouped = len(new_dirs) > _GROUPED_THRESHOLD
-        else:
-            use_grouped, batch_dirs = True, None
+def _scan_family_tos(client, bucket: str, sub: str, vendor_name: str, cached: dict = None, skip_flat=None):
+    """扫一个厂家，返回 (batches[6 元组], 新扫批次数, 是否平铺)。逻辑同 OSS 版。
 
-    if use_grouped:
-        grouped = _grouped_sizes(client, bucket, sub)
-        real = [n for n in grouped if n != "/"]
-        if len(real) > _MAX_BATCHES:
-            tb = sum(v[0] for v in grouped.values())
-            tc = sum(v[1] for v in grouped.values())
-            st = agg_struct(v[2] for v in grouped.values())
-            return [("ALL", tb, tc, st)], len(real), True
-        return [(n, s, c, st) for n, (s, c, st) in grouped.items()], len(real), False
+    `skip_flat` 命中→复用缓存 ALL 跳过全扫；LeRobot 批次读 info.json 拿精确时长+版本。
+    """
+    cached = cached or {}
+    if skip_flat and vendor_name in skip_flat:
+        allk = f"{vendor_name}/ALL"
+        if allk in cached:
+            s, c, st, dt, hrs = cached[allk]
+            return [("ALL", s, c, st, dt, hrs)], 0, True
 
-    batches, fresh = [], 0
-    for bd in batch_dirs:
-        batch_name = bd[len(sub):].rstrip("/")
-        ck = f"{vendor_name}/{batch_name}"
-        if ck in cached:
-            size_bytes, count, struct = cached[ck]
-        else:
-            size_bytes, count, struct = _batch_sum(client, bucket, bd)
-            fresh += 1
-        batches.append((batch_name, size_bytes, count, struct))
-    root_bytes, root_count, root_struct = _direct_files_size(client, bucket, sub)
-    if root_count:
-        batches.append(("/", root_bytes, root_count, root_struct))
-    return batches, fresh, False
+    grouped = _grouped_sizes(client, bucket, sub)   # {批次: (bytes,count,modbits,dtype,info_key)}
+    real = [n for n in grouped if n != "/"]
+    if len(real) > _MAX_BATCHES:
+        tb = sum(v[0] for v in grouped.values())
+        tc = sum(v[1] for v in grouped.values())
+        mbits = 0
+        for v in grouped.values():
+            mbits |= v[2]
+        dt = agg_dtype(v[3] for v in grouped.values())
+        return [("ALL", tb, tc, _resolve_modalities(mbits), dt, None)], len(real), True
+
+    batches = []
+    for name, (s, c, mbits, dt, info_keys, hdf5_key) in grouped.items():
+        hrs = None
+        if info_keys:                               # LeRobot：累加本批次下「所有」数据集的 info.json 时长
+            total_h, ver = 0.0, None
+            for ik in info_keys:
+                h, v, feat_mbits = _read_lerobot_info_tos(client, bucket, ik)
+                if h is not None:
+                    total_h += h
+                if v and not ver:
+                    ver = v
+                mbits |= feat_mbits
+            if ver:
+                dt = ver
+            hrs = round(total_h, 2) if total_h > 0 else None
+        elif hdf5_key:                              # HDF5：读单个小文件内部字段补模态
+            mbits |= _read_hdf5_modalities_tos(client, bucket, hdf5_key)
+        batches.append((name, s, c, _resolve_modalities(mbits), dt, hrs))
+    return batches, len(real), False
 
 
-def compute_nested_sizes(bucket: str, prefix: str = "", cached: dict = None, on_family=None):
+def compute_nested_sizes(bucket: str, prefix: str = "", cached: dict = None, on_family=None, skip_flat=None):
     """两级遍历：prefix 下每个「厂家」及其下「批次」的大小（火山 TOS 版）。
 
     返回 entries = [{"厂家":, "total_bytes":, "total_count":, "batches":[(批次,bytes,count)]}]；
@@ -223,14 +198,16 @@ def compute_nested_sizes(bucket: str, prefix: str = "", cached: dict = None, on_
         for idx, sub in enumerate(families, 1):                     # 厂家
             vendor_name = sub[len(prefix):].rstrip("/")
             t0 = time.time()
-            batches, fresh, flat = _scan_family_tos(client, bucket, sub, vendor_name, cached)
+            batches, fresh, flat = _scan_family_tos(client, bucket, sub, vendor_name, cached, skip_flat)
             total_bytes = sum(x[1] for x in batches)
             total_count = sum(x[2] for x in batches)
             entries.append({
                 "厂家": vendor_name,
                 "total_bytes": total_bytes,
                 "total_count": total_count,
-                "struct": agg_struct(x[3] for x in batches),
+                "struct": agg_modalities(x[3] for x in batches),   # 数据结构列=数据模态
+                "dtype": agg_dtype(x[4] for x in batches),
+                "flat": flat,
                 "batches": batches,
             })
             logger.info("[进度] TOS %s [%d/%d] %s%s：%d 批次(%d 新扫) %.2fGB %d 对象 用时%.0fs",

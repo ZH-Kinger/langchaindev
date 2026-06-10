@@ -77,10 +77,15 @@ def _batch_cache_key(vendor: str, bucket: str, prefix: str) -> str:
     return f"{_BATCH_CACHE_PREFIX}{vendor}:{bucket}:{prefix}"
 
 
-def _load_batch_cache(vendor: str, bucket: str, prefix: str) -> dict:
-    """返回 {"厂家/批次": (bytes, count, struct)}；关闭/无记录/Redis 不可用返回 {}。
+def _cache_val(size, count, struct, dtype, hours) -> str:
+    return f"{size}:{count}:{struct}:{dtype}:{'' if hours is None else hours}"
 
-    缓存值格式 "size:count:struct"（兼容旧的 "size:count"，struct 缺省为空）。
+
+def _load_batch_cache(vendor: str, bucket: str, prefix: str) -> dict:
+    """返回 {"厂家/批次": (bytes, count, struct, dtype, hours)}；关闭/无记录/Redis 不可用返回 {}。
+
+    缓存值格式 "size:count:struct:dtype:hours"（兼容旧 4/3/2 段，缺省为空/None）。
+    dtype 可能含 '/'（lerobot/rlds 混合），但不含 ':'；hours 为最后一段，故 maxsplit=4 安全。
     """
     if not settings.CAPACITY_BATCH_CACHE_ENABLED:
         return {}
@@ -88,11 +93,13 @@ def _load_batch_cache(vendor: str, bucket: str, prefix: str) -> dict:
         raw = redis_client.get_redis().hgetall(_batch_cache_key(vendor, bucket, prefix))
         out = {}
         for k, v in (raw or {}).items():
-            parts = v.split(":")
+            parts = v.split(":", 4)
             size = int(parts[0])
             count = int(parts[1]) if len(parts) > 1 else 0
             struct = parts[2] if len(parts) > 2 else ""
-            out[k] = (size, count, struct)
+            dtype = parts[3] if len(parts) > 3 else ""
+            hours = float(parts[4]) if len(parts) > 4 and parts[4] else None
+            out[k] = (size, count, struct, dtype, hours)
         return out
     except Exception:
         return {}
@@ -102,8 +109,8 @@ def _save_family_cache(vendor: str, bucket: str, prefix: str, vendor_name: str, 
     """单个厂家扫完即增量写入缓存（断点续传：中断后已完成厂家下次跳过）。排除 '/'。"""
     if not settings.CAPACITY_BATCH_CACHE_ENABLED:
         return
-    mapping = {f"{vendor_name}/{name}": f"{size}:{count}:{struct}"
-               for name, size, count, struct in batches if name != "/"}
+    mapping = {f"{vendor_name}/{name}": _cache_val(size, count, struct, dtype, hours)
+               for name, size, count, struct, dtype, hours in batches if name != "/"}
     if not mapping:
         return
     try:
@@ -121,10 +128,10 @@ def _save_batch_cache(vendor: str, bucket: str, prefix: str, entries: list) -> N
         return
     mapping = {}
     for e in entries:
-        for name, size, count, struct in e["batches"]:
+        for name, size, count, struct, dtype, hours in e["batches"]:
             if name == "/":
                 continue
-            mapping[f"{e['厂家']}/{name}"] = f"{size}:{count}:{struct}"
+            mapping[f"{e['厂家']}/{name}"] = _cache_val(size, count, struct, dtype, hours)
     if not mapping:
         return
     try:
@@ -135,6 +142,44 @@ def _save_batch_cache(vendor: str, bucket: str, prefix: str, entries: list) -> N
         r.expire(key, _BATCH_CACHE_TTL)
     except Exception:
         logger.warning("[Capacity] 批次缓存写入失败 %s/%s", bucket, prefix, exc_info=True)
+
+
+# ── 平铺家「近期已全扫」时间戳：稳定时跳过重扫（egoverse 1.6M 对象/35min → 秒级）──────
+_FLAT_RESCAN_HOURS = 20      # 平铺家最多每 ~20h 全扫一次，期间复用缓存 ALL
+_FLAT_TS_TTL = 30 * 86400
+
+
+def _flat_ts_key(vendor: str, bucket: str, prefix: str) -> str:
+    return f"capacity:flatscan:{vendor}:{bucket}:{prefix}"
+
+
+def _compute_skip_flat(vendor: str, bucket: str, prefix: str, cached: dict) -> set:
+    """近期已全扫、缓存里有 ALL 的平铺家 → 本次跳过重扫。"""
+    flat_fams = {k.rsplit("/", 1)[0] for k in cached if k.endswith("/ALL")}
+    if not flat_fams:
+        return set()
+    try:
+        import time
+        ts = redis_client.get_redis().hgetall(_flat_ts_key(vendor, bucket, prefix)) or {}
+        now = time.time()
+        return {f for f in flat_fams
+                if f in ts and (now - float(ts[f])) < _FLAT_RESCAN_HOURS * 3600}
+    except Exception:
+        return set()
+
+
+def _mark_flat_scanned(vendor: str, bucket: str, prefix: str, families: list) -> None:
+    """记录刚刚全扫过的平铺家时间戳。"""
+    if not families:
+        return
+    try:
+        import time
+        r = redis_client.get_redis()
+        key = _flat_ts_key(vendor, bucket, prefix)
+        r.hset(key, mapping={f: str(time.time()) for f in families})
+        r.expire(key, _FLAT_TS_TTL)
+    except Exception:
+        pass
 
 
 # ── 取数 ──────────────────────────────────────────────────────────────────────
@@ -148,17 +193,24 @@ def _fetch_nested(target: dict, cached: dict = None, on_family=None):
     vendor = target.get("vendor", "").lower()
     bucket = target.get("bucket", "")
     prefix = target.get("prefix", "")
+    cached = cached or {}
+    skip_flat = _compute_skip_flat(vendor, bucket, prefix, cached)   # 近期已全扫的平铺家
     if vendor == "oss":
         from tools.aliyun.oss import compute_nested_sizes
         entries, _endpoint = compute_nested_sizes(
             open_id="", bucket=bucket, prefix=prefix,
-            region=target.get("region", ""), cached=cached, on_family=on_family)
-        return entries
-    if vendor == "tos":
+            region=target.get("region", ""), cached=cached, on_family=on_family, skip_flat=skip_flat)
+    elif vendor == "tos":
         from tools.volcano.tos import compute_nested_sizes
-        return compute_nested_sizes(bucket, prefix, cached=cached, on_family=on_family)
-    logger.warning("[Capacity] 未知 vendor: %s", vendor)
-    return None
+        entries = compute_nested_sizes(bucket, prefix, cached=cached, on_family=on_family, skip_flat=skip_flat)
+    else:
+        logger.warning("[Capacity] 未知 vendor: %s", vendor)
+        return None
+    # 记录本次「新全扫」的平铺家时间戳（被 skip 的是复用、不刷新，到点才重扫）
+    if entries:
+        _mark_flat_scanned(vendor, bucket, prefix,
+                           [e["厂家"] for e in entries if e.get("flat") and e["厂家"] not in skip_flat])
+    return entries
 
 
 # ── 卡片 ──────────────────────────────────────────────────────────────────────
@@ -226,7 +278,37 @@ def _targets() -> list:
         return []
 
 
+_SCAN_LOCK_KEY = "capacity:scan:lock"
+_SCAN_LOCK_TTL = 5400   # 90 分钟，长于一次最长全扫，防死锁
+
+
+def _acquire_scan_lock() -> bool:
+    """SETNX 巡检单飞锁，拿到返回 True。Redis 不可用 → 降级返回 True（不阻塞巡检）。"""
+    try:
+        return bool(redis_client.get_redis().set(_SCAN_LOCK_KEY, "1", nx=True, ex=_SCAN_LOCK_TTL))
+    except Exception:
+        return True
+
+
+def _release_scan_lock() -> None:
+    try:
+        redis_client.get_redis().delete(_SCAN_LOCK_KEY)
+    except Exception:
+        pass
+
+
 def run_capacity_scan() -> None:
+    """单飞入口：同一时刻只允许一个巡检在跑（避免自动+手动并发改坏缓存/表）。"""
+    if not _acquire_scan_lock():
+        logger.info("[Capacity] 已有巡检在运行，跳过本次")
+        return
+    try:
+        _run_capacity_scan_inner()
+    finally:
+        _release_scan_lock()
+
+
+def _run_capacity_scan_inner() -> None:
     """遍历所有 target 盘点，汇总成一张飞书卡片一次推送。单个 target 失败不影响其余。"""
     targets = _targets()
     if not targets:
@@ -272,7 +354,7 @@ def run_capacity_scan() -> None:
                 bitable_rows.append({
                     "云厂商": vu, "Bucket": bucket, "父目录": parent, "厂家": e["厂家"],
                     "total_bytes": e["total_bytes"], "total_count": e["total_count"],
-                    "struct": e.get("struct", ""),
+                    "struct": e.get("struct", ""), "dtype": e.get("dtype", ""),
                     "delta_bytes": delta, "batches": e["batches"],
                 })
 
