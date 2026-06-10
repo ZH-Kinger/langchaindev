@@ -728,6 +728,14 @@ def _process_action(action_name: str, action_val: dict, open_id: str, chat_id: s
     """所有卡片动作的共享处理逻辑，返回飞书期待的响应 dict。
     耗时操作（Jira / DSW API）放后台线程，同步只做状态更新和 UI 反馈。
     """
+    # ── MFU 日报区域切换：返回新卡片原地替换（数据走 Redis 缓存，秒级）────────
+    if action_name == "mfu_region":
+        from tools.aliyun.cluster_mfu import build_mfu_card
+        region = action_val.get("region", "") if isinstance(action_val, dict) else ""
+        # schema 2.0 卡片回调：用 {"card":{"type":"raw","data":...}} 原地更新
+        return {"toast": {"type": "info", "content": "已切换"},
+                "card": {"type": "raw", "data": build_mfu_card(view=region or "summary")}}
+
     # ── AK/SK 表单卡片提交（Fernet 加密存 Redis，资源归属为用户本人）─────────
     if action_name == "submit_ak_register" and form_value:
         ak_id     = (form_value.get("ak_id") or "").strip()
@@ -1131,6 +1139,13 @@ def feishu_card_action():
 
     if data.get("type") == "url_verification":
         return jsonify({"challenge": data.get("challenge", "")})
+
+    # schema 2.0 卡片回调：动作在 data["event"]（与事件订阅 card.action.trigger 同构），
+    # 旧解析按 data["action"] 取不到值（action/open_id 全空）→ 统一走 2.0 解析。
+    logger.info("[card_action] RAW keys=%s", list(data.keys()))
+    if data.get("schema", "").startswith("2") or "event" in data or \
+            data.get("header", {}).get("event_type") == "card.action.trigger":
+        return jsonify(_handle_card_trigger_sync(data))
 
     action_obj  = data.get("action", {})
     action_val  = action_obj.get("value") or {}
