@@ -150,12 +150,14 @@ def _yesterday(region, peak):
     mfu_avg = (tflops_avg / (active_avg * peak) * 100) if (active_avg and peak) else 0.0
     return {
         "alloc_avg": alloc, "active_avg": active_avg, "tflops_avg": tflops_avg,
+        "sm_util":       _mean(_range_series(f"avg(AliyunPaidlc_CARD_GPU_SM_UTIL{s})", start, end)),
         "tensor_active": _mean(_range_series(f"avg(AliyunPaidlc_CARD_GPU_PIP_TENSOR_ACTIVE{s})", start, end)),
         "dram_active":   _mean(_range_series(f"avg(AliyunPaidlc_CARD_GPU_DRAM_ACTIVE_UTIL{s})", start, end)),
-        "nvlink_rx": _mean(_range_series(f"avg(AliyunPaidlc_CARD_GPU_NVLINK_RECEIVE{s})", start, end)) / 60,
-        "nvlink_tx": _mean(_range_series(f"avg(AliyunPaidlc_CARD_GPU_NVLINK_TRANSMIT{s})", start, end)) / 60,
-        "pcie_rx":   _mean(_range_series(f"avg(AliyunPaidlc_CARD_GPU_PCIE_RECEIVE{s})", start, end)) / 60,
-        "pcie_tx":   _mean(_range_series(f"avg(AliyunPaidlc_CARD_GPU_PCIE_TRANSMIT{s})", start, end)) / 60,
+        # NVLink/PCIe 指标为卡均吞吐(MiB/s)，展示时 /1024 → GiB/s
+        "nvlink_rx": _mean(_range_series(f"avg(AliyunPaidlc_CARD_GPU_NVLINK_RECEIVE{s})", start, end)),
+        "nvlink_tx": _mean(_range_series(f"avg(AliyunPaidlc_CARD_GPU_NVLINK_TRANSMIT{s})", start, end)),
+        "pcie_rx":   _mean(_range_series(f"avg(AliyunPaidlc_CARD_GPU_PCIE_RECEIVE{s})", start, end)),
+        "pcie_tx":   _mean(_range_series(f"avg(AliyunPaidlc_CARD_GPU_PCIE_TRANSMIT{s})", start, end)),
         "mfu": mfu_avg, "mfu_peak": max(mfus) if mfus else 0.0, "mfu_low": min(mfus) if mfus else 0.0,
         "idle_avg": max(0.0, alloc - active_avg), "idle_card_hours": max(0.0, alloc - active_avg) * 24,
         "date": date,
@@ -288,10 +290,10 @@ def _region_elements(d):
         sf("CPU 核 总/申请", f"{d['cpu_total']:.0f}/{d['cpu_request']:.0f}"),
         sf("内存 总/申请", f"{d['mem_total']:.0f}/{d['mem_request']:.0f}G"),
         sf("昨日 MFU", mfu),
-        sf("张量活跃 / 显存带宽", f"{_pct(y['tensor_active'])} / {_pct(y['dram_active'])}"),
+        sf("SM/张量/显存带宽", f"{_pct(y.get('sm_util', 0))} / {_pct(y['tensor_active'])} / {_pct(y['dram_active'])}"),
         sf("在算 / 算力", f"{y['active_avg']:.0f}卡 / {y['tflops_avg']:.0f}TF"),
-        sf("NVLink 收/发", f"{y['nvlink_rx']:.0f}/{y['nvlink_tx']:.0f} MiB/s"),
-        sf("PCIe 收/发", f"{y['pcie_rx']:.0f}/{y['pcie_tx']:.0f} MiB/s"),
+        sf("NVLink 收/发", f"{y['nvlink_rx']/1024:.1f}/{y['nvlink_tx']/1024:.1f} GiB/s"),
+        sf("PCIe 收/发", f"{y['pcie_rx']/1024:.1f}/{y['pcie_tx']/1024:.1f} GiB/s"),
         sf("节点 空闲/整空/碎片", f"{nd['free_total']}/{nd['fully_free_nodes']}/{nd['frag_free']}"),
     ]
     els = [
@@ -355,10 +357,10 @@ def _region_lines(d):
         f"| CPU 核 总/申请 | {d['cpu_total']:.0f}/{d['cpu_request']:.0f} |",
         f"| 内存 总/申请 | {d['mem_total']:.0f}/{d['mem_request']:.0f} GiB |",
         f"| 昨日 MFU | {mfu} |",
-        f"| 张量活跃 / 显存带宽 | {_pct(y['tensor_active'])} / {_pct(y['dram_active'])} |",
+        f"| SM / 张量活跃 / 显存带宽 | {_pct(y.get('sm_util', 0))} / {_pct(y['tensor_active'])} / {_pct(y['dram_active'])} |",
         f"| 在算 / 算力 | {y['active_avg']:.0f} 卡 / {y['tflops_avg']:.0f} TF |",
-        f"| NVLink 收/发 | {y['nvlink_rx']:.0f}/{y['nvlink_tx']:.0f} MiB/s |",
-        f"| PCIe 收/发 | {y['pcie_rx']:.0f}/{y['pcie_tx']:.0f} MiB/s |",
+        f"| NVLink 收/发 | {y['nvlink_rx']/1024:.1f}/{y['nvlink_tx']/1024:.1f} GiB/s |",
+        f"| PCIe 收/发 | {y['pcie_rx']/1024:.1f}/{y['pcie_tx']/1024:.1f} GiB/s |",
         f"| 节点 空闲/整空/碎片 | {nd['free_total']}/{nd['fully_free_nodes']}/{nd['frag_free']} |",
         f"| 空闲分布 | {_fmt_dist(nd)} |",
     ]
