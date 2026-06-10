@@ -150,6 +150,7 @@ def _yesterday(region, peak):
     mfu_avg = (tflops_avg / (active_avg * peak) * 100) if (active_avg and peak) else 0.0
     return {
         "alloc_avg": alloc, "active_avg": active_avg, "tflops_avg": tflops_avg,
+        "gpu_util":      _mean(_range_series(f"avg(AliyunPaidlc_CARD_GPU_DUTY_CYCLE{s})", start, end)),
         "sm_util":       _mean(_range_series(f"avg(AliyunPaidlc_CARD_GPU_SM_UTIL{s})", start, end)),
         "tensor_active": _mean(_range_series(f"avg(AliyunPaidlc_CARD_GPU_PIP_TENSOR_ACTIVE{s})", start, end)),
         "dram_active":   _mean(_range_series(f"avg(AliyunPaidlc_CARD_GPU_DRAM_ACTIVE_UTIL{s})", start, end)),
@@ -290,7 +291,8 @@ def _region_elements(d):
         sf("CPU 核 总/申请", f"{d['cpu_total']:.0f}/{d['cpu_request']:.0f}"),
         sf("内存 总/申请", f"{d['mem_total']:.0f}/{d['mem_request']:.0f}G"),
         sf("昨日 MFU", mfu),
-        sf("SM/张量/显存带宽", f"{_pct(y.get('sm_util', 0))} / {_pct(y['tensor_active'])} / {_pct(y['dram_active'])}"),
+        sf("GPU使用率 / SM使用率", f"{_pct(y.get('gpu_util', 0))} / {_pct(y.get('sm_util', 0))}"),
+        sf("张量活跃 / 显存带宽", f"{_pct(y['tensor_active'])} / {_pct(y['dram_active'])}"),
         sf("在算 / 算力", f"{y['active_avg']:.0f}卡 / {y['tflops_avg']:.0f}TF"),
         sf("NVLink 收/发", f"{y['nvlink_rx']/1024:.1f}/{y['nvlink_tx']/1024:.1f} GiB/s"),
         sf("PCIe 收/发", f"{y['pcie_rx']/1024:.1f}/{y['pcie_tx']/1024:.1f} GiB/s"),
@@ -357,7 +359,8 @@ def _region_lines(d):
         f"| CPU 核 总/申请 | {d['cpu_total']:.0f}/{d['cpu_request']:.0f} |",
         f"| 内存 总/申请 | {d['mem_total']:.0f}/{d['mem_request']:.0f} GiB |",
         f"| 昨日 MFU | {mfu} |",
-        f"| SM / 张量活跃 / 显存带宽 | {_pct(y.get('sm_util', 0))} / {_pct(y['tensor_active'])} / {_pct(y['dram_active'])} |",
+        f"| GPU使用率 / SM使用率 | {_pct(y.get('gpu_util', 0))} / {_pct(y.get('sm_util', 0))} |",
+        f"| 张量活跃 / 显存带宽 | {_pct(y['tensor_active'])} / {_pct(y['dram_active'])} |",
         f"| 在算 / 算力 | {y['active_avg']:.0f} 卡 / {y['tflops_avg']:.0f} TF |",
         f"| NVLink 收/发 | {y['nvlink_rx']/1024:.1f}/{y['nvlink_tx']/1024:.1f} GiB/s |",
         f"| PCIe 收/发 | {y['pcie_rx']/1024:.1f}/{y['pcie_tx']/1024:.1f} GiB/s |",

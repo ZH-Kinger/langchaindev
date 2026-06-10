@@ -37,9 +37,9 @@ CAP = {
 }
 YEST = {
     "cn-hangzhou":    {"alloc": 225, "act_dlc": 190, "act_dsw": 2, "tf_dlc": 11000, "tf_dsw": 4,
-                       "sm": 70.0, "ta": 15.0, "dram": 11.0, "nv_rx": 4652, "nv_tx": 3827, "pc_rx": 2696, "pc_tx": 651},
+                       "gpu": 99.0, "sm": 70.0, "ta": 15.0, "dram": 11.0, "nv_rx": 4652, "nv_tx": 3827, "pc_rx": 2696, "pc_tx": 651},
     "ap-southeast-1": {"alloc": 35, "act_dlc": 35, "act_dsw": 0, "tf_dlc": 793, "tf_dsw": 0,
-                       "sm": 60.0, "ta": 2.5, "dram": 8.6, "nv_rx": 25332, "nv_tx": 25954, "pc_rx": 4519, "pc_tx": 3428},
+                       "gpu": 90.0, "sm": 60.0, "ta": 2.5, "dram": 8.6, "nv_rx": 25332, "nv_tx": 25954, "pc_rx": 4519, "pc_tx": 3428},
 }
 JOBS = {
     "cn-hangzhou":    [("jobA", "u1", 150, 45.0, 150 * 70.0), ("jobB", "u2", 42, 8.0, 42 * 12.0)],
@@ -98,6 +98,7 @@ def patch_prom(monkeypatch):
         if "AliyunPaidsw_CARD_GPU_PIP_TENSOR_ACTIVE" in q and ">" in q: return [_series(y["act_dsw"])]
         if "AliyunPaidlc_CARD_GPU_TENSORTFLOPS_USED" in q:              return [_series(y["tf_dlc"])]
         if "AliyunPaidsw_CARD_GPU_TENSORTFLOPS_USED" in q:              return [_series(y["tf_dsw"])]
+        if "GPU_DUTY_CYCLE" in q:                                       return [_series(y["gpu"])]
         if "GPU_SM_UTIL" in q:                                          return [_series(y["sm"])]
         if "DRAM_ACTIVE_UTIL" in q:                                     return [_series(y["dram"])]
         if "NVLINK_RECEIVE" in q:                                       return [_series(y["nv_rx"])]
@@ -138,6 +139,7 @@ def test_yesterday_fields(patch_prom):
     assert y["mfu_peak"] == pytest.approx(y["mfu"], rel=1e-3)      # 常量序列 → 峰=谷=均
     assert y["dram_active"] == pytest.approx(11.0)
     assert y["sm_util"] == pytest.approx(70.0)
+    assert y["gpu_util"] == pytest.approx(99.0)
     assert y["nvlink_rx"] == pytest.approx(4652)                   # 原始 MiB/s（展示时 /1024→GiB/s）
 
 
