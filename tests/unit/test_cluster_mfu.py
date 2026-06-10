@@ -68,6 +68,16 @@ def patch_prom(monkeypatch):
             return [_pt(8, regionId=r, nodeGpuType=NODES[r]["gtype"]) for r in NODES]
         if "QUOTA_GPU_ACCELERATOR_TOTAL" in q and reg is None and not q.startswith("sum"):
             return [_pt(CAP[r]["GPU_ACCELERATOR_TOTAL"], regionId=r) for r in CAP]
+        # ⚡实时：by (regionId) 分组（无 region 过滤），一次返回全区域
+        if "by (regionId)" in q:
+            emit = lambda key: [_pt(YEST[r][key], regionId=r) for r in YEST]
+            if "PIP_TENSOR_ACTIVE" in q and q.startswith("count by") and ">" in q:
+                return emit("act_dlc") if "Paidlc" in q else emit("act_dsw")
+            if "TENSORTFLOPS_USED" in q and q.startswith("sum by"):
+                return emit("tf_dlc") if "Paidlc" in q else emit("tf_dsw")
+            if q.startswith("avg by") and "GPU_DUTY_CYCLE" in q: return emit("gpu")
+            if q.startswith("avg by") and "GPU_SM_UTIL" in q:    return emit("sm")
+            if q.startswith("avg by") and "PIP_TENSOR_ACTIVE" in q: return emit("ta")
         if reg is None:
             return []
         if q.startswith("sum(AliyunPaiquota_QUOTA_"):
@@ -176,6 +186,15 @@ def test_card_region_view(patch_prom):
 def test_fmt_dist_readable(patch_prom):
     nd = {"node_cap": 8, "free_dist": {0: 26, "2": 1, 8: 1}}   # 混 int/str key（JSON 缓存后）
     assert patch_prom._fmt_dist(nd) == "26满 · 1剩2 · 1整空"
+
+
+def test_realtime_view(patch_prom):
+    card = patch_prom.build_mfu_card(view="__rt__", refresh=True)
+    # 有 ⚡实时 按钮且高亮
+    rt_btn = next(b for b in card["elements"][0]["actions"] if b["value"]["region"] == "__rt__")
+    assert rt_btn["type"] == "primary" and "实时" in rt_btn["text"]["content"]
+    body = card["elements"][-1]["text"]["content"]
+    assert "实时快照" in body and "GPU%" in body and "杭州" in body and "新加坡" in body
 
 
 def test_text_report(patch_prom):

@@ -386,6 +386,35 @@ def _region_lines(d):
     return lines
 
 
+def _realtime_lines(g):
+    """⚡ 当前瞬时（instant 查询，非昨日均值）：各区此刻 GPU/SM/张量/MFU/在算。
+
+    用 `by (regionId)` 分组一次查全区域（7 条 query），避免逐区 18 条拖慢回调（飞书需<3s）。
+    """
+    thr = settings.GPU_ACTIVE_THRESHOLD_PCT
+    ts = datetime.now(_BJ).strftime("%H:%M:%S")
+    K = ("regionId",)
+    a_dlc = _grouped(f"count by (regionId)(AliyunPaidlc_CARD_GPU_PIP_TENSOR_ACTIVE > {thr})", K)
+    a_dsw = _grouped(f"count by (regionId)(AliyunPaidsw_CARD_GPU_PIP_TENSOR_ACTIVE > {thr})", K)
+    tf_dlc = _grouped("sum by (regionId)(AliyunPaidlc_CARD_GPU_TENSORTFLOPS_USED)", K)
+    tf_dsw = _grouped("sum by (regionId)(AliyunPaidsw_CARD_GPU_TENSORTFLOPS_USED)", K)
+    gpu = _grouped("avg by (regionId)(AliyunPaidlc_CARD_GPU_DUTY_CYCLE)", K)
+    sm = _grouped("avg by (regionId)(AliyunPaidlc_CARD_GPU_SM_UTIL)", K)
+    ta = _grouped("avg by (regionId)(AliyunPaidlc_CARD_GPU_PIP_TENSOR_ACTIVE)", K)
+    lines = [f"**⚡ 实时快照 · {ts} 北京**", "",
+             "| 区域 | 卡型 | GPU% | SM% | 张量% | MFU | 在算 | TFLOPS |",
+             "|---|---|---|---|---|---|---|---|"]
+    for d in g["regions"]:
+        rk, peak = (d["region"],), d["peak_tflops"]
+        active = a_dlc.get(rk, 0) + a_dsw.get(rk, 0)
+        tflops = tf_dlc.get(rk, 0) + tf_dsw.get(rk, 0)
+        mfu = "—" if not active else _pct(tflops / (active * peak) * 100 if peak else 0)
+        lines.append(f"| {d['region_name']} | {d['gpu_name']} | {_pct(gpu.get(rk, 0))} | {_pct(sm.get(rk, 0))} "
+                     f"| {_pct(ta.get(rk, 0))} | {mfu} | {active:.0f} | {tflops:.0f} |")
+    lines += ["", "_此为当前瞬时值；昨日全天均值见「📊 全局」_"]
+    return lines
+
+
 def _buttons(g, view):
     btns = [{"tag": "button", "text": {"tag": "plain_text", "content": "📊 全局"},
              "type": "primary" if view == "summary" else "default",
@@ -394,13 +423,20 @@ def _buttons(g, view):
         btns.append({"tag": "button", "text": {"tag": "plain_text", "content": d["region_name"]},
                      "type": "primary" if view == d["region"] else "default",
                      "value": {"action": "mfu_region", "region": d["region"]}})
+    btns.append({"tag": "button", "text": {"tag": "plain_text", "content": "⚡ 实时"},
+                 "type": "primary" if view == "__rt__" else "default",
+                 "value": {"action": "mfu_region", "region": "__rt__"}})
     return {"tag": "action", "actions": btns}
 
 
 def _card(g, view="summary"):
     cur = next((d for d in g["regions"] if d["region"] == view), None)
     elements = [_buttons(g, view), {"tag": "hr"}]
-    if cur:
+    if view == "__rt__":
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(_realtime_lines(g))}})
+        alarm = False
+        sub = "⚡ 实时"
+    elif cur:
         elements += _region_elements(cur)
         alarm = cur["waste_total"] > 0
         sub = f"{cur['region_name']} · {cur['gpu_name']}"
