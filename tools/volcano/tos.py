@@ -17,7 +17,7 @@ from utils.volcano_client_factory import get_tos_client
 from tools.aliyun.oss import (  # 复用模态/忽略目录过滤/数据类型识别
     _has_ignored_dir, _is_ignored_dirname, _dataset_type_bits, resolve_dtype, agg_dtype,
     _batch_key, parse_lerobot_info, _modality_bits, _resolve_modalities, agg_modalities,
-    _MODALITY_SAMPLE_CAP,
+    _MODALITY_SAMPLE_CAP, hdf5_modality_bits,
 )
 
 logger = logging.getLogger(__name__)
@@ -87,6 +87,14 @@ def _read_lerobot_info_tos(client, bucket: str, info_key: str):
         return None, None, 0
 
 
+def _read_hdf5_modalities_tos(client, bucket: str, key: str) -> int:
+    """TOS：get_object 一个小 .hdf5 → 内部字段模态 bit。失败 0。"""
+    try:
+        return hdf5_modality_bits(client.get_object(bucket, key).read())
+    except Exception:
+        return 0
+
+
 def _grouped_sizes(client, bucket: str, family_prefix: str) -> dict:
     """一趟连续扫描 family_prefix 下所有对象，按数据集根归并求和（火山 TOS 版）。
 
@@ -105,7 +113,7 @@ def _grouped_sizes(client, bucket: str, family_prefix: str) -> dict:
                 continue
             batch = _batch_key(rel)                    # 自适应：下钻到真实数据集根
             within = rel[len(batch) + 1:] if batch != "/" else rel
-            slot = sizes.setdefault(batch, [0, 0, 0, 0, ""])   # [bytes,count,modbits,dtbits,info_key]
+            slot = sizes.setdefault(batch, [0, 0, 0, 0, "", ""])   # +hdf5_key
             slot[0] += obj.size
             slot[1] += 1
             if slot[1] <= _MODALITY_SAMPLE_CAP:
@@ -113,11 +121,13 @@ def _grouped_sizes(client, bucket: str, family_prefix: str) -> dict:
             slot[3] |= _dataset_type_bits(within)
             if not slot[4] and within.endswith("meta/info.json"):
                 slot[4] = obj.key
+            if not slot[5] and within.lower().endswith(".hdf5"):
+                slot[5] = obj.key
         if r.is_truncated:
             token = r.next_continuation_token
         else:
             break
-    return {k: (v[0], v[1], v[2], resolve_dtype(v[3]), v[4]) for k, v in sizes.items()}
+    return {k: (v[0], v[1], v[2], resolve_dtype(v[3]), v[4], v[5]) for k, v in sizes.items()}
 
 
 _MAX_BATCHES = 200      # 批次数超此值判为「平铺」，只记整体不细分
@@ -147,7 +157,7 @@ def _scan_family_tos(client, bucket: str, sub: str, vendor_name: str, cached: di
         return [("ALL", tb, tc, _resolve_modalities(mbits), dt, None)], len(real), True
 
     batches = []
-    for name, (s, c, mbits, dt, info_key) in grouped.items():
+    for name, (s, c, mbits, dt, info_key, hdf5_key) in grouped.items():
         hrs = None
         if info_key:
             h, ver, feat_mbits = _read_lerobot_info_tos(client, bucket, info_key)
@@ -155,6 +165,8 @@ def _scan_family_tos(client, bucket: str, sub: str, vendor_name: str, cached: di
                 dt = ver
             hrs = h
             mbits |= feat_mbits
+        elif hdf5_key:                              # HDF5：读单个小文件内部字段补模态
+            mbits |= _read_hdf5_modalities_tos(client, bucket, hdf5_key)
         batches.append((name, s, c, _resolve_modalities(mbits), dt, hrs))
     return batches, len(real), False
 

@@ -355,25 +355,26 @@ def compute_dir_sizes(open_id: str, bucket: str, prefix: str = "", region: str =
 # 「数据结构」列改为如实列出数据集含哪些模态（取代过去靠扩展名猜 itw/ego 的做法）。
 # 标签按此固定顺序输出，便于稳定展示。
 _MODALITY_ORDER = [
-    "RGB", "深度", "IMU", "音频", "眼动", "头部位姿",
-    "末端位姿", "手腕", "手部关键点", "手部MANO", "动作", "状态", "关节", "夹爪",
+    "rgb", "depth", "imu", "audio", "gaze", "head_pose", "body_pose",
+    "ee_pose", "wrist", "hand_keypoints", "mano", "action", "state", "joint", "gripper",
 ]
 # 标签 → 命中关键词（子串，匹配时对象已转小写）
 _MODALITY_KW = {
-    "RGB":       ("front_camera", "camera", "images", "image", "rgb", ".mp4", ".mkv", "video"),
-    "深度":      ("depth",),
-    "IMU":       ("imu",),
-    "音频":      ("mic", ".wav", "audio"),
-    "眼动":      ("gaze",),
-    "头部位姿":  ("head_pose", "obs_head", "head_hands"),
-    "末端位姿":  ("ee_pose", "eef", "end_effector"),
-    "手腕":      ("wrist",),
-    "手部关键点": ("keypoint", "joints2d"),
-    "手部MANO":  ("mano",),
-    "动作":      ("action",),
-    "状态":      (".state", "/state", "observation.state", "qpos"),
-    "关节":      ("joint_pos", "joint_state", "joint_angle"),
-    "夹爪":      ("gripper",),
+    "rgb":            ("front_camera", "camera", "images", "image", "rgb", ".mp4", ".mkv", "video"),
+    "depth":          ("depth",),
+    "imu":            ("imu",),
+    "audio":          ("mic", ".wav", "audio"),
+    "gaze":           ("gaze",),
+    "head_pose":      ("head_pose", "obs_head", "head_hands"),
+    "body_pose":      ("arm", "shoulder", "hip", "neck", "spine", "torso", "elbow"),  # 全身骨骼(EgoDex)
+    "ee_pose":        ("ee_pose", "eef", "end_effector"),
+    "wrist":          ("wrist",),
+    "hand_keypoints": ("keypoint", "joints2d", "finger", "thumb", "knuckle", "metacarpal", "hand"),
+    "mano":           ("mano",),
+    "action":         ("action",),
+    "state":          (".state", "/state", "observation.state", "qpos"),
+    "joint":          ("joint_pos", "joint_state", "joint_angle"),
+    "gripper":        ("gripper",),
 }
 _MODALITY_SAMPLE_CAP = 800   # 每批次只对前 N 个对象采模态（模态在数据集内同质，足够稳定）
 
@@ -565,7 +566,7 @@ def _grouped_sizes(bucket, family_prefix: str) -> dict:
                 continue
             batch = _batch_key(rel)                    # 自适应：下钻到真实数据集根
             within = rel[len(batch) + 1:] if batch != "/" else rel
-            slot = sizes.setdefault(batch, [0, 0, 0, 0, ""])   # [bytes,count,modbits,dtbits,info_key]
+            slot = sizes.setdefault(batch, [0, 0, 0, 0, "", ""])   # [bytes,count,modbits,dtbits,info_key,hdf5_key]
             slot[0] += obj.size
             slot[1] += 1
             if slot[1] <= _MODALITY_SAMPLE_CAP:        # 模态：只采前 N 个对象（同质，够稳）
@@ -573,12 +574,14 @@ def _grouped_sizes(bucket, family_prefix: str) -> dict:
             slot[3] |= _dataset_type_bits(within)
             if not slot[4] and within.endswith("meta/info.json"):
                 slot[4] = obj.key
+            if not slot[5] and within.lower().endswith(".hdf5"):
+                slot[5] = obj.key
         if r.is_truncated:
             token = r.next_continuation_token
         else:
             break
-    # 返回 {批次: (bytes, count, modbits, dtype串, info_key)}；modbits 留待 _scan_family 合并 features 后再解析
-    return {k: (v[0], v[1], v[2], resolve_dtype(v[3]), v[4]) for k, v in sizes.items()}
+    # {批次: (bytes,count,modbits,dtype串,info_key,hdf5_key)}；modbits 留待 _scan_family 合并 features/hdf5 后解析
+    return {k: (v[0], v[1], v[2], resolve_dtype(v[3]), v[4], v[5]) for k, v in sizes.items()}
 
 
 import json as _json
@@ -611,6 +614,33 @@ def _read_lerobot_info(bucket, info_key: str):
         return parse_lerobot_info(bucket.get_object(info_key).read())
     except Exception:
         return None, None, 0
+
+
+def hdf5_modality_bits(raw: bytes) -> int:
+    """读 HDF5 字节内的所有 group/dataset 路径名 → 模态 bit。需 h5py；缺失或解析错→0。
+
+    供 OSS/TOS 各自取到一个小 .hdf5 文件字节后共用（如 EgoDex 的 camera/transforms/手指关键点）。
+    """
+    try:
+        import io
+        import h5py
+        bits = 0
+        with h5py.File(io.BytesIO(raw), "r") as f:
+            names = []
+            f.visit(names.append)
+            for n in names:
+                bits |= _modality_bits(n.lower())
+        return bits
+    except Exception:
+        return 0
+
+
+def _read_hdf5_modalities(bucket, key: str) -> int:
+    """OSS：GetObject 一个小 .hdf5 → 内部字段模态 bit。失败 0。"""
+    try:
+        return hdf5_modality_bits(bucket.get_object(key).read())
+    except Exception:
+        return 0
 
 
 # 批次数超过此值判定为「平铺」：不再细分批次，只记厂家整体大小（一行 'ALL'）
@@ -678,7 +708,7 @@ def _scan_family_oss(b, sub: str, vendor_name: str, cached: dict = None, skip_fl
             s, c, st, dt, hrs = cached[allk]
             return [("ALL", s, c, st, dt, hrs)], 0, True
 
-    grouped = _grouped_sizes(b, sub)                # {批次: (bytes,count,modbits,dtype,info_key)}
+    grouped = _grouped_sizes(b, sub)                # {批次: (bytes,count,modbits,dtype,info_key,hdf5_key)}
     real = [n for n in grouped if n != "/"]
     if len(real) > _MAX_BATCHES:                    # 平铺：不细分，只记整体
         tb = sum(v[0] for v in grouped.values())
@@ -690,7 +720,7 @@ def _scan_family_oss(b, sub: str, vendor_name: str, cached: dict = None, skip_fl
         return [("ALL", tb, tc, _resolve_modalities(mbits), dt, None)], len(real), True
 
     batches = []
-    for name, (s, c, mbits, dt, info_key) in grouped.items():
+    for name, (s, c, mbits, dt, info_key, hdf5_key) in grouped.items():
         hrs = None
         if info_key:                                # LeRobot：读 info.json 拿精确时长+版本+模态
             h, ver, feat_mbits = _read_lerobot_info(b, info_key)
@@ -698,6 +728,8 @@ def _scan_family_oss(b, sub: str, vendor_name: str, cached: dict = None, skip_fl
                 dt = ver
             hrs = h
             mbits |= feat_mbits
+        elif hdf5_key:                              # HDF5：读单个小文件内部字段补模态
+            mbits |= _read_hdf5_modalities(b, hdf5_key)
         batches.append((name, s, c, _resolve_modalities(mbits), dt, hrs))
     return batches, len(real), False
 

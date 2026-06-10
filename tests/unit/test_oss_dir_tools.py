@@ -213,7 +213,7 @@ def test_modality_from_raw_capture_filenames(patch_bucket):
     ])
     from tools.aliyun.oss import compute_nested_sizes
     st = compute_nested_sizes("", "bkt", "tp/")[0][0]["struct"]
-    assert st == "RGB/深度/IMU/音频/手部关键点"
+    assert st == "rgb/depth/imu/audio/hand_keypoints"
 
 
 def test_modality_from_zarr_array_paths(patch_bucket):
@@ -228,7 +228,7 @@ def test_modality_from_zarr_array_paths(patch_bucket):
     ])
     from tools.aliyun.oss import compute_nested_sizes
     st = compute_nested_sizes("", "bkt", "tp/")[0][0]["struct"]
-    assert st == "RGB/眼动/头部位姿/末端位姿/手腕/手部关键点"
+    assert st == "rgb/gaze/head_pose/ee_pose/wrist/hand_keypoints"
 
 
 def test_scan_reads_info_json_for_lerobot(patch_bucket):
