@@ -259,6 +259,33 @@ def test_scan_info_json_read_failure_degrades(patch_bucket):
     assert bat[5] is None                  # 读不到 → 时长空
 
 
+def test_scan_sums_all_info_json_in_batch(patch_bucket):
+    """一个批次含多个 LeRobot 数据集时，时长 = 所有 info.json 之和（修复只读首个的严重少算）。
+
+    复现 lingsheng：批次 `*_100h_*` 下有几十个子数据集，旧逻辑只读第一个 info.json
+    导致 100h 报成 0.22h。现应累加全部。
+    """
+    import json
+    info1 = json.dumps({"codebase_version": "v3.0", "fps": 30, "total_frames": 1080000})  # 10h
+    info2 = json.dumps({"codebase_version": "v3.0", "fps": 30, "total_frames": 3240000})  # 30h
+    patch_bucket(
+        [   # _batch_key 因首段含 100h token 停在 d_100h_x，两个数据集归入同一批次
+            ("tp/lr/d_100h_x/sess/ds1/meta/info.json", 5),
+            ("tp/lr/d_100h_x/sess/ds1/data/c/f.parquet", 100),
+            ("tp/lr/d_100h_x/sess/ds2/meta/info.json", 5),
+            ("tp/lr/d_100h_x/sess/ds2/data/c/f.parquet", 100),
+        ],
+        contents={
+            "tp/lr/d_100h_x/sess/ds1/meta/info.json": info1,
+            "tp/lr/d_100h_x/sess/ds2/meta/info.json": info2,
+        },
+    )
+    from tools.aliyun.oss import compute_nested_sizes
+    lr = compute_nested_sizes("", "bkt", "tp/")[0][0]
+    bat = {b[0]: b for b in lr["batches"]}["d_100h_x"]
+    assert bat[5] == 40.0          # 10 + 30，而非只读首个的 10
+
+
 def test_flat_family_collapses_to_total(patch_bucket):
     """批次数超过 _MAX_BATCHES 的「平铺」厂家应折叠成单行 'ALL'，不细分。"""
     from tools.aliyun import oss as oss_mod

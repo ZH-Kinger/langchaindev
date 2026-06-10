@@ -377,6 +377,8 @@ _MODALITY_KW = {
     "gripper":        ("gripper",),
 }
 _MODALITY_SAMPLE_CAP = 800   # 每批次只对前 N 个对象采模态（模态在数据集内同质，足够稳定）
+_HDF5_MAX_READ = 25 * 1024 ** 2   # 只读小于此大小的 .hdf5（避免下载几十 MB 进内存 OOM/变慢）
+_INFO_KEYS_CAP = 3000   # 单批次最多收集 N 个 meta/info.json（一个交付批次可含数十~上百个数据集）
 
 
 def _modality_bits(s: str) -> int:
@@ -549,8 +551,9 @@ def agg_dtype(types) -> str:
 def _grouped_sizes(bucket, family_prefix: str) -> dict:
     """一趟连续扫描 family_prefix 下所有对象，按第二层目录(批次)归并求和。
 
-    返回 {批次名: (bytes, count, struct, dtype, info_key)}；厂家直属文件归入 '/'。
-    info_key = 该批次下 meta/info.json 的完整 key（LeRobot 才有，供后续读取精确时长/版本），无则 ""。
+    返回 {批次名: (bytes, count, struct, dtype, info_keys)}；厂家直属文件归入 '/'。
+    info_keys = 该批次下「所有」数据集的 meta/info.json key 列表（一个交付批次常含多个
+    LeRobot 数据集，须全部读出时长再求和；只读首个会严重少算），无则空列表。
     跳过任意层级的点目录（.cache/.deliver_server_preflight 等元数据噪音）。
     调用次数只与对象数有关、与批次数无关——批次极多时远快于逐批次扫描。
     """
@@ -566,21 +569,21 @@ def _grouped_sizes(bucket, family_prefix: str) -> dict:
                 continue
             batch = _batch_key(rel)                    # 自适应：下钻到真实数据集根
             within = rel[len(batch) + 1:] if batch != "/" else rel
-            slot = sizes.setdefault(batch, [0, 0, 0, 0, "", ""])   # [bytes,count,modbits,dtbits,info_key,hdf5_key]
+            slot = sizes.setdefault(batch, [0, 0, 0, 0, [], ""])   # [bytes,count,modbits,dtbits,info_keys,hdf5_key]
             slot[0] += obj.size
             slot[1] += 1
             if slot[1] <= _MODALITY_SAMPLE_CAP:        # 模态：只采前 N 个对象（同质，够稳）
                 slot[2] |= _modality_bits(within.lower())
             slot[3] |= _dataset_type_bits(within)
-            if not slot[4] and within.endswith("meta/info.json"):
-                slot[4] = obj.key
-            if not slot[5] and within.lower().endswith(".hdf5"):
+            if within.endswith("meta/info.json") and len(slot[4]) < _INFO_KEYS_CAP:
+                slot[4].append(obj.key)                # 收集本批次下「所有」数据集的 info.json（一批次可含多个 LeRobot 数据集）
+            if not slot[5] and within.lower().endswith(".hdf5") and obj.size < _HDF5_MAX_READ:
                 slot[5] = obj.key
         if r.is_truncated:
             token = r.next_continuation_token
         else:
             break
-    # {批次: (bytes,count,modbits,dtype串,info_key,hdf5_key)}；modbits 留待 _scan_family 合并 features/hdf5 后解析
+    # {批次: (bytes,count,modbits,dtype串,info_keys[列表],hdf5_key)}；modbits 留待 _scan_family 合并 features/hdf5 后解析
     return {k: (v[0], v[1], v[2], resolve_dtype(v[3]), v[4], v[5]) for k, v in sizes.items()}
 
 
@@ -720,14 +723,20 @@ def _scan_family_oss(b, sub: str, vendor_name: str, cached: dict = None, skip_fl
         return [("ALL", tb, tc, _resolve_modalities(mbits), dt, None)], len(real), True
 
     batches = []
-    for name, (s, c, mbits, dt, info_key, hdf5_key) in grouped.items():
+    for name, (s, c, mbits, dt, info_keys, hdf5_key) in grouped.items():
         hrs = None
-        if info_key:                                # LeRobot：读 info.json 拿精确时长+版本+模态
-            h, ver, feat_mbits = _read_lerobot_info(b, info_key)
+        if info_keys:                               # LeRobot：累加本批次下「所有」数据集的 info.json 时长
+            total_h, ver = 0.0, None
+            for ik in info_keys:
+                h, v, feat_mbits = _read_lerobot_info(b, ik)
+                if h is not None:
+                    total_h += h
+                if v and not ver:                   # 同批次版本一致，取首个非空
+                    ver = v
+                mbits |= feat_mbits
             if ver:
                 dt = ver
-            hrs = h
-            mbits |= feat_mbits
+            hrs = round(total_h, 2) if total_h > 0 else None
         elif hdf5_key:                              # HDF5：读单个小文件内部字段补模态
             mbits |= _read_hdf5_modalities(b, hdf5_key)
         batches.append((name, s, c, _resolve_modalities(mbits), dt, hrs))

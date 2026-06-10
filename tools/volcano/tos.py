@@ -17,7 +17,7 @@ from utils.volcano_client_factory import get_tos_client
 from tools.aliyun.oss import (  # 复用模态/忽略目录过滤/数据类型识别
     _has_ignored_dir, _is_ignored_dirname, _dataset_type_bits, resolve_dtype, agg_dtype,
     _batch_key, parse_lerobot_info, _modality_bits, _resolve_modalities, agg_modalities,
-    _MODALITY_SAMPLE_CAP, hdf5_modality_bits,
+    _MODALITY_SAMPLE_CAP, hdf5_modality_bits, _HDF5_MAX_READ, _INFO_KEYS_CAP,
 )
 
 logger = logging.getLogger(__name__)
@@ -98,7 +98,8 @@ def _read_hdf5_modalities_tos(client, bucket: str, key: str) -> int:
 def _grouped_sizes(client, bucket: str, family_prefix: str) -> dict:
     """一趟连续扫描 family_prefix 下所有对象，按数据集根归并求和（火山 TOS 版）。
 
-    返回 {批次名: (bytes, count, modbits, dtype, info_key)}；厂家直属文件归入 '/'；跳过点目录。
+    返回 {批次名: (bytes, count, modbits, dtype, info_keys)}；厂家直属文件归入 '/'；跳过点目录。
+    info_keys = 本批次下「所有」数据集的 meta/info.json key 列表（须全部读出时长再求和）。
     """
     sizes: dict = {}
     token = ""
@@ -113,15 +114,15 @@ def _grouped_sizes(client, bucket: str, family_prefix: str) -> dict:
                 continue
             batch = _batch_key(rel)                    # 自适应：下钻到真实数据集根
             within = rel[len(batch) + 1:] if batch != "/" else rel
-            slot = sizes.setdefault(batch, [0, 0, 0, 0, "", ""])   # +hdf5_key
+            slot = sizes.setdefault(batch, [0, 0, 0, 0, [], ""])   # [bytes,count,modbits,dtbits,info_keys,hdf5_key]
             slot[0] += obj.size
             slot[1] += 1
             if slot[1] <= _MODALITY_SAMPLE_CAP:
                 slot[2] |= _modality_bits(within.lower())
             slot[3] |= _dataset_type_bits(within)
-            if not slot[4] and within.endswith("meta/info.json"):
-                slot[4] = obj.key
-            if not slot[5] and within.lower().endswith(".hdf5"):
+            if within.endswith("meta/info.json") and len(slot[4]) < _INFO_KEYS_CAP:
+                slot[4].append(obj.key)                # 收集本批次下「所有」数据集的 info.json
+            if not slot[5] and within.lower().endswith(".hdf5") and obj.size < _HDF5_MAX_READ:
                 slot[5] = obj.key
         if r.is_truncated:
             token = r.next_continuation_token
@@ -157,14 +158,20 @@ def _scan_family_tos(client, bucket: str, sub: str, vendor_name: str, cached: di
         return [("ALL", tb, tc, _resolve_modalities(mbits), dt, None)], len(real), True
 
     batches = []
-    for name, (s, c, mbits, dt, info_key, hdf5_key) in grouped.items():
+    for name, (s, c, mbits, dt, info_keys, hdf5_key) in grouped.items():
         hrs = None
-        if info_key:
-            h, ver, feat_mbits = _read_lerobot_info_tos(client, bucket, info_key)
+        if info_keys:                               # LeRobot：累加本批次下「所有」数据集的 info.json 时长
+            total_h, ver = 0.0, None
+            for ik in info_keys:
+                h, v, feat_mbits = _read_lerobot_info_tos(client, bucket, ik)
+                if h is not None:
+                    total_h += h
+                if v and not ver:
+                    ver = v
+                mbits |= feat_mbits
             if ver:
                 dt = ver
-            hrs = h
-            mbits |= feat_mbits
+            hrs = round(total_h, 2) if total_h > 0 else None
         elif hdf5_key:                              # HDF5：读单个小文件内部字段补模态
             mbits |= _read_hdf5_modalities_tos(client, bucket, hdf5_key)
         batches.append((name, s, c, _resolve_modalities(mbits), dt, hrs))
