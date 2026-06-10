@@ -10,6 +10,7 @@ from .aliyun import (
     gpu_advisor_tool,
     gpu_training_advisor_tool,
     cluster_health_report_tool,
+    cluster_mfu_report_tool,
 )
 from .volcano import tos_tool
 from .feishu import feishu_tool
@@ -35,6 +36,7 @@ ALL_TOOLS = [
     gpu_advisor_tool,
     gpu_training_advisor_tool,
     cluster_health_report_tool,
+    cluster_mfu_report_tool,
     # ── 火山引擎 ─────────────────────────────────────────────
     tos_tool,
     # ── 飞书 / Jira / GitHub ─────────────────────────────────
@@ -62,7 +64,7 @@ TOOL_GROUPS = {
     "jira":      {"manage_jira"},
     "training":  {"analyze_gpu_training", "query_infrastructure_metrics"},
     "inspect":   {"inspect_dsw_instance", "manage_pai_dsw"},
-    "cluster":   {"cluster_health_report", "inspect_dsw_instance"},
+    "cluster":   {"cluster_health_report", "cluster_mfu_report", "inspect_dsw_instance"},
     "workflow":  {"query_jira_workflow", "query_github_workflow"},
     "ecs":       {"manage_ecs"},
     "oss":       {"manage_oss"},

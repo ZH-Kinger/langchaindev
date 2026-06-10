@@ -9,6 +9,7 @@ from .dsw_inspector import dsw_instance_inspector_tool
 from .gpu_advisor import gpu_advisor_tool
 from .gpu_training_advisor import gpu_training_advisor_tool
 from .cluster_health import cluster_health_report_tool
+from .cluster_mfu import cluster_mfu_report_tool
 
 __all__ = [
     "pai_dsw_tool",
@@ -21,4 +22,5 @@ __all__ = [
     "gpu_advisor_tool",
     "gpu_training_advisor_tool",
     "cluster_health_report_tool",
+    "cluster_mfu_report_tool",
 ]

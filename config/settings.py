@@ -1,4 +1,5 @@
 import os
+import json
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -87,6 +88,30 @@ class Config:
 
     # 每日集群监控早报（9 点随 DSW 实例早报一起推送基础设施健康报告到群）
     CLUSTER_MORNING_REPORT_ENABLED = os.environ.get("CLUSTER_MORNING_REPORT_ENABLED", "true").lower() == "true"
+
+    # 集群算力效率（MFU）日报
+    # 统计区域白名单（逗号分隔 regionId，如 "cn-hangzhou,cn-beijing"）；空=自动发现所有区域
+    CLUSTER_REGION            = os.environ.get("CLUSTER_REGION", "")
+    # 单卡理论峰值 TFLOPS（BF16/FP16 稠密）兜底值，卡型未在映射表里时用
+    GPU_PEAK_TFLOPS           = float(os.environ.get("GPU_PEAK_TFLOPS", "148.0"))
+    # 按 GPU 卡型(nodeGpuType)映射单卡峰值 TFLOPS：GU8T=H20≈148、L20X=H200≈989
+    try:
+        GPU_PEAK_TFLOPS_BY_TYPE = json.loads(
+            os.environ.get("GPU_PEAK_TFLOPS_BY_TYPE", '{"GU8T": 148, "L20X": 989}'))
+    except Exception:
+        GPU_PEAK_TFLOPS_BY_TYPE = {"GU8T": 148, "L20X": 989}
+    # 卡型→展示名
+    GPU_TYPE_DISPLAY          = {"GU8T": "H20", "L20X": "H200"}
+    # 卡型→单卡显存 GiB（算显存容量利用率：已分配 ÷ 总卡×单卡显存）：H20=96、H200=141
+    try:
+        GPU_MEM_GB_BY_TYPE = json.loads(
+            os.environ.get("GPU_MEM_GB_BY_TYPE", '{"GU8T": 96, "L20X": 141}'))
+    except Exception:
+        GPU_MEM_GB_BY_TYPE = {"GU8T": 96, "L20X": 141}
+    # 张量核活跃率高于此值（%）即视为「在算」，用于区分空占卡
+    GPU_ACTIVE_THRESHOLD_PCT  = float(os.environ.get("GPU_ACTIVE_THRESHOLD_PCT", "1.0"))
+    # 训练任务 MFU 低于此值（%）在早报中标红点名
+    MFU_LOW_THRESHOLD_PCT     = float(os.environ.get("MFU_LOW_THRESHOLD_PCT", "30.0"))
 
     # GPU 配额与运营
     ADMIN_FEISHU_OPEN_ID      = os.environ.get("ADMIN_FEISHU_OPEN_ID", "")
