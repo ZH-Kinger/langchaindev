@@ -1,4 +1,5 @@
 import os
+import json
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -88,9 +89,22 @@ class Config:
     # 每日集群监控早报（9 点随 DSW 实例早报一起推送基础设施健康报告到群）
     CLUSTER_MORNING_REPORT_ENABLED = os.environ.get("CLUSTER_MORNING_REPORT_ENABLED", "true").lower() == "true"
 
-    # OSS 权限同步：每日对账推卡片到群，管理员点「批准」按钮自动下发（用 ALIYUN_ACCESS_KEY 调 RAM）
-    OSS_PERM_PUSH_ENABLED = os.environ.get("OSS_PERM_PUSH_ENABLED", "false").lower() == "true"
-    OSS_PERM_PUSH_HOUR    = int(os.environ.get("OSS_PERM_PUSH_HOUR", "9"))
+    # 多区域集群算力效率（MFU）日报
+    CLUSTER_REGION            = os.environ.get("CLUSTER_REGION", "")   # 逗号分隔 regionId；空=全部区域
+    GPU_PEAK_TFLOPS           = float(os.environ.get("GPU_PEAK_TFLOPS", "148.0"))   # 兜底峰值
+    try:
+        GPU_PEAK_TFLOPS_BY_TYPE = json.loads(
+            os.environ.get("GPU_PEAK_TFLOPS_BY_TYPE", '{"GU8T": 148, "L20X": 989}'))
+    except Exception:
+        GPU_PEAK_TFLOPS_BY_TYPE = {"GU8T": 148, "L20X": 989}
+    try:
+        GPU_MEM_GB_BY_TYPE = json.loads(
+            os.environ.get("GPU_MEM_GB_BY_TYPE", '{"GU8T": 96, "L20X": 141}'))
+    except Exception:
+        GPU_MEM_GB_BY_TYPE = {"GU8T": 96, "L20X": 141}
+    GPU_TYPE_DISPLAY          = {"GU8T": "H20", "L20X": "H200"}
+    GPU_ACTIVE_THRESHOLD_PCT  = float(os.environ.get("GPU_ACTIVE_THRESHOLD_PCT", "1.0"))
+    MFU_LOW_THRESHOLD_PCT     = float(os.environ.get("MFU_LOW_THRESHOLD_PCT", "30.0"))
 
     # GPU 配额与运营
     ADMIN_FEISHU_OPEN_ID      = os.environ.get("ADMIN_FEISHU_OPEN_ID", "")

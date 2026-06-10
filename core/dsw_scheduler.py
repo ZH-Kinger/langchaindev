@@ -336,23 +336,23 @@ def _send_morning_report() -> None:
 
 
 def _send_cluster_morning_report() -> None:
-    """每日集群监控早报：生成基础设施健康报告并推送到飞书群。"""
+    """每日集群算力效率（MFU）早报：聚合全集群 MFU 并推送到飞书群。"""
     if not settings.CLUSTER_MORNING_REPORT_ENABLED:
         return
     if not settings.PROMETHEUS_URL:
-        logger.info("[Scheduler] PROMETHEUS_URL 未配置，跳过集群监控早报")
+        logger.info("[Scheduler] PROMETHEUS_URL 未配置，跳过集群 MFU 早报")
+        return
+    chat_id = settings.FEISHU_CHAT_ID
+    if not chat_id:
+        logger.info("[Scheduler] FEISHU_CHAT_ID 未配置，跳过集群 MFU 早报")
         return
     try:
-        from tools.aliyun.prometheus import query_prometheus_metrics
-        from tools.feishu.notify import send_feishu_report
-        report = query_prometheus_metrics(query_type="report")
-        if report.startswith("❌") or "[REPORT_START]" not in report:
-            logger.warning("[Scheduler] 集群报告生成异常，跳过推送：%.80s", report)
-            return
-        result = send_feishu_report(report, title="📊 每日集群监控早报")
-        logger.info("[Scheduler] 集群监控早报已推送：%.80s", result)
-    except Exception as e:
-        logger.error("[Scheduler] 集群监控早报失败", exc_info=True)
+        from tools.aliyun.cluster_mfu import build_mfu_card
+        card = build_mfu_card(view="summary", refresh=True)   # 刷新快照并暖缓存，供卡片按钮切换
+        _send_card("", chat_id, card)
+        logger.info("[Scheduler] 集群 MFU 早报已推送")
+    except Exception:
+        logger.error("[Scheduler] 集群 MFU 早报失败", exc_info=True)
 
 
 def _run_oss_perm_audit_push() -> None:
