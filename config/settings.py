@@ -106,6 +106,10 @@ class Config:
     GPU_ACTIVE_THRESHOLD_PCT  = float(os.environ.get("GPU_ACTIVE_THRESHOLD_PCT", "1.0"))
     MFU_LOW_THRESHOLD_PCT     = float(os.environ.get("MFU_LOW_THRESHOLD_PCT", "30.0"))
 
+    # OSS 权限每日对账推送（带批准按钮）；默认关闭，按需在 .env 开
+    OSS_PERM_PUSH_ENABLED     = os.environ.get("OSS_PERM_PUSH_ENABLED", "false").lower() == "true"
+    OSS_PERM_PUSH_HOUR        = int(os.environ.get("OSS_PERM_PUSH_HOUR", "9"))
+
     # GPU 配额与运营
     ADMIN_FEISHU_OPEN_ID      = os.environ.get("ADMIN_FEISHU_OPEN_ID", "")
     GPU_PRICE_PER_HOUR        = float(os.environ.get("GPU_PRICE_PER_HOUR", "35.0"))
