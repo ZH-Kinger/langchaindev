@@ -132,7 +132,7 @@ def test_compute_nested_sizes_two_levels(patch_bucket):
 
     lw = by["lightwheel"]
     assert lw["total_bytes"] == 360 and lw["total_count"] == 4
-    batches = {name: (b, c) for name, b, c in lw["batches"]}
+    batches = {name: (b, c) for name, b, c, st in lw["batches"]}
     assert batches["2026-01"] == (150, 2)
     assert batches["2026-02"] == (200, 1)
     assert batches["/"] == (10, 1)            # 直属文件归入 /
@@ -141,24 +141,54 @@ def test_compute_nested_sizes_two_levels(patch_bucket):
 
 
 def test_compute_nested_sizes_uses_cache(monkeypatch, patch_bucket):
-    """已缓存的批次应复用缓存、不再调用 _prefix_size 实扫；新批次仍实扫。"""
+    """已缓存的批次应复用缓存、不再实扫；新批次仍实扫。"""
     patch_bucket([
         ("tp/lw/2026-01/a.bin", 100),     # 已交付（缓存）
         ("tp/lw/2026-02/b.bin", 200),     # 新批次（须实扫）
     ])
     from tools.aliyun import oss as oss_mod
     calls = []
-    real_prefix_size = oss_mod._prefix_size
-    monkeypatch.setattr(oss_mod, "_prefix_size",
-                        lambda b, p: calls.append(p) or real_prefix_size(b, p))
+    real_batch_sum = oss_mod._batch_sum
+    monkeypatch.setattr(oss_mod, "_batch_sum",
+                        lambda b, p: calls.append(p) or real_batch_sum(b, p))
 
-    cached = {"lw/2026-01": (100, 1)}     # 2026-01 已缓存
+    cached = {"lw/2026-01": (100, 1, "")}     # 2026-01 已缓存（含 struct 段）
     entries, _ = oss_mod.compute_nested_sizes("", "bkt", "tp/", cached=cached)
     lw = entries[0]
     assert lw["total_bytes"] == 300       # 100(缓存) + 200(实扫)
-    # 只对新批次 2026-02 实扫，已缓存的 2026-01 未触发 _prefix_size
     assert any("2026-02" in p for p in calls)
     assert not any("2026-01" in p for p in calls)
+
+
+def test_dot_and_test_dirs_ignored(patch_bucket):
+    """. 开头 与 test 目录（批次级 / 批次内）完全忽略：不算批次、不计入大小/对象数。"""
+    patch_bucket([
+        ("tp/lw/2026-01/a.bin", 100),
+        ("tp/lw/.cache/x", 999),                  # 厂家级点目录 → 忽略
+        ("tp/lw/2026-01/.deliver/y.txt", 40),     # 批次内点目录 → 忽略
+        ("tp/lw/test/z.bin", 500),                # 厂家级 test 目录 → 忽略
+        ("tp/lw/2026-01/test/w.bin", 30),         # 批次内 test 目录 → 忽略
+    ])
+    from tools.aliyun.oss import compute_nested_sizes
+    lw = compute_nested_sizes("", "bkt", "tp/")[0][0]
+    names = {b[0] for b in lw["batches"]}
+    assert ".cache" not in names and "test" not in names
+    assert lw["total_bytes"] == 100 and lw["total_count"] == 1
+
+
+def test_struct_detection(patch_bucket):
+    """按扩展名判数据结构：hdf5→ego，parquet/mcap→itw。"""
+    patch_bucket([
+        ("tp/egodex/p1/0.hdf5", 10), ("tp/egodex/p1/0.mp4", 5),
+        ("tp/lingsheng/itw1/data/chunk-000/f.parquet", 20),
+        ("tp/lightwheel/6-2-504h/u/x.mcap", 30),
+    ])
+    from tools.aliyun.oss import compute_nested_sizes
+    by = {e["厂家"]: e for e in compute_nested_sizes("", "bkt", "tp/")[0]}
+    assert by["egodex"]["struct"] == "ego"
+    assert by["lingsheng"]["struct"] == "itw"
+    assert by["lightwheel"]["struct"] == "itw"
+    assert {b[0]: b[3] for b in by["egodex"]["batches"]}["p1"] == "ego"
 
 
 def test_flat_family_collapses_to_total(patch_bucket):

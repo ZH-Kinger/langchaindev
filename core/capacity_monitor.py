@@ -78,15 +78,21 @@ def _batch_cache_key(vendor: str, bucket: str, prefix: str) -> str:
 
 
 def _load_batch_cache(vendor: str, bucket: str, prefix: str) -> dict:
-    """返回 {"厂家/批次": (bytes, count)}；关闭/无记录/Redis 不可用返回 {}。"""
+    """返回 {"厂家/批次": (bytes, count, struct)}；关闭/无记录/Redis 不可用返回 {}。
+
+    缓存值格式 "size:count:struct"（兼容旧的 "size:count"，struct 缺省为空）。
+    """
     if not settings.CAPACITY_BATCH_CACHE_ENABLED:
         return {}
     try:
         raw = redis_client.get_redis().hgetall(_batch_cache_key(vendor, bucket, prefix))
         out = {}
         for k, v in (raw or {}).items():
-            b, _, c = v.partition(":")
-            out[k] = (int(b), int(c))
+            parts = v.split(":")
+            size = int(parts[0])
+            count = int(parts[1]) if len(parts) > 1 else 0
+            struct = parts[2] if len(parts) > 2 else ""
+            out[k] = (size, count, struct)
         return out
     except Exception:
         return {}
@@ -96,8 +102,8 @@ def _save_family_cache(vendor: str, bucket: str, prefix: str, vendor_name: str, 
     """单个厂家扫完即增量写入缓存（断点续传：中断后已完成厂家下次跳过）。排除 '/'。"""
     if not settings.CAPACITY_BATCH_CACHE_ENABLED:
         return
-    mapping = {f"{vendor_name}/{name}": f"{size}:{count}"
-               for name, size, count in batches if name != "/"}
+    mapping = {f"{vendor_name}/{name}": f"{size}:{count}:{struct}"
+               for name, size, count, struct in batches if name != "/"}
     if not mapping:
         return
     try:
@@ -115,10 +121,10 @@ def _save_batch_cache(vendor: str, bucket: str, prefix: str, entries: list) -> N
         return
     mapping = {}
     for e in entries:
-        for name, size, count in e["batches"]:
+        for name, size, count, struct in e["batches"]:
             if name == "/":
                 continue
-            mapping[f"{e['厂家']}/{name}"] = f"{size}:{count}"
+            mapping[f"{e['厂家']}/{name}"] = f"{size}:{count}:{struct}"
     if not mapping:
         return
     try:
@@ -266,6 +272,7 @@ def run_capacity_scan() -> None:
                 bitable_rows.append({
                     "云厂商": vu, "Bucket": bucket, "父目录": parent, "厂家": e["厂家"],
                     "total_bytes": e["total_bytes"], "total_count": e["total_count"],
+                    "struct": e.get("struct", ""),
                     "delta_bytes": delta, "batches": e["batches"],
                 })
 

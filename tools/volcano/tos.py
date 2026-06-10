@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from langchain.tools import StructuredTool
 
 from utils.volcano_client_factory import get_tos_client
+from tools.aliyun.oss import _struct_of_key, _has_ignored_dir, _is_ignored_dirname, agg_struct  # 复用结构判定/忽略目录过滤
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +76,9 @@ def compute_dir_sizes(bucket: str, prefix: str = ""):
 
 
 def _direct_files_size(client, bucket: str, prefix: str):
-    """只统计 prefix 直属文件（不含子目录里的），返回 (字节数, 对象数)。"""
+    """只统计 prefix 直属文件（跳过点文件），返回 (字节数, 对象数, struct)。"""
     total_bytes = count = 0
+    struct = ""
     token = ""
     while True:
         r = client.list_objects_type2(bucket, prefix=prefix, delimiter="/",
@@ -84,19 +86,25 @@ def _direct_files_size(client, bucket: str, prefix: str):
         for obj in r.contents:
             if obj.key.endswith("/") and obj.size == 0:
                 continue
+            if obj.key[len(prefix):].startswith("."):
+                continue
             total_bytes += obj.size
             count += 1
+            if not struct:
+                st = _struct_of_key(obj.key)
+                if st:
+                    struct = st
         if r.is_truncated:
             token = r.next_continuation_token
         else:
             break
-    return total_bytes, count
+    return total_bytes, count, struct
 
 
 def _grouped_sizes(client, bucket: str, family_prefix: str) -> dict:
     """一趟连续扫描 family_prefix 下所有对象，按第二层目录(批次)归并求和（火山 TOS 版）。
 
-    返回 {批次名: (bytes, count)}；厂家直属文件归入 '/'。调用次数只与对象数有关。
+    返回 {批次名: (bytes, count, struct)}；厂家直属文件归入 '/'；跳过点目录。
     """
     sizes: dict = {}
     token = ""
@@ -107,15 +115,47 @@ def _grouped_sizes(client, bucket: str, family_prefix: str) -> dict:
             if obj.key.endswith("/") and obj.size == 0:
                 continue
             rel = obj.key[len(family_prefix):]
+            if _has_ignored_dir(rel):
+                continue
             batch = rel.split("/", 1)[0] if "/" in rel else "/"
-            slot = sizes.setdefault(batch, [0, 0])
+            slot = sizes.setdefault(batch, [0, 0, ""])
             slot[0] += obj.size
             slot[1] += 1
+            if not slot[2]:
+                st = _struct_of_key(obj.key)
+                if st:
+                    slot[2] = st
         if r.is_truncated:
             token = r.next_continuation_token
         else:
             break
-    return {k: (v[0], v[1]) for k, v in sizes.items()}
+    return {k: (v[0], v[1], v[2]) for k, v in sizes.items()}
+
+
+def _batch_sum(client, bucket: str, batch_prefix: str):
+    """逐批次扫：累加 batch_prefix 下对象（跳过点目录），返回 (bytes, count, struct)。"""
+    total = count = 0
+    struct = ""
+    token = ""
+    while True:
+        r = client.list_objects_type2(bucket, prefix=batch_prefix,
+                                      continuation_token=token, max_keys=1000)
+        for obj in r.contents:
+            if obj.key.endswith("/") and obj.size == 0:
+                continue
+            if _has_ignored_dir(obj.key[len(batch_prefix):]):
+                continue
+            total += obj.size
+            count += 1
+            if not struct:
+                st = _struct_of_key(obj.key)
+                if st:
+                    struct = st
+        if r.is_truncated:
+            token = r.next_continuation_token
+        else:
+            break
+    return total, count, struct
 
 
 _GROUPED_THRESHOLD = 30
@@ -129,7 +169,8 @@ def _scan_family_tos(client, bucket: str, sub: str, vendor_name: str, cached: di
     else:
         fam_has_cache = any(k.startswith(vendor_name + "/") for k in cached)
         if fam_has_cache:
-            batch_dirs = _list_subdirs(client, bucket, sub)
+            batch_dirs = [bd for bd in _list_subdirs(client, bucket, sub)
+                          if not _is_ignored_dirname(bd[len(sub):].rstrip("/"))]   # 跳过点目录
             new_dirs = [bd for bd in batch_dirs
                         if f"{vendor_name}/{bd[len(sub):].rstrip('/')}" not in cached]
             use_grouped = len(new_dirs) > _GROUPED_THRESHOLD
@@ -140,24 +181,25 @@ def _scan_family_tos(client, bucket: str, sub: str, vendor_name: str, cached: di
         grouped = _grouped_sizes(client, bucket, sub)
         real = [n for n in grouped if n != "/"]
         if len(real) > _MAX_BATCHES:
-            tb = sum(s for s, _ in grouped.values())
-            tc = sum(c for _, c in grouped.values())
-            return [("ALL", tb, tc)], len(real), True
-        return [(n, s, c) for n, (s, c) in grouped.items()], len(real), False
+            tb = sum(v[0] for v in grouped.values())
+            tc = sum(v[1] for v in grouped.values())
+            st = agg_struct(v[2] for v in grouped.values())
+            return [("ALL", tb, tc, st)], len(real), True
+        return [(n, s, c, st) for n, (s, c, st) in grouped.items()], len(real), False
 
     batches, fresh = [], 0
     for bd in batch_dirs:
         batch_name = bd[len(sub):].rstrip("/")
         ck = f"{vendor_name}/{batch_name}"
         if ck in cached:
-            size_bytes, count = cached[ck]
+            size_bytes, count, struct = cached[ck]
         else:
-            size_bytes, count = _prefix_size(client, bucket, bd)
+            size_bytes, count, struct = _batch_sum(client, bucket, bd)
             fresh += 1
-        batches.append((batch_name, size_bytes, count))
-    root_bytes, root_count = _direct_files_size(client, bucket, sub)
+        batches.append((batch_name, size_bytes, count, struct))
+    root_bytes, root_count, root_struct = _direct_files_size(client, bucket, sub)
     if root_count:
-        batches.append(("/", root_bytes, root_count))
+        batches.append(("/", root_bytes, root_count, root_struct))
     return batches, fresh, False
 
 
@@ -182,12 +224,13 @@ def compute_nested_sizes(bucket: str, prefix: str = "", cached: dict = None, on_
             vendor_name = sub[len(prefix):].rstrip("/")
             t0 = time.time()
             batches, fresh, flat = _scan_family_tos(client, bucket, sub, vendor_name, cached)
-            total_bytes = sum(s for _, s, _ in batches)
-            total_count = sum(c for _, _, c in batches)
+            total_bytes = sum(x[1] for x in batches)
+            total_count = sum(x[2] for x in batches)
             entries.append({
                 "厂家": vendor_name,
                 "total_bytes": total_bytes,
                 "total_count": total_count,
+                "struct": agg_struct(x[3] for x in batches),
                 "batches": batches,
             })
             logger.info("[进度] TOS %s [%d/%d] %s%s：%d 批次(%d 新扫) %.2fGB %d 对象 用时%.0fs",

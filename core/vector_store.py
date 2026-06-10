@@ -1,6 +1,6 @@
 from functools import lru_cache
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_chroma import Chroma
+from langchain_community.vectorstores import Chroma   # 与 ingest.py 同源；避免 langchain-chroma 0.1.4 锁死 chromadb<0.6
 from langchain_core.vectorstores import VectorStoreRetriever
 from chromadb.config import Settings as ChromaSettings
 from config.settings import settings
