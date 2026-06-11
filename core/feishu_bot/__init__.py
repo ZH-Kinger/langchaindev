@@ -5,7 +5,7 @@
 启动方式：
     python main.py --mode bot
 或：
-    python core/feishu_bot.py
+    python -m core.feishu_bot
 
 飞书开发者后台配置（事件订阅）：
     请求地址 → http(s)://你的公网IP:8088/feishu/event
@@ -1310,7 +1310,3 @@ def run(host: str = "0.0.0.0", port: int = 8088, debug: bool = False):
     logger.info("飞书 Bot 服务启动 → http://%s:%s/feishu/event", host, port)
     logger.info("卡片回调地址     → http://%s:%s/feishu/card_action", host, port)
     app.run(host=host, port=port, debug=debug)
-
-
-if __name__ == "__main__":
-    run()

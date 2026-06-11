@@ -59,7 +59,7 @@ pytest -k test_router                 # match by test name
 | `agent` | `core/agent.py` | Three-tier tool routing, Redis session memory, streaming |
 | `hybrid` | `core/hybrid_agents.py` | Edge model emits JSON observation → cloud model decides |
 | `collab` | `core/multi_agent_system.py` | Diagnostic agent (read-only tools) → Ops agent (write tools) |
-| `bot` | `core/feishu_bot.py` | Flask `/feishu/event`, starts `core/dsw_scheduler` background threads |
+| `bot` | `core/feishu_bot/` | Flask `/feishu/event`, starts `core/dsw_scheduler` background threads |
 
 ### LLM Factory (`core/llm_factory.py`)
 
@@ -139,7 +139,7 @@ ChromaDB with `shibing624/text2vec-base-chinese` embeddings, persisted in `vecto
 - **Hybrid** — `EdgeWatcher` (Qwen3-4B) serializes its observation as JSON, then `CloudManager` (Qwen-Max) consumes it as `input`. Edge is cheap and fast for raw signal extraction; cloud handles judgment.
 - **Collab** — diagnostic expert holds read-only tools (Prometheus, RAG, system stats); ops officer holds write tools (K8s restart, Feishu notify). Expert output becomes the officer's input.
 
-### Feishu Bot (`core/feishu_bot.py`)
+### Feishu Bot (`core/feishu_bot/`)
 
 Flask endpoint `/feishu/event` handles `im.message.receive_v1`. Three message paths:
 1. GPU intent (resource + action words, or training phrases) → action-button card, persists draft to Redis.
