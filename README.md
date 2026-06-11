@@ -42,7 +42,7 @@ langchaindev/
 │   ├── rag_runner.py           # RAG 模式运行入口（会话 ID 隔离）
 │   ├── hybrid_agents.py        # 混合双模型工作流（边缘→云端）
 │   ├── multi_agent_system.py   # 多智能体协作（诊断 + 执行）
-│   ├── feishu_bot.py           # 飞书 Webhook 服务（Flask）
+│   ├── feishu_bot/             # 飞书 Webhook 服务（Flask）
 │   ├── dsw_scheduler.py        # DSW 工单调度器（Jira轮询 + 实例监控 + 早报）
 │   ├── chains.py               # RAG 链组装
 │   ├── llm_factory.py          # LLM 工厂（云端/边缘模型，@lru_cache）

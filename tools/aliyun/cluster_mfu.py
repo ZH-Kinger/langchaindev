@@ -12,20 +12,33 @@
 
 坑/口径：在算卡用 PIP_TENSOR_ACTIVE 存在性（弃用漏报的 GPU_HEALTH）；按 regionId 区分；
 单卡峰值/显存按卡型映射（settings.GPU_PEAK_TFLOPS_BY_TYPE / GPU_MEM_GB_BY_TYPE）。
-浪费 = 空占卡·时(昨日) + 碎片卡·时(当前) × 单价。卡片快照缓存 Redis 15min，供按钮秒级切换。
+浪费 = 空占卡·时(昨日) + 碎片卡·时(当前) × 单价。
+
+缓存：快照存 Redis 24h（全量采集 ~25 PromQL/区，约 1-2 分钟，远超飞书回调 3s 硬限）。
+按钮回调走 mfu_card_for_callback：只读缓存秒回；超过 15 分钟陈旧 → 单飞后台线程刷新，
+当次仍立即返回旧数据（卡片底部标「数据截至 HH:MM」）；缓存全无 → 只回 toast 不动卡片。
 """
 import json
+import threading
+import time
 from datetime import datetime, timezone, timedelta
 
 from pydantic import BaseModel, Field
 from langchain.tools import StructuredTool
 
 from config.settings import settings
+from tools.feishu.cards import btn, buttons, card, div, fields, hr, note
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 _BJ = timezone(timedelta(hours=8))
 _REGION_DISPLAY = {"cn-hangzhou": "杭州", "cn-beijing": "北京", "ap-southeast-1": "新加坡"}
 _CACHE_KEY = "mfu:snapshot"
-_CACHE_TTL = 900   # 15 分钟，供卡片按钮切换复用，避免每次点击重算
+_CACHE_TTL = 24 * 3600        # 快照保 24h：按钮回调永远有缓存可秒回（早报 cron 每天刷新兜底）
+_STALE_SECONDS = 900          # 超 15 分钟视为陈旧：仍秒回旧数据，同时后台刷新
+_REFRESH_LOCK_KEY = "mfu:refresh_lock"
+_REFRESH_LOCK_TTL = 300       # 单飞锁：连点按钮只触发一次全量采集（采集约 1-2 分钟）
 
 
 def _region_name(r): return _REGION_DISPLAY.get(r, r)
@@ -229,7 +242,7 @@ def gather_all():
     rs = [gather_region(r, t) for r, t in _discover_regions()]
     _, _, date = _yesterday_window()
     return {
-        "date": date, "regions": rs,
+        "date": date, "regions": rs, "gathered_at": time.time(),
         "gpu_total": sum(d["gpu_total"] for d in rs),
         "gpu_request": sum(d["gpu_request"] for d in rs),
         "tflops": sum(d["yesterday"]["tflops_avg"] for d in rs),
@@ -239,20 +252,56 @@ def gather_all():
 
 # ── 缓存（供卡片按钮秒级切换）────────────────────────────────────────────────────
 
-def _load_or_gather(refresh=False):
+def _load_cache():
     from utils import redis_client
-    if not refresh:
-        try:
-            raw = redis_client.get_redis().get(_CACHE_KEY)
-            if raw:
-                return json.loads(raw)
-        except Exception:
-            pass
-    g = gather_all()
+    try:
+        raw = redis_client.get_redis().get(_CACHE_KEY)
+        if raw:
+            return json.loads(raw)
+    except Exception:
+        pass
+    return None
+
+
+def _save_cache(g):
+    from utils import redis_client
     try:
         redis_client.get_redis().set(_CACHE_KEY, json.dumps(g), ex=_CACHE_TTL)
     except Exception:
         pass
+
+
+def _refresh_in_background():
+    """单飞后台刷新：抢到 Redis NX 锁才采集，连点按钮/多 worker 不会并发全量重算。"""
+    from utils import redis_client
+    try:
+        if not redis_client.get_redis().set(_REFRESH_LOCK_KEY, "1", nx=True, ex=_REFRESH_LOCK_TTL):
+            return
+    except Exception:
+        return   # Redis 不可用时缓存也读不到，后台刷新无意义
+
+    def _job():
+        try:
+            _save_cache(gather_all())
+            logger.info("[MFU] 后台刷新快照完成")
+        except Exception:
+            logger.warning("[MFU] 后台刷新快照失败", exc_info=True)
+        finally:
+            try:
+                redis_client.get_redis().delete(_REFRESH_LOCK_KEY)
+            except Exception:
+                pass
+
+    threading.Thread(target=_job, daemon=True, name="mfu-refresh").start()
+
+
+def _load_or_gather(refresh=False):
+    if not refresh:
+        g = _load_cache()
+        if g is not None:
+            return g
+    g = gather_all()
+    _save_cache(g)
     return g
 
 
@@ -282,27 +331,22 @@ def _region_elements(d):
     y, nd = d["yesterday"], d["nodes"]
     mfu = "—" if y["active_avg"] == 0 else f"{_pct(y['mfu'])}（峰{_pct(y['mfu_peak'])}/谷{_pct(y['mfu_low'])}）"
 
-    def sf(label, val):
-        return {"is_short": True, "text": {"tag": "lark_md", "content": f"**{label}**\n{val}"}}
-
-    fields = [
-        sf("GPU 卡 总/申请", f"{d['gpu_total']}/{d['gpu_request']}（{_pct(d['alloc_rate'])}）"),
-        sf("显存 已分配/总", f"{d['gpu_mem_alloc']:.0f}/{d['gpu_mem_total']:.0f}G（{_pct(d['gpu_mem_util'])}）"),
-        sf("CPU 核 总/申请", f"{d['cpu_total']:.0f}/{d['cpu_request']:.0f}"),
-        sf("内存 总/申请", f"{d['mem_total']:.0f}/{d['mem_request']:.0f}G"),
-        sf("昨日 MFU", mfu),
-        sf("GPU使用率 / SM使用率", f"{_pct(y.get('gpu_util', 0))} / {_pct(y.get('sm_util', 0))}"),
-        sf("张量活跃 / 显存带宽", f"{_pct(y['tensor_active'])} / {_pct(y['dram_active'])}"),
-        sf("在算 / 算力", f"{y['active_avg']:.0f}卡 / {y['tflops_avg']:.0f}TF"),
-        sf("NVLink 收/发", f"{y['nvlink_rx']/1024:.1f}/{y['nvlink_tx']/1024:.1f} GiB/s"),
-        sf("PCIe 收/发", f"{y['pcie_rx']/1024:.1f}/{y['pcie_tx']/1024:.1f} GiB/s"),
-        sf("节点 空闲/整空/碎片", f"{nd['free_total']}/{nd['fully_free_nodes']}/{nd['frag_free']}"),
-    ]
     els = [
-        {"tag": "div", "text": {"tag": "lark_md",
-            "content": f"**▍{d['region_name']} · {d['gpu_name']}**　峰值 {d['peak_tflops']:.0f} TFLOPS"
-                       f"　{nd['node_count']}×{nd['node_cap']} 卡　空闲分布 {_fmt_dist(nd)}"}},
-        {"tag": "div", "fields": fields},
+        div(f"**▍{d['region_name']} · {d['gpu_name']}**　峰值 {d['peak_tflops']:.0f} TFLOPS"
+            f"　{nd['node_count']}×{nd['node_cap']} 卡　空闲分布 {_fmt_dist(nd)}"),
+        fields(
+            ("GPU 卡 总/申请", f"{d['gpu_total']}/{d['gpu_request']}（{_pct(d['alloc_rate'])}）"),
+            ("显存 已分配/总", f"{d['gpu_mem_alloc']:.0f}/{d['gpu_mem_total']:.0f}G（{_pct(d['gpu_mem_util'])}）"),
+            ("CPU 核 总/申请", f"{d['cpu_total']:.0f}/{d['cpu_request']:.0f}"),
+            ("内存 总/申请", f"{d['mem_total']:.0f}/{d['mem_request']:.0f}G"),
+            ("昨日 MFU", mfu),
+            ("GPU使用率 / SM使用率", f"{_pct(y.get('gpu_util', 0))} / {_pct(y.get('sm_util', 0))}"),
+            ("张量活跃 / 显存带宽", f"{_pct(y['tensor_active'])} / {_pct(y['dram_active'])}"),
+            ("在算 / 算力", f"{y['active_avg']:.0f}卡 / {y['tflops_avg']:.0f}TF"),
+            ("NVLink 收/发", f"{y['nvlink_rx']/1024:.1f}/{y['nvlink_tx']/1024:.1f} GiB/s"),
+            ("PCIe 收/发", f"{y['pcie_rx']/1024:.1f}/{y['pcie_tx']/1024:.1f} GiB/s"),
+            ("节点 空闲/整空/碎片", f"{nd['free_total']}/{nd['fully_free_nodes']}/{nd['frag_free']}"),
+        ),
     ]
     bullets = []
     full = nd["fully_free_nodes"]
@@ -319,7 +363,7 @@ def _region_elements(d):
         tops = "；".join(f"{j['user']} {j['cards']}卡 {'🔴' if j['mfu'] < low else ''}{_pct(j['mfu'])}" for j in jobs[:4])
         bullets.append(f"🏃 **在跑**：{tops}")
     if bullets:
-        els.append({"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(bullets)}})
+        els.append(div("\n".join(bullets)))
     return els
 
 
@@ -416,24 +460,21 @@ def _realtime_lines(g):
 
 
 def _buttons(g, view):
-    btns = [{"tag": "button", "text": {"tag": "plain_text", "content": "📊 全局"},
-             "type": "primary" if view == "summary" else "default",
-             "value": {"action": "mfu_region", "region": ""}}]
+    btns = [btn("📊 全局", {"action": "mfu_region", "region": ""},
+                "primary" if view == "summary" else "default")]
     for d in g["regions"]:
-        btns.append({"tag": "button", "text": {"tag": "plain_text", "content": d["region_name"]},
-                     "type": "primary" if view == d["region"] else "default",
-                     "value": {"action": "mfu_region", "region": d["region"]}})
-    btns.append({"tag": "button", "text": {"tag": "plain_text", "content": "⚡ 实时"},
-                 "type": "primary" if view == "__rt__" else "default",
-                 "value": {"action": "mfu_region", "region": "__rt__"}})
-    return {"tag": "action", "actions": btns}
+        btns.append(btn(d["region_name"], {"action": "mfu_region", "region": d["region"]},
+                        "primary" if view == d["region"] else "default"))
+    btns.append(btn("⚡ 实时", {"action": "mfu_region", "region": "__rt__"},
+                    "primary" if view == "__rt__" else "default"))
+    return buttons(*btns)
 
 
 def _card(g, view="summary"):
     cur = next((d for d in g["regions"] if d["region"] == view), None)
-    elements = [_buttons(g, view), {"tag": "hr"}]
+    elements = [_buttons(g, view), hr()]
     if view == "__rt__":
-        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(_realtime_lines(g))}})
+        elements.append(div("\n".join(_realtime_lines(g))))
         alarm = False
         sub = "⚡ 实时"
     elif cur:
@@ -441,15 +482,17 @@ def _card(g, view="summary"):
         alarm = cur["waste_total"] > 0
         sub = f"{cur['region_name']} · {cur['gpu_name']}"
     else:
-        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(_summary_lines(g))}})
+        elements.append(div("\n".join(_summary_lines(g))))
         alarm = g["waste_total"] > 0 or any(d["gpu_total"] > 0 and d["gpu_request"] == 0 for d in g["regions"])
         sub = f"{len(g['regions'])}区 {g['gpu_request']}/{g['gpu_total']} 卡在用"
-    return {
-        "config": {"wide_screen_mode": True, "update_multi": True},   # 共享卡片需 update_multi 才能被回调原地替换
-        "header": {"title": {"tag": "plain_text", "content": f"🧮 多区域算力效率日报 · {g['date']} · {sub}"},
-                   "template": "red" if alarm else "blue"},
-        "elements": elements,
-    }
+    # 数据采集时间注脚（旧缓存无 gathered_at 字段时跳过）
+    ts = g.get("gathered_at")
+    if ts:
+        hm = datetime.fromtimestamp(ts, _BJ).strftime("%m-%d %H:%M")
+        elements += [hr(), note(f"数据截至 {hm}（北京）· 超过15分钟点按钮自动后台刷新")]
+    # 共享卡片需 update_multi 才能被回调原地替换
+    return card(f"🧮 多区域算力效率日报 · {g['date']} · {sub}", elements,
+                color="red" if alarm else "blue", update_multi=True)
 
 
 def build_mfu_card(view="summary", refresh=False):
@@ -457,6 +500,22 @@ def build_mfu_card(view="summary", refresh=False):
     if not g.get("regions"):
         return {"config": {}, "header": {"title": {"tag": "plain_text", "content": "🧮 算力效率日报"}},
                 "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "未发现 GPU 区域/配额。"}}]}
+    return _card(g, view)
+
+
+def mfu_card_for_callback(view="summary"):
+    """飞书按钮回调专用（同步路径 <3s 硬限）：只读缓存，绝不同步采集。
+
+    命中且陈旧 → 触发单飞后台刷新，当次仍立即返回旧数据卡片；
+    缓存全无（Redis 清空/重启且早报未跑）→ 触发后台采集，返回 None，
+    调用方只回 toast 提示稍后再点，不替换原卡片。
+    """
+    g = _load_cache()
+    if g is None or not g.get("regions"):
+        _refresh_in_background()
+        return None
+    if time.time() - g.get("gathered_at", 0) > _STALE_SECONDS:
+        _refresh_in_background()
     return _card(g, view)
 
 

@@ -21,6 +21,7 @@ from typing import Optional
 
 from config.settings import settings
 from utils.logger import get_logger
+from tools.feishu.cards import btn, buttons, card, div, fields, hr
 
 logger = get_logger(__name__)
 
@@ -181,73 +182,42 @@ def _mark_approval_notified(ticket_key: str) -> bool:
 def _make_approval_card(ticket_key: str, instance_name: str, gpu_count: str,
                          duration_hours: str, purpose: str, requester_name: str,
                          requester_open_id: str, requester_chat_id: str) -> dict:
-    return {
-        "config": {"wide_screen_mode": True},
-        "header": {"title": {"tag": "plain_text", "content": "⏳ GPU 大规模申请待审批"},
-                   "template": "orange"},
-        "elements": [
-            {
-                "tag": "div",
-                "fields": [
-                    {"is_short": True, "text": {"tag": "lark_md", "content": f"**申请人**\n{requester_name}"}},
-                    {"is_short": True, "text": {"tag": "lark_md", "content": f"**工单**\n{ticket_key}"}},
-                    {"is_short": True, "text": {"tag": "lark_md", "content": f"**实例**\n{instance_name}"}},
-                    {"is_short": True, "text": {"tag": "lark_md", "content": f"**规格**\n{gpu_count}GPU · {duration_hours}h"}},
-                    {"is_short": True, "text": {"tag": "lark_md", "content": f"**费用预估**\n{_cost_str(int(gpu_count), float(duration_hours))}"}},
-                    {"is_short": True, "text": {"tag": "lark_md", "content": f"**用途**\n{purpose}"}},
-                ],
-            },
-            {"tag": "hr"},
-            {
-                "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "✅ 批准"},
-                        "type": "primary",
-                        "value": {"action": "approve_gpu", "ticket_key": ticket_key,
-                                  "requester_open_id": requester_open_id,
-                                  "requester_chat_id": requester_chat_id},
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "❌ 拒绝"},
-                        "type": "danger",
-                        "value": {"action": "reject_gpu", "ticket_key": ticket_key,
-                                  "requester_open_id": requester_open_id,
-                                  "requester_chat_id": requester_chat_id},
-                    },
-                ],
-            },
-        ],
-    }
+    return card("⏳ GPU 大规模申请待审批", [
+        fields(
+            ("申请人", requester_name),
+            ("工单", ticket_key),
+            ("实例", instance_name),
+            ("规格", f"{gpu_count}GPU · {duration_hours}h"),
+            ("费用预估", _cost_str(int(gpu_count), float(duration_hours))),
+            ("用途", purpose),
+        ),
+        hr(),
+        buttons(
+            btn("✅ 批准", {"action": "approve_gpu", "ticket_key": ticket_key,
+                           "requester_open_id": requester_open_id,
+                           "requester_chat_id": requester_chat_id}, "primary"),
+            btn("❌ 拒绝", {"action": "reject_gpu", "ticket_key": ticket_key,
+                           "requester_open_id": requester_open_id,
+                           "requester_chat_id": requester_chat_id}, "danger"),
+        ),
+    ], color="orange")
 
 
 # ── 实例就绪通知 ──────────────────────────────────────────────────────────────────
 
 def _make_running_card(instance_id: str, instance_name: str,
                         ticket_key: str, gpu_count: int, duration_hours: float) -> dict:
-    return {
-        "config": {"wide_screen_mode": True},
-        "header": {"title": {"tag": "plain_text", "content": "🟢 GPU 实例已就绪"},
-                   "template": "green"},
-        "elements": [
-            {
-                "tag": "div",
-                "fields": [
-                    {"is_short": True, "text": {"tag": "lark_md", "content": f"**实例名称**\n{instance_name}"}},
-                    {"is_short": True, "text": {"tag": "lark_md", "content": f"**实例 ID**\n`{instance_id}`"}},
-                    {"is_short": True, "text": {"tag": "lark_md", "content": f"**工单**\n{ticket_key}"}},
-                    {"is_short": True, "text": {"tag": "lark_md",
-                     "content": f"**费用预估**\n{_cost_str(gpu_count, duration_hours)}"}},
-                ],
-            },
-            {"tag": "hr"},
-            {"tag": "div", "text": {"tag": "lark_md",
-                "content": "实例已进入 **Running** 状态，可在 PAI DSW 控制台打开 JupyterLab。\n"
-                           "到期前 15 分钟会提醒续期。"}},
-        ],
-    }
+    return card("🟢 GPU 实例已就绪", [
+        fields(
+            ("实例名称", instance_name),
+            ("实例 ID", f"`{instance_id}`"),
+            ("工单", ticket_key),
+            ("费用预估", _cost_str(gpu_count, duration_hours)),
+        ),
+        hr(),
+        div("实例已进入 **Running** 状态，可在 PAI DSW 控制台打开 JupyterLab。\n"
+            "到期前 15 分钟会提醒续期。"),
+    ], color="green")
 
 
 def _poll_until_running(ticket_key: str, instance_id: str, instance_name: str,
@@ -435,75 +405,31 @@ def _send_text(open_id: str, chat_id: str, text: str) -> None:
 
 def _make_instance_created_card(instance_id: str, instance_name: str,
                                  ticket_key: str, duration_hours: str) -> dict:
-    return {
-        "config": {"wide_screen_mode": True},
-        "header": {
-            "title": {"tag": "plain_text", "content": "✅ GPU 实例已创建"},
-            "template": "green",
-        },
-        "elements": [
-            {
-                "tag": "div",
-                "fields": [
-                    {"is_short": True, "text": {"tag": "lark_md", "content": f"**实例名称**\n{instance_name}"}},
-                    {"is_short": True, "text": {"tag": "lark_md", "content": f"**实例 ID**\n`{instance_id}`"}},
-                    {"is_short": True, "text": {"tag": "lark_md", "content": f"**工单**\n{ticket_key}"}},
-                    {"is_short": True, "text": {"tag": "lark_md", "content": f"**有效时长**\n{duration_hours} 小时"}},
-                ],
-            },
-            {"tag": "hr"},
-            {"tag": "div", "text": {"tag": "lark_md",
-                "content": "实例正在启动，预计 2-3 分钟后可用。到期前 15 分钟将提醒续期。"}},
-        ],
-    }
+    return card("✅ GPU 实例已创建", [
+        fields(
+            ("实例名称", instance_name),
+            ("实例 ID", f"`{instance_id}`"),
+            ("工单", ticket_key),
+            ("有效时长", f"{duration_hours} 小时"),
+        ),
+        hr(),
+        div("实例正在启动，预计 2-3 分钟后可用。到期前 15 分钟将提醒续期。"),
+    ], color="green")
 
 
 def _make_idle_warn_card(instance_id: str, instance_name: str,
                           ticket_key: str, stop_minutes: int) -> dict:
-    return {
-        "config": {"wide_screen_mode": True},
-        "header": {
-            "title": {"tag": "plain_text", "content": "⏰ GPU 实例即将超时"},
-            "template": "orange",
-        },
-        "elements": [
-            {
-                "tag": "div",
-                "text": {"tag": "lark_md",
-                    "content": (
-                        f"实例 **{instance_name}** (`{instance_id}`) 使用时长已达上限。\n"
-                        f"**{stop_minutes} 分钟内无操作将自动停止实例**（数据保留，可重新启动）。"
-                    )},
-            },
-            {"tag": "hr"},
-            {
-                "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "⏩ 延续使用 2 小时"},
-                        "type": "primary",
-                        "value": {
-                            "action": "extend_dsw",
-                            "instance_id": instance_id,
-                            "ticket_key": ticket_key,
-                            "extend_hours": "2",
-                        },
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "🛑 立即停止"},
-                        "type": "danger",
-                        "value": {
-                            "action": "stop_dsw",
-                            "instance_id": instance_id,
-                            "ticket_key": ticket_key,
-                        },
-                    },
-                ],
-            },
-        ],
-    }
+    return card("⏰ GPU 实例即将超时", [
+        div(f"实例 **{instance_name}** (`{instance_id}`) 使用时长已达上限。\n"
+            f"**{stop_minutes} 分钟内无操作将自动停止实例**（数据保留，可重新启动）。"),
+        hr(),
+        buttons(
+            btn("⏩ 延续使用 2 小时", {"action": "extend_dsw", "instance_id": instance_id,
+                                      "ticket_key": ticket_key, "extend_hours": "2"}, "primary"),
+            btn("🛑 立即停止", {"action": "stop_dsw", "instance_id": instance_id,
+                               "ticket_key": ticket_key}, "danger"),
+        ),
+    ], color="orange")
 
 
 # ── 核心调度逻辑 ──────────────────────────────────────────────────────────────

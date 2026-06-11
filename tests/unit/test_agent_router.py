@@ -30,6 +30,11 @@ import pytest
     # 监控
     ("看 prometheus 指标",               "query_infrastructure_metrics"),
     ("打开 grafana",                     "query_infrastructure_metrics"),
+    # 算力效率日报（MFU）— 线上踩坑：曾被 算力→monitor / 效率→advisor 泛词分支抢走
+    ("GPU日报",                          "cluster_mfu_report"),
+    ("看下今天的mfu",                    "cluster_mfu_report"),
+    ("算力效率日报推一下",                "cluster_mfu_report"),
+    ("发个算力日报",                     "cluster_mfu_report"),
 ])
 def test_fast_path_skips_llm(monkeypatch, text, must_contain):
     """快通道命中：不应调 LLM，应直接由关键词路由产出工具集。"""

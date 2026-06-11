@@ -59,7 +59,7 @@ pytest -k test_router                 # match by test name
 | `agent` | `core/agent.py` | Three-tier tool routing, Redis session memory, streaming |
 | `hybrid` | `core/hybrid_agents.py` | Edge model emits JSON observation → cloud model decides |
 | `collab` | `core/multi_agent_system.py` | Diagnostic agent (read-only tools) → Ops agent (write tools) |
-| `bot` | `core/feishu_bot.py` | Flask `/feishu/event`, starts `core/dsw_scheduler` background threads |
+| `bot` | `core/feishu_bot/` | Flask `/feishu/event`, starts `core/dsw_scheduler` background threads |
 
 ### LLM Factory (`core/llm_factory.py`)
 
@@ -78,7 +78,9 @@ tools/
             gpu_training_advisor, cluster_health, dsw_inspector
             # oss also: dir_sizes (各子目录大小) + tree (目录结构), 自动探测地域
   volcano/  tos                 # 火山引擎 TOS 容量盘点 (静态 AK，无 STS)
-  feishu/   notify              # message cards, GPU progress bars, token cache
+  feishu/   notify, cards       # notify: message cards, GPU progress bars, token cache
+                                # cards: card-dict primitives (card/div/fields/btn/...) shared by
+                                #   all card builders — NOT an agent tool, never export in __init__
   jira/     ticket, workflow    # GPU ticket CRUD + algo workflow query
   github/   workflow            # PR / commit / sprint activity
   knowledge/rag                 # ChromaDB retriever, lazy-loaded
@@ -139,7 +141,9 @@ ChromaDB with `shibing624/text2vec-base-chinese` embeddings, persisted in `vecto
 - **Hybrid** — `EdgeWatcher` (Qwen3-4B) serializes its observation as JSON, then `CloudManager` (Qwen-Max) consumes it as `input`. Edge is cheap and fast for raw signal extraction; cloud handles judgment.
 - **Collab** — diagnostic expert holds read-only tools (Prometheus, RAG, system stats); ops officer holds write tools (K8s restart, Feishu notify). Expert output becomes the officer's input.
 
-### Feishu Bot (`core/feishu_bot.py`)
+### Feishu Bot (`core/feishu_bot/`)
+
+Flat package: `routes.py` (Flask app + `/feishu/event` `/feishu/card_action` `/health` + `run()`), `actions.py` (card-action handler registry `_ACTION_HANDLERS`; sync path must answer <3s), `messages.py` (event dedup, GPU intent, bind commands, Agent invocation), `gpu_flow.py` (GPU request cards/state/parsing), `messaging.py` (send primitives). `__init__.py` keeps the stdio UTF-8 reconfigure first, then re-exports everything for backward compat. **Convention**: intra-package calls use `from . import <mod>` + `<mod>.func(...)` module-attribute access so tests patch one module (e.g. conftest patches `core.feishu_bot.messaging`).
 
 Flask endpoint `/feishu/event` handles `im.message.receive_v1`. Three message paths:
 1. GPU intent (resource + action words, or training phrases) → action-button card, persists draft to Redis.

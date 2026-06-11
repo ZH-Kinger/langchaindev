@@ -35,7 +35,7 @@ INTENT_DESCRIPTIONS: dict[str, str] = {
     "sls":       "SLS 日志服务：列项目、查日志、创建 logstore",
     "monitor":   "查 Prometheus 指标 / CPU / 内存 / 趋势 / 系统资源",
     "advisor":   "GPU 集群优化建议：成本、效率、散热、调度、瓶颈分析",
-    "cluster":   "集群整体状态、所有实例、空转检测、健康巡检",
+    "cluster":   "集群整体状态、所有实例、空转检测、健康巡检、算力效率日报（MFU / GPU日报 / 各区域利用率）",
     "training":  "GPU 训练深度分析：利用率、Tensor Core、显存、DataLoader 瓶颈",
     "inspect":   "单个 DSW 实例的健康/费用/超时巡检",
     "workflow":  "Jira / GitHub 工作流：commits、PR、Sprint、昨日活动",

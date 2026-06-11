@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from langchain.tools import StructuredTool
 
 from config.settings import settings
+from tools.feishu.cards import btn, buttons, card, div, hr, img, note
 
 logger = logging.getLogger(__name__)
 
@@ -270,24 +271,14 @@ def _grafana_buttons(node_filter: str = "") -> list:
 
     # 从 prometheus_tool 取 PromQL，label 也在那里统一维护
     metric_buttons = [
-        {
-            "tag":  "button",
-            "text": {"tag": "plain_text", "content": label},
-            "type": "default",
-            "url":  _explore_url(promql),
-        }
+        btn(label, url=_explore_url(promql))
         for label, promql in grafana_shortcuts(node_filter)
     ]
 
     # 最后追加一个"打开 Explore"入口按钮
-    metric_buttons.append({
-        "tag":  "button",
-        "text": {"tag": "plain_text", "content": "🔍 打开 Explore"},
-        "type": "primary",
-        "url":  f"{base}/explore",
-    })
+    metric_buttons.append(btn("🔍 打开 Explore", type="primary", url=f"{base}/explore"))
 
-    return [{"tag": "hr"}, {"tag": "action", "actions": metric_buttons}]
+    return [hr(), buttons(*metric_buttons)]
 
 
 def _render_gpu_section(sec: dict, status_icon: dict) -> str:
@@ -345,42 +336,25 @@ def _build_card(title: str, parsed: dict,
     elements = []
 
     # ── 顶部摘要 ──
-    elements.append({
-        "tag": "div",
-        "text": {
-            "tag": "lark_md",
-            "content": (
-                f"**报告时间：** {parsed['report_time']}\n"
-                f"**整体状态：** {_STATUS_LABEL.get(overall, overall)}"
-            ),
-        },
-    })
+    elements.append(div(
+        f"**报告时间：** {parsed['report_time']}\n"
+        f"**整体状态：** {_STATUS_LABEL.get(overall, overall)}"
+    ))
 
     # ── 趋势图或提示 ──
-    elements.append({"tag": "hr"})
+    elements.append(hr())
     if image_key:
-        elements.append({
-            "tag":     "img",
-            "img_key": image_key,
-            "alt":     {"tag": "plain_text", "content": "指标趋势图"},
-            "mode":    "fit_horizontal",
-        })
+        elements.append(img(image_key, "指标趋势图"))
     elif chart_error:
-        elements.append({
-            "tag": "div",
-            "text": {"tag": "lark_md", "content": chart_error},
-        })
+        elements.append(div(chart_error))
 
     if parsed.get("is_raw"):
-        elements.append({"tag": "hr"})
-        elements.append({
-            "tag": "div",
-            "text": {"tag": "lark_md", "content": parsed["sections"][0]["raw"]},
-        })
+        elements.append(hr())
+        elements.append(div(parsed["sections"][0]["raw"]))
     else:
         _ICON = {"red": "🔴", "yellow": "⚠️", "green": "✅", "gray": "⚪"}
         for sec in parsed["sections"]:
-            elements.append({"tag": "hr"})
+            elements.append(hr())
             if sec.get("key") == "GPU":
                 body = _render_gpu_section(sec, _ICON)
             else:
@@ -390,32 +364,17 @@ def _build_card(title: str, parsed: dict,
                     f"均值 **{sec['avg']}** · 峰值 **{sec['peak']}** · {sec['trend']}\n"
                     f"{sec['detail']}"
                 )
-            elements.append({
-                "tag": "div",
-                "text": {"tag": "lark_md", "content": body},
-            })
+            elements.append(div(body))
 
     # ── Grafana 快捷按钮 ──
     elements.extend(_grafana_buttons())
 
     # ── 底部注脚 ──
-    elements.append({"tag": "hr"})
-    elements.append({
-        "tag": "note",
-        "elements": [{
-            "tag":     "plain_text",
-            "content": f"由 AIOps Agent 自动生成 · Powered by Qwen-Max · {datetime.now().strftime('%H:%M:%S')}",
-        }],
-    })
+    elements.append(hr())
+    elements.append(note(
+        f"由 AIOps Agent 自动生成 · Powered by Qwen-Max · {datetime.now().strftime('%H:%M:%S')}"))
 
-    return {
-        "config": {"wide_screen_mode": True},
-        "header": {
-            "title":    {"tag": "plain_text", "content": title},
-            "template": _COLOR_HEADER.get(overall, "blue"),
-        },
-        "elements": elements,
-    }
+    return card(title, elements, color=_COLOR_HEADER.get(overall, "blue"))
 
 
 # ── 对外主函数 ──────────────────────────────────────────────────────────────────

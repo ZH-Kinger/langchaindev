@@ -193,6 +193,9 @@ def write_scan(vendor_rows: list, readable_id: str, remark: str) -> bool:
     if not snap_id:
         return False
 
+    # 厂家总量表按「云厂商→Bucket→厂家」排序展示（同云厂商相邻）
+    vendor_rows = sorted(vendor_rows, key=lambda r: (r["云厂商"], r["Bucket"], r["厂家"]))
+
     VEN = settings.CAPACITY_BITABLE_TABLE_VENDOR
     BAT = settings.CAPACITY_BITABLE_TABLE_BATCH
 
@@ -200,11 +203,26 @@ def write_scan(vendor_rows: list, readable_id: str, remark: str) -> bool:
     ven_has_dtype = "数据类型" in _field_names(headers, VEN)
     bat_has_dtype = "数据类型" in _field_names(headers, BAT)
 
+    def _ven_key(f):
+        return (_as_text(f.get("云厂商")), _as_text(f.get("Bucket")), _as_text(f.get("厂家")))
+
     # 现有行索引（同键多行=历史重复）
-    ven_idx = _index(_list_records(headers, VEN),
-                     lambda f: (_as_text(f.get("云厂商")), _as_text(f.get("Bucket")), _as_text(f.get("厂家"))))
+    ven_records = _list_records(headers, VEN)
+    ven_idx = _index(ven_records, _ven_key)
     bat_idx = _index(_list_records(headers, BAT),
                      lambda f: (_as_text(f.get("云厂商")), _as_text(f.get("厂家")), _as_text(f.get("批次"))))
+
+    # 表格按创建序展示，而 upsert 原地更新不挪行、新键只能尾插——新厂家出现时会打破
+    # 云厂商分组。先推演 upsert 后的展示顺序（存量原位 + 新键尾插），与期望排序不符则
+    # 整表重建：厂家行全部新建（批次行本次必回写「关联厂家总量」指向新行），结尾删旧行。
+    desired = [(r["云厂商"], r["Bucket"], r["厂家"]) for r in vendor_rows]
+    desired_set = set(desired)
+    existing_order = list(dict.fromkeys(_ven_key(rec.get("fields", {})) for rec in ven_records))
+    final_order = ([k for k in existing_order if k in desired_set]
+                   + [k for k in desired if k not in set(existing_order)])
+    rebuild = final_order != desired
+    if rebuild and existing_order:
+        logger.info("[Bitable] 厂家总量表展示顺序与云厂商分组不符，本次整表重建排序")
 
     seen_ven, seen_bat = set(), set()
     n_ven = n_bat = 0
@@ -233,13 +251,13 @@ def write_scan(vendor_rows: list, readable_id: str, remark: str) -> bool:
         if row.get("delta_bytes") is not None:
             vfields["较上次GB"] = _gb(row["delta_bytes"])
 
-        if vkey in ven_idx:
+        if vkey in ven_idx and not rebuild:
             rids = ven_idx[vkey]
             vid = rids[0]
             _update_one(headers, VEN, vid, vfields)
             for extra in rids[1:]:               # 去掉历史重复行
                 _delete_one(headers, VEN, extra)
-        else:
+        else:                                    # 新键，或重建模式下按序新建
             vid = _create_one(headers, VEN, vfields)
         if not vid:
             continue
@@ -268,11 +286,17 @@ def write_scan(vendor_rows: list, readable_id: str, remark: str) -> bool:
             seen_bat.add(bkey)
             n_bat += 1
 
-    # 删除本次未出现的旧行（含历史重复整组）
+    # 删除本次未出现的旧行（含历史重复整组）；重建模式下已按序新建的键，其旧行也删。
+    # 重建中新建失败（key 在 desired 但不在 seen）的键保留旧行兜底，避免数据丢失。
     for k, rids in ven_idx.items():
-        if k not in seen_ven:
-            for rid in rids:
-                _delete_one(headers, VEN, rid)
+        if rebuild:
+            keep = k in desired_set and k not in seen_ven
+        else:
+            keep = k in seen_ven
+        if keep:
+            continue
+        for rid in rids:
+            _delete_one(headers, VEN, rid)
     for k, rids in bat_idx.items():
         if k not in seen_bat:
             for rid in rids:

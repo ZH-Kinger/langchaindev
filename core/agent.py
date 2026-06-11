@@ -51,6 +51,7 @@ _FAST_PATH_TOKENS = (
     "sls", "logstore", "日志服务",
     "k8s", "pod",
     "grafana", "prometheus",
+    "mfu", "日报", "算力效率",
 )
 
 # 知识库触发词：和上面快通道冲突时优先让 LLM 决定。
@@ -128,6 +129,10 @@ def _legacy_keyword_route(text: str) -> list:
         names = TOOL_GROUPS["oss"]
     elif any(k in text for k in ("sls", "日志服务", "查日志", "log service", "logstore", "日志查询")):
         names = TOOL_GROUPS["sls"]
+    # 日报/MFU 必须先于「算力→monitor」「效率→advisor」两个泛词分支，
+    # 否则「算力日报」「效率日报」会被抢走，永远到不了 cluster_mfu_report
+    elif any(k in text for k in ("mfu", "日报", "算力效率", "算力利用率", "效率报告")):
+        names = TOOL_GROUPS["cluster"] | TOOL_GROUPS["advisor"] | TOOL_GROUPS["notify"]
     elif any(k in text for k in ("dlc", "eas", "产品", "算力", "训练任务", "推理", "开发环境", "分布")):
         names = TOOL_GROUPS["monitor"]
     elif any(k in text for k in ("集群状态", "所有实例", "全局监控", "哪些在空转",

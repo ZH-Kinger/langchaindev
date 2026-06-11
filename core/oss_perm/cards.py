@@ -1,5 +1,6 @@
 """OSS 权限同步的飞书卡片：对账卡片（带批准按钮）+ 下发结果卡片。"""
 from core.oss_perm.permsync import POLICY_PREFIX
+from tools.feishu.cards import btn, buttons, card, div, hr
 
 
 def _fmt_prefixes(s):
@@ -42,33 +43,20 @@ def audit_card(diff):
         lines = [f"**{r['name']}**（{r['username']}）：{_row_detail(r)}" for r in changed[:40]]
         if len(changed) > 40:
             lines.append(f"…（共 {len(changed)} 人需同步）")
-        elements.append({"tag": "div", "text": {"tag": "lark_md",
-                         "content": "**需同步：**\n" + "\n".join(lines)}})
+        elements.append(div("**需同步：**\n" + "\n".join(lines)))
     if orphans:
         ol = [f"• {POLICY_PREFIX}{u}" + (f"（附加于 {', '.join(att)}）" if att else "")
               for u, att in sorted(orphans.items())]
-        elements.append({"tag": "div", "text": {"tag": "lark_md",
-                         "content": "**孤儿策略（建议回收）：**\n" + "\n".join(ol)}})
+        elements.append(div("**孤儿策略（建议回收）：**\n" + "\n".join(ol)))
     if not has_change:
-        elements.append({"tag": "div", "text": {"tag": "lark_md",
-                         "content": "RAM 实际权限与飞书表格期望一致，无需同步。"}})
+        elements.append(div("RAM 实际权限与飞书表格期望一致，无需同步。"))
     else:
-        elements.append({"tag": "hr"})
-        elements.append({"tag": "div", "text": {"tag": "lark_md",
-                         "content": "管理员点「批准并下发」将按当前表格下发到 RAM（幂等；不回收多授/孤儿）。"}})
-        elements.append({"tag": "action", "actions": [{
-            "tag": "button",
-            "text": {"tag": "plain_text", "content": "✅ 批准并下发"},
-            "type": "primary",
-            "value": {"action": "approve_oss_perm"},
-        }]})
+        elements.append(hr())
+        elements.append(div("管理员点「批准并下发」将按当前表格下发到 RAM（幂等；不回收多授/孤儿）。"))
+        elements.append(buttons(
+            btn("✅ 批准并下发", {"action": "approve_oss_perm"}, "primary")))
 
-    return {
-        "config": {"wide_screen_mode": True},
-        "header": {"title": {"tag": "plain_text", "content": title},
-                   "template": "orange" if has_change else "green"},
-        "elements": elements,
-    }
+    return card(title, elements, color="orange" if has_change else "green")
 
 
 def result_card(summary):
@@ -79,9 +67,4 @@ def result_card(summary):
     body = "\n".join(lines)
     if len(s["lines"]) > 40:
         body += f"\n…（共 {len(s['lines'])} 条）"
-    return {
-        "config": {"wide_screen_mode": True},
-        "header": {"title": {"tag": "plain_text", "content": head},
-                   "template": "red" if s["fail"] else "green"},
-        "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": body or "（无）"}}],
-    }
+    return card(head, [div(body or "（无）")], color="red" if s["fail"] else "green")

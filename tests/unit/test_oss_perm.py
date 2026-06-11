@@ -231,16 +231,16 @@ def test_approve_oss_perm_admin_starts_thread(monkeypatch):
     monkeypatch.setattr(settings, "ADMIN_FEISHU_OPEN_ID", "ou_admin")
 
     started = []
-    import core.feishu_bot as fb
-    real_thread = fb.threading.Thread
+    from core.feishu_bot import actions
+    real_thread = actions.threading.Thread
 
     def fake_thread(*args, **kwargs):
         started.append(kwargs.get("target"))
         # 返回一个不真正运行的占位线程对象
         t = real_thread(target=lambda: None, daemon=True)
         return t
-    monkeypatch.setattr(fb.threading, "Thread", fake_thread)
+    monkeypatch.setattr(actions.threading, "Thread", fake_thread)
 
-    resp = fb._process_action("approve_oss_perm", {}, open_id="ou_admin", chat_id="oc_x")
+    resp = actions._process_action("approve_oss_perm", {}, open_id="ou_admin", chat_id="oc_x")
     assert resp["toast"]["type"] == "success"
     assert len(started) == 1   # 起了下发后台线程
