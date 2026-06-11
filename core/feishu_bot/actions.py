@@ -21,14 +21,17 @@ from core.dsw_scheduler import (_redis_get, _redis_set, _redis_delete,
 from . import gpu_flow, messaging
 
 
-# ── MFU 日报区域切换：返回新卡片原地替换（数据走 Redis 缓存，秒级）────────────
+# ── MFU 日报区域切换：返回新卡片原地替换（只读 Redis 缓存，秒回；绝不同步采集）──
 
 def _h_mfu_region(action_val, open_id, chat_id, form_value):
-    from tools.aliyun.cluster_mfu import build_mfu_card
+    from tools.aliyun.cluster_mfu import mfu_card_for_callback
     region = action_val.get("region", "") if isinstance(action_val, dict) else ""
+    new_card = mfu_card_for_callback(view=region or "summary")
+    if new_card is None:   # 缓存全无：后台已开始采集，不替换原卡片
+        return {"toast": {"type": "info", "content": "📊 数据采集中（约1分钟），请稍后再点"}}
     # schema 2.0 卡片回调：用 {"card":{"type":"raw","data":...}} 原地更新
     return {"toast": {"type": "info", "content": "已切换"},
-            "card": {"type": "raw", "data": build_mfu_card(view=region or "summary")}}
+            "card": {"type": "raw", "data": new_card}}
 
 
 # ── AK/SK 表单卡片提交（Fernet 加密存 Redis，资源归属为用户本人）─────────────

@@ -169,7 +169,8 @@ def test_card_summary_has_region_buttons(patch_prom):
     assert "📊 全局" in labels and "杭州" in labels and "新加坡" in labels
     vals = [b["value"] for b in actions["actions"]]
     assert {"action": "mfu_region", "region": "cn-hangzhou"} in vals
-    assert "跨区域汇总" in card["elements"][-1]["text"]["content"]
+    bodies = " ".join(e["text"]["content"] for e in card["elements"] if e.get("tag") == "div")
+    assert "跨区域汇总" in bodies
 
 
 def test_card_region_view(patch_prom):
@@ -193,8 +194,78 @@ def test_realtime_view(patch_prom):
     # 有 ⚡实时 按钮且高亮
     rt_btn = next(b for b in card["elements"][0]["actions"] if b["value"]["region"] == "__rt__")
     assert rt_btn["type"] == "primary" and "实时" in rt_btn["text"]["content"]
-    body = card["elements"][-1]["text"]["content"]
+    body = " ".join(e["text"]["content"] for e in card["elements"] if e.get("tag") == "div")
     assert "实时快照" in body and "GPU%" in body and "杭州" in body and "新加坡" in body
+
+
+# ── 按钮回调缓存策略（飞书同步回调 <3s 硬限）─────────────────────────────────
+
+def test_callback_serves_cache_without_sync_gather(patch_prom, monkeypatch):
+    """缓存命中且新鲜 → 秒回卡片，绝不同步采集、不触发后台刷新。"""
+    patch_prom.build_mfu_card(view="summary", refresh=True)        # 暖缓存（gathered_at=now）
+    def boom():
+        raise AssertionError("回调路径不应同步采集")
+    monkeypatch.setattr(patch_prom, "gather_all", boom)
+    bg = {"n": 0}
+    monkeypatch.setattr(patch_prom, "_refresh_in_background",
+                        lambda: bg.__setitem__("n", bg["n"] + 1))
+
+    card = patch_prom.mfu_card_for_callback(view="cn-hangzhou")
+    assert card is not None and "杭州" in card["header"]["title"]["content"]
+    assert bg["n"] == 0, "新鲜缓存不应触发后台刷新"
+
+
+def test_callback_cold_cache_returns_none_and_triggers_bg(patch_prom, monkeypatch):
+    """缓存全无 → 返回 None（调用方只回 toast），并触发后台采集。"""
+    from utils import redis_client
+    redis_client.get_redis().delete(patch_prom._CACHE_KEY)
+    bg = {"n": 0}
+    monkeypatch.setattr(patch_prom, "_refresh_in_background",
+                        lambda: bg.__setitem__("n", bg["n"] + 1))
+
+    assert patch_prom.mfu_card_for_callback(view="summary") is None
+    assert bg["n"] == 1
+
+
+def test_callback_stale_cache_serves_old_and_refreshes_bg(patch_prom, monkeypatch):
+    """缓存陈旧（>15min）→ 仍立即返回旧数据卡片，同时触发后台刷新。"""
+    import json as _json
+    import time as _time
+    from utils import redis_client
+    patch_prom.build_mfu_card(view="summary", refresh=True)
+    r = redis_client.get_redis()
+    g = _json.loads(r.get(patch_prom._CACHE_KEY))
+    g["gathered_at"] = _time.time() - 3600                          # 伪造 1 小时前
+    r.set(patch_prom._CACHE_KEY, _json.dumps(g))
+    bg = {"n": 0}
+    monkeypatch.setattr(patch_prom, "_refresh_in_background",
+                        lambda: bg.__setitem__("n", bg["n"] + 1))
+
+    card = patch_prom.mfu_card_for_callback(view="summary")
+    assert card is not None
+    assert bg["n"] == 1
+
+
+def test_refresh_in_background_single_flight(patch_prom, monkeypatch):
+    """单飞锁：第一次起线程，锁未释放前第二次直接放弃。"""
+    started = []
+    class FakeThread:
+        def __init__(self, *a, **k): started.append(k.get("name"))
+        def start(self): pass
+    monkeypatch.setattr(patch_prom.threading, "Thread", FakeThread)
+
+    patch_prom._refresh_in_background()
+    patch_prom._refresh_in_background()                             # 锁被占 → 不再起线程
+    assert len(started) == 1
+    from utils import redis_client
+    redis_client.get_redis().delete(patch_prom._REFRESH_LOCK_KEY)   # 清锁，别污染其他测试
+
+
+def test_card_footer_shows_data_timestamp(patch_prom):
+    """卡片底部应标注「数据截至 HH:MM」。"""
+    card = patch_prom.build_mfu_card(view="summary", refresh=True)
+    notes = [e for e in card["elements"] if e.get("tag") == "note"]
+    assert notes and "数据截至" in notes[-1]["elements"][0]["content"]
 
 
 def test_text_report(patch_prom):
