@@ -193,6 +193,10 @@ def write_scan(vendor_rows: list, readable_id: str, remark: str) -> bool:
     if not snap_id:
         return False
 
+    # 行按「云厂商→Bucket→厂家」排序写入：表格按创建序展示，新建行才能同厂商相邻。
+    # 已存在的行 upsert 原地更新不挪位置，故顺序只在首次建行/全量重建时生效。
+    vendor_rows = sorted(vendor_rows, key=lambda r: (r["云厂商"], r["Bucket"], r["厂家"]))
+
     VEN = settings.CAPACITY_BITABLE_TABLE_VENDOR
     BAT = settings.CAPACITY_BITABLE_TABLE_BATCH
 
