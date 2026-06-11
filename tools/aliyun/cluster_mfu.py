@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from langchain.tools import StructuredTool
 
 from config.settings import settings
+from tools.feishu.cards import btn, buttons, card, div, fields, hr
 
 _BJ = timezone(timedelta(hours=8))
 _REGION_DISPLAY = {"cn-hangzhou": "杭州", "cn-beijing": "北京", "ap-southeast-1": "新加坡"}
@@ -282,27 +283,22 @@ def _region_elements(d):
     y, nd = d["yesterday"], d["nodes"]
     mfu = "—" if y["active_avg"] == 0 else f"{_pct(y['mfu'])}（峰{_pct(y['mfu_peak'])}/谷{_pct(y['mfu_low'])}）"
 
-    def sf(label, val):
-        return {"is_short": True, "text": {"tag": "lark_md", "content": f"**{label}**\n{val}"}}
-
-    fields = [
-        sf("GPU 卡 总/申请", f"{d['gpu_total']}/{d['gpu_request']}（{_pct(d['alloc_rate'])}）"),
-        sf("显存 已分配/总", f"{d['gpu_mem_alloc']:.0f}/{d['gpu_mem_total']:.0f}G（{_pct(d['gpu_mem_util'])}）"),
-        sf("CPU 核 总/申请", f"{d['cpu_total']:.0f}/{d['cpu_request']:.0f}"),
-        sf("内存 总/申请", f"{d['mem_total']:.0f}/{d['mem_request']:.0f}G"),
-        sf("昨日 MFU", mfu),
-        sf("GPU使用率 / SM使用率", f"{_pct(y.get('gpu_util', 0))} / {_pct(y.get('sm_util', 0))}"),
-        sf("张量活跃 / 显存带宽", f"{_pct(y['tensor_active'])} / {_pct(y['dram_active'])}"),
-        sf("在算 / 算力", f"{y['active_avg']:.0f}卡 / {y['tflops_avg']:.0f}TF"),
-        sf("NVLink 收/发", f"{y['nvlink_rx']/1024:.1f}/{y['nvlink_tx']/1024:.1f} GiB/s"),
-        sf("PCIe 收/发", f"{y['pcie_rx']/1024:.1f}/{y['pcie_tx']/1024:.1f} GiB/s"),
-        sf("节点 空闲/整空/碎片", f"{nd['free_total']}/{nd['fully_free_nodes']}/{nd['frag_free']}"),
-    ]
     els = [
-        {"tag": "div", "text": {"tag": "lark_md",
-            "content": f"**▍{d['region_name']} · {d['gpu_name']}**　峰值 {d['peak_tflops']:.0f} TFLOPS"
-                       f"　{nd['node_count']}×{nd['node_cap']} 卡　空闲分布 {_fmt_dist(nd)}"}},
-        {"tag": "div", "fields": fields},
+        div(f"**▍{d['region_name']} · {d['gpu_name']}**　峰值 {d['peak_tflops']:.0f} TFLOPS"
+            f"　{nd['node_count']}×{nd['node_cap']} 卡　空闲分布 {_fmt_dist(nd)}"),
+        fields(
+            ("GPU 卡 总/申请", f"{d['gpu_total']}/{d['gpu_request']}（{_pct(d['alloc_rate'])}）"),
+            ("显存 已分配/总", f"{d['gpu_mem_alloc']:.0f}/{d['gpu_mem_total']:.0f}G（{_pct(d['gpu_mem_util'])}）"),
+            ("CPU 核 总/申请", f"{d['cpu_total']:.0f}/{d['cpu_request']:.0f}"),
+            ("内存 总/申请", f"{d['mem_total']:.0f}/{d['mem_request']:.0f}G"),
+            ("昨日 MFU", mfu),
+            ("GPU使用率 / SM使用率", f"{_pct(y.get('gpu_util', 0))} / {_pct(y.get('sm_util', 0))}"),
+            ("张量活跃 / 显存带宽", f"{_pct(y['tensor_active'])} / {_pct(y['dram_active'])}"),
+            ("在算 / 算力", f"{y['active_avg']:.0f}卡 / {y['tflops_avg']:.0f}TF"),
+            ("NVLink 收/发", f"{y['nvlink_rx']/1024:.1f}/{y['nvlink_tx']/1024:.1f} GiB/s"),
+            ("PCIe 收/发", f"{y['pcie_rx']/1024:.1f}/{y['pcie_tx']/1024:.1f} GiB/s"),
+            ("节点 空闲/整空/碎片", f"{nd['free_total']}/{nd['fully_free_nodes']}/{nd['frag_free']}"),
+        ),
     ]
     bullets = []
     full = nd["fully_free_nodes"]
@@ -319,7 +315,7 @@ def _region_elements(d):
         tops = "；".join(f"{j['user']} {j['cards']}卡 {'🔴' if j['mfu'] < low else ''}{_pct(j['mfu'])}" for j in jobs[:4])
         bullets.append(f"🏃 **在跑**：{tops}")
     if bullets:
-        els.append({"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(bullets)}})
+        els.append(div("\n".join(bullets)))
     return els
 
 
@@ -416,24 +412,21 @@ def _realtime_lines(g):
 
 
 def _buttons(g, view):
-    btns = [{"tag": "button", "text": {"tag": "plain_text", "content": "📊 全局"},
-             "type": "primary" if view == "summary" else "default",
-             "value": {"action": "mfu_region", "region": ""}}]
+    btns = [btn("📊 全局", {"action": "mfu_region", "region": ""},
+                "primary" if view == "summary" else "default")]
     for d in g["regions"]:
-        btns.append({"tag": "button", "text": {"tag": "plain_text", "content": d["region_name"]},
-                     "type": "primary" if view == d["region"] else "default",
-                     "value": {"action": "mfu_region", "region": d["region"]}})
-    btns.append({"tag": "button", "text": {"tag": "plain_text", "content": "⚡ 实时"},
-                 "type": "primary" if view == "__rt__" else "default",
-                 "value": {"action": "mfu_region", "region": "__rt__"}})
-    return {"tag": "action", "actions": btns}
+        btns.append(btn(d["region_name"], {"action": "mfu_region", "region": d["region"]},
+                        "primary" if view == d["region"] else "default"))
+    btns.append(btn("⚡ 实时", {"action": "mfu_region", "region": "__rt__"},
+                    "primary" if view == "__rt__" else "default"))
+    return buttons(*btns)
 
 
 def _card(g, view="summary"):
     cur = next((d for d in g["regions"] if d["region"] == view), None)
-    elements = [_buttons(g, view), {"tag": "hr"}]
+    elements = [_buttons(g, view), hr()]
     if view == "__rt__":
-        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(_realtime_lines(g))}})
+        elements.append(div("\n".join(_realtime_lines(g))))
         alarm = False
         sub = "⚡ 实时"
     elif cur:
@@ -441,15 +434,12 @@ def _card(g, view="summary"):
         alarm = cur["waste_total"] > 0
         sub = f"{cur['region_name']} · {cur['gpu_name']}"
     else:
-        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(_summary_lines(g))}})
+        elements.append(div("\n".join(_summary_lines(g))))
         alarm = g["waste_total"] > 0 or any(d["gpu_total"] > 0 and d["gpu_request"] == 0 for d in g["regions"])
         sub = f"{len(g['regions'])}区 {g['gpu_request']}/{g['gpu_total']} 卡在用"
-    return {
-        "config": {"wide_screen_mode": True, "update_multi": True},   # 共享卡片需 update_multi 才能被回调原地替换
-        "header": {"title": {"tag": "plain_text", "content": f"🧮 多区域算力效率日报 · {g['date']} · {sub}"},
-                   "template": "red" if alarm else "blue"},
-        "elements": elements,
-    }
+    # 共享卡片需 update_multi 才能被回调原地替换
+    return card(f"🧮 多区域算力效率日报 · {g['date']} · {sub}", elements,
+                color="red" if alarm else "blue", update_multi=True)
 
 
 def build_mfu_card(view="summary", refresh=False):
