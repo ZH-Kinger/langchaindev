@@ -19,6 +19,7 @@ import time
 from config.settings import settings
 from utils.logger import get_logger
 from utils import redis_client
+from tools.feishu.cards import card, div, hr
 
 logger = get_logger(__name__)
 
@@ -244,8 +245,8 @@ def _target_section(target: dict, rows: list, prev: dict):
     )
 
     elements = [
-        {"tag": "div", "text": {"tag": "lark_md", "content": head}},
-        {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(table)}},
+        div(head),
+        div("\n".join(table)),
     ]
     return elements, over, grand_bytes
 
@@ -257,14 +258,9 @@ def _build_combined_card(sections: list, any_over: bool, grand_total: int) -> di
     elements = []
     for i, sec in enumerate(sections):
         if i:
-            elements.append({"tag": "hr"})
+            elements.append(hr())
         elements.extend(sec)
-    return {
-        "config": {"wide_screen_mode": True},
-        "header": {"title": {"tag": "plain_text", "content": title},
-                   "template": "red" if any_over else "blue"},
-        "elements": elements,
-    }
+    return card(title, elements, color="red" if any_over else "blue")
 
 
 # ── 主流程 ────────────────────────────────────────────────────────────────────
