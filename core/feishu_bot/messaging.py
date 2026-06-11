@@ -10,6 +10,7 @@ import requests
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+from tools.feishu.cards import card, div, hr, img, note
 from tools.feishu.notify import _get_access_token
 
 
@@ -34,36 +35,19 @@ def _feishu_reply_with_chart(message_id: str, text: str, image_key: str) -> None
     """以交互卡片形式回复：文本回答 + 实时指标趋势图"""
     from datetime import datetime
     from tools.feishu.notify import _upload_image  # noqa: F401 (确保路径可用)
-    card = {
-        "config": {"wide_screen_mode": True},
-        "elements": [
-            {
-                "tag": "div",
-                "text": {"tag": "lark_md", "content": text},
-            },
-            {"tag": "hr"},
-            {
-                "tag": "img",
-                "img_key": image_key,
-                "alt":     {"tag": "plain_text", "content": "实时指标趋势图"},
-                "mode":    "fit_horizontal",
-            },
-            {"tag": "hr"},
-            {
-                "tag": "note",
-                "elements": [{
-                    "tag":     "plain_text",
-                    "content": f"实时指标快照 · {datetime.now().strftime('%H:%M:%S')}",
-                }],
-            },
-        ],
-    }
+    payload = card(None, [
+        div(text),
+        hr(),
+        img(image_key, "实时指标趋势图"),
+        hr(),
+        note(f"实时指标快照 · {datetime.now().strftime('%H:%M:%S')}"),
+    ])
     try:
         token = _get_access_token()
         resp  = requests.post(
             f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/reply",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json={"msg_type": "interactive", "content": json.dumps(card)},
+            json={"msg_type": "interactive", "content": json.dumps(payload)},
             timeout=15,
         )
         data = resp.json()

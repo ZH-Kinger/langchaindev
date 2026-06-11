@@ -13,6 +13,7 @@ from config.settings import settings
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+from tools.feishu.cards import card, div, note
 from tools.feishu.notify import _get_access_token
 from tools.jira.ticket import create_gpu_ticket, add_comment as jira_comment
 from core.dsw_scheduler import (_redis_get, _redis_set, _redis_delete,
@@ -93,19 +94,12 @@ def _h_submit_ak_register(action_val, open_id, chat_id, form_value):
 
     return {
         "toast": {"type": "success", "content": "✅ AK 已加密保存"},
-        "card": {
-            "config": {"wide_screen_mode": True},
-            "header": {"title": {"tag": "plain_text", "content": "✅ AccessKey 已绑定"}, "template": "green"},
-            "elements": [{
-                "tag": "div",
-                "text": {"tag": "lark_md", "content":
-                    f"**AccessKey ID：** `{ak_id[:8]}****`（已 Fernet 加密存入 Redis）\n"
-                    + (f"**RAM 用户：** {display}\n" if display else "")
-                    + f"**资源归属：** 你的 RAM 用户本人（阿里云控制台可直接看到）\n"
-                    + f"**自动失效：** {settings.USER_AK_IDLE_TTL_SECONDS // 86400} 天未使用\n\n"
-                    + "随时发送「解绑AK」可删除，「查看绑定」查状态。"},
-            }],
-        },
+        "card": card("✅ AccessKey 已绑定", [div(
+            f"**AccessKey ID：** `{ak_id[:8]}****`（已 Fernet 加密存入 Redis）\n"
+            + (f"**RAM 用户：** {display}\n" if display else "")
+            + f"**资源归属：** 你的 RAM 用户本人（阿里云控制台可直接看到）\n"
+            + f"**自动失效：** {settings.USER_AK_IDLE_TTL_SECONDS // 86400} 天未使用\n\n"
+            + "随时发送「解绑AK」可删除，「查看绑定」查状态。")], color="green"),
     }
 
 
@@ -182,17 +176,10 @@ def _h_submit_gpu_request(action_val, open_id, chat_id, form_value):
     threading.Thread(target=_do, daemon=True).start()
     return {
         "toast": {"type": "info", "content": "申请已提交，处理中..."},
-        "card": {
-            "config": {"wide_screen_mode": True},
-            "header": {"title": {"tag": "plain_text", "content": "⏳ 申请处理中"}, "template": "yellow"},
-            "elements": [{
-                "tag": "div",
-                "text": {"tag": "lark_md", "content":
-                    f"**实例：** {instance_name}　**GPU：** {gpu_count} 卡　**时长：** {duration_hours}h\n"
-                    f"**CPU：** {cpu_cores or '默认'}　**内存：** {memory_gb or '默认'} GB　**优先级：** {priority}\n\n"
-                    "正在创建 Jira 工单，完成后飞书通知。"},
-            }],
-        },
+        "card": card("⏳ 申请处理中", [div(
+            f"**实例：** {instance_name}　**GPU：** {gpu_count} 卡　**时长：** {duration_hours}h\n"
+            f"**CPU：** {cpu_cores or '默认'}　**内存：** {memory_gb or '默认'} GB　**优先级：** {priority}\n\n"
+            "正在创建 Jira 工单，完成后飞书通知。")], color="yellow"),
     }
 
 
@@ -204,27 +191,12 @@ def _h_quick_gpu(action_val, open_id, chat_id, form_value):
     gpu_flow._set_gpu_state(chat_id, open_id, {"gpu_count": gpu_count, "duration_hours": duration_hours})
     return {
         "toast": {"type": "info", "content": f"已选 {gpu_count}GPU · {duration_hours}h，请回复实例名和用途"},
-        "card": {
-            "config": {"wide_screen_mode": True},
-            "header": {"title": {"tag": "plain_text", "content": "GPU 资源申请"}, "template": "blue"},
-            "elements": [
-                {
-                    "tag": "div",
-                    "text": {
-                        "tag": "lark_md",
-                        "content": (
-                            f"已选：**{gpu_count} GPU · {duration_hours} 小时**\n\n"
-                            "请直接回复此消息，补充以下信息：\n"
-                            "```\n实例名: wzh-train-01\n用途: 大语言模型微调\n```"
-                        ),
-                    },
-                },
-                {
-                    "tag": "note",
-                    "elements": [{"tag": "plain_text", "content": "回复后系统自动创建 DSW 实例"}],
-                },
-            ],
-        },
+        "card": card("GPU 资源申请", [
+            div(f"已选：**{gpu_count} GPU · {duration_hours} 小时**\n\n"
+                "请直接回复此消息，补充以下信息：\n"
+                "```\n实例名: wzh-train-01\n用途: 大语言模型微调\n```"),
+            note("回复后系统自动创建 DSW 实例"),
+        ]),
     }
 
 
@@ -271,17 +243,9 @@ def _h_stop_dsw(action_val, open_id, chat_id, form_value):
     threading.Thread(target=_do_stop, daemon=True).start()
     return {
         "toast": {"type": "info", "content": "实例停止中，工单已关闭"},
-        "card": {
-            "config": {"wide_screen_mode": True},
-            "header": {
-                "title": {"tag": "plain_text", "content": "🛑 实例已停止"},
-                "template": "red",
-            },
-            "elements": [
-                {"tag": "div", "text": {"tag": "lark_md",
-                 "content": f"实例 `{instance_id or ticket_key}` 已手动停止，工单已关闭。\n按钮已失效，如需重新使用请提交新工单。"}},
-            ],
-        },
+        "card": card("🛑 实例已停止", [div(
+            f"实例 `{instance_id or ticket_key}` 已手动停止，工单已关闭。\n按钮已失效，如需重新使用请提交新工单。")],
+            color="red"),
     }
 
 
@@ -299,12 +263,8 @@ def _h_approve_gpu(action_val, open_id, chat_id, form_value):
         f"✅ 工单 {ticket_key} 已获批准！调度器将在 20 秒内自动创建 GPU 实例。")
     return {
         "toast": {"type": "success", "content": f"工单 {ticket_key} 已批准"},
-        "card": {
-            "config": {"wide_screen_mode": True},
-            "header": {"title": {"tag": "plain_text", "content": "✅ 已批准"}, "template": "green"},
-            "elements": [{"tag": "div", "text": {"tag": "lark_md",
-                "content": f"工单 **{ticket_key}** 已批准，调度器将在 20 秒内自动创建实例。"}}],
-        },
+        "card": card("✅ 已批准", [div(
+            f"工单 **{ticket_key}** 已批准，调度器将在 20 秒内自动创建实例。")], color="green"),
     }
 
 
@@ -323,12 +283,8 @@ def _h_reject_gpu(action_val, open_id, chat_id, form_value):
         f"❌ 工单 {ticket_key} 的 GPU 申请已被管理员拒绝，如有疑问请联系运维团队。")
     return {
         "toast": {"type": "info", "content": f"工单 {ticket_key} 已拒绝"},
-        "card": {
-            "config": {"wide_screen_mode": True},
-            "header": {"title": {"tag": "plain_text", "content": "❌ 已拒绝"}, "template": "red"},
-            "elements": [{"tag": "div", "text": {"tag": "lark_md",
-                "content": f"工单 **{ticket_key}** 已拒绝，Jira 状态已更新。"}}],
-        },
+        "card": card("❌ 已拒绝", [div(
+            f"工单 **{ticket_key}** 已拒绝，Jira 状态已更新。")], color="red"),
     }
 
 

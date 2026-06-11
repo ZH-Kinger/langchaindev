@@ -9,6 +9,7 @@ import requests
 from utils.logger import get_logger, clear_trace_id
 
 logger = get_logger(__name__)
+from tools.feishu.cards import btn, buttons, card, div, fields, hr
 from tools.feishu.notify import _get_access_token
 from core.dsw_scheduler import _redis_get, _all_tracked_keys
 from . import gpu_flow, messaging
@@ -235,57 +236,32 @@ def _query_my_instances(message_id: str, open_id: str, chat_id: str) -> None:
         remaining_h = max(0.0, float(state.get("duration_hours", 8)) - elapsed_h)
         gpu_cnt     = int(state.get("gpu_count", 1))
         total_gpu  += gpu_cnt
-        elements.append({
-            "tag": "div",
-            "fields": [
-                {"is_short": True, "text": {"tag": "lark_md",
-                 "content": f"**{state.get('instance_name', '-')}**\n工单 {key}"}},
-                {"is_short": True, "text": {"tag": "lark_md",
-                 "content": f"**剩余时长**\n{remaining_h:.1f} h"}},
-                {"is_short": True, "text": {"tag": "lark_md",
-                 "content": f"**已使用**\n{elapsed_h:.1f} h"}},
-                {"is_short": True, "text": {"tag": "lark_md",
-                 "content": f"**GPU 卡数**\n{gpu_cnt} 张"}},
-            ],
-        })
-        elements.append({
-            "tag": "action",
-            "actions": [
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "⏩ 延续 2h"},
-                    "type": "primary",
-                    "value": {"action": "extend_dsw", "ticket_key": key,
+        elements.append(fields(
+            (state.get("instance_name", "-"), f"工单 {key}"),
+            ("剩余时长", f"{remaining_h:.1f} h"),
+            ("已使用", f"{elapsed_h:.1f} h"),
+            ("GPU 卡数", f"{gpu_cnt} 张"),
+        ))
+        elements.append(buttons(
+            btn("⏩ 延续 2h", {"action": "extend_dsw", "ticket_key": key,
                               "instance_id": state.get("instance_id", ""), "extend_hours": "2"},
-                },
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "🛑 立即停止"},
-                    "type": "danger",
-                    "value": {"action": "stop_dsw", "ticket_key": key,
-                              "instance_id": state.get("instance_id", "")},
-                },
-            ],
-        })
-        elements.append({"tag": "hr"})
+                "primary"),
+            btn("🛑 立即停止", {"action": "stop_dsw", "ticket_key": key,
+                               "instance_id": state.get("instance_id", "")},
+                "danger"),
+        ))
+        elements.append(hr())
 
-    card = {
-        "config": {"wide_screen_mode": True},
-        "header": {"title": {"tag": "plain_text",
-                              "content": f"我的 GPU 实例（{len(user_tickets)} 个）"},
-                   "template": "blue"},
-        "elements": [
-            {"tag": "div", "text": {"tag": "lark_md",
-             "content": f"**共占用 GPU：** {total_gpu} 张"}},
-            {"tag": "hr"},
-        ] + elements,
-    }
+    payload = card(f"我的 GPU 实例（{len(user_tickets)} 个）", [
+        div(f"**共占用 GPU：** {total_gpu} 张"),
+        hr(),
+    ] + elements)
     try:
         token = _get_access_token()
         requests.post(
             f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/reply",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json={"msg_type": "interactive", "content": json.dumps(card)},
+            json={"msg_type": "interactive", "content": json.dumps(payload)},
             timeout=15,
         )
     except Exception as e:

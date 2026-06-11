@@ -10,6 +10,7 @@ from config.settings import settings
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+from tools.feishu.cards import btn, buttons, card, div, hr
 from tools.feishu.notify import _get_access_token
 from tools.jira.ticket import create_gpu_ticket
 from . import messaging
@@ -18,57 +19,21 @@ from . import messaging
 # ── GPU 申请卡片（action buttons，programmatic interactive 消息支持）────────────
 # form + submit_form 仅限飞书卡片构建器模板（msg_type: "template"），
 # 编程发送的 interactive 消息不渲染 form 块，改用 action buttons 分两步完成申请。
-_GPU_REQUEST_CARD = {
-    "config": {"wide_screen_mode": True},
-    "header": {
-        "title": {"tag": "plain_text", "content": "GPU 资源申请"},
-        "template": "blue",
-    },
-    "elements": [
-        {
-            "tag": "div",
-            "text": {
-                "tag": "lark_md",
-                "content": "**第一步：选择常用配置**（点击后卡片更新，再补充实例名和用途即可提交）",
-            },
-        },
-        {"tag": "hr"},
-        {
-            "tag": "action",
-            "actions": [
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "1 GPU · 8h\n小模型微调"},
-                    "type": "default",
-                    "value": {"action": "quick_gpu", "gpu_count": "1", "duration_hours": "8"},
-                },
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "4 GPU · 24h\n7B 模型训练"},
-                    "type": "primary",
-                    "value": {"action": "quick_gpu", "gpu_count": "4", "duration_hours": "24"},
-                },
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "8 GPU · 48h\n大模型预训练"},
-                    "type": "danger",
-                    "value": {"action": "quick_gpu", "gpu_count": "8", "duration_hours": "48"},
-                },
-            ],
-        },
-        {"tag": "hr"},
-        {
-            "tag": "div",
-            "text": {
-                "tag": "lark_md",
-                "content": (
-                    "或直接回复自定义参数：\n"
-                    "```\n实例名: wzh-train-01\nGPU数: 4\n时长: 24\n用途: 大语言模型微调\n```"
-                ),
-            },
-        },
-    ],
-}
+_GPU_REQUEST_CARD = card("GPU 资源申请", [
+    div("**第一步：选择常用配置**（点击后卡片更新，再补充实例名和用途即可提交）"),
+    hr(),
+    buttons(
+        btn("1 GPU · 8h\n小模型微调",
+            {"action": "quick_gpu", "gpu_count": "1", "duration_hours": "8"}),
+        btn("4 GPU · 24h\n7B 模型训练",
+            {"action": "quick_gpu", "gpu_count": "4", "duration_hours": "24"}, "primary"),
+        btn("8 GPU · 48h\n大模型预训练",
+            {"action": "quick_gpu", "gpu_count": "8", "duration_hours": "48"}, "danger"),
+    ),
+    hr(),
+    div("或直接回复自定义参数：\n"
+        "```\n实例名: wzh-train-01\nGPU数: 4\n时长: 24\n用途: 大语言模型微调\n```"),
+])
 
 # 文字兜底引导（卡片回调不可用时的备用方案）
 _GPU_GUIDE_TEXT = (
