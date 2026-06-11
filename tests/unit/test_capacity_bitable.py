@@ -169,6 +169,39 @@ def test_struct_falls_back_to_dtype_when_no_modality(fake):
     assert bat["数据结构"] == "mcap"
 
 
+def test_rebuild_when_display_order_breaks_grouping(fake):
+    """存量行乱序（TOS 在 OSS 前）→ 整表重建：全部新建、旧行全删、批次链接指向新行。"""
+    from core.capacity_bitable import write_scan
+    tables, calls = fake
+    tables["tblVendor"].append({"record_id": "V-TOS",
+                                "fields": {"云厂商": "TOS", "Bucket": "bk2", "厂家": "egodex"}})
+    tables["tblVendor"].append({"record_id": "V-OSS",
+                                "fields": {"云厂商": "OSS", "Bucket": "bk1", "厂家": "lightwheel"}})
+
+    write_scan(_rows(), "id", "r")
+    vens = _created(calls, "tblVendor")
+    assert [f["云厂商"] for f in vens] == ["OSS", "TOS"]          # 按序重建
+    assert not any(t == "tblVendor" for t, _r, _f in calls["update"])
+    deleted = {rid for _t, rid in calls["delete"]}
+    assert {"V-TOS", "V-OSS"}.issubset(deleted)                   # 旧行全删
+    # 批次链接指向重建后的新行（假表已有 2 行旧记录，新建 OSS 行 rid=tblVendor-2）
+    b_lw = next(f for f in _created(calls, "tblBatch") if f["批次"] == "6-2-504h")
+    assert b_lw["关联厂家总量"] == ["tblVendor-2"]
+
+
+def test_no_rebuild_when_new_key_appends_in_order(fake):
+    """存量顺序正确且新键按序尾插 → 不重建，存量走更新。"""
+    from core.capacity_bitable import write_scan
+    tables, calls = fake
+    tables["tblVendor"].append({"record_id": "V-OSS",
+                                "fields": {"云厂商": "OSS", "Bucket": "bk1", "厂家": "lightwheel"}})
+    # 新键 (TOS,bk2,egodex) 排在 OSS 之后，尾插不破坏分组
+    write_scan(_rows(), "id", "r")
+    assert ("tblVendor", "V-OSS") in [(t, r) for t, r, _f in calls["update"]]
+    assert "V-OSS" not in {rid for _t, rid in calls["delete"]}
+    assert [f["厂家"] for f in _created(calls, "tblVendor")] == ["egodex"]
+
+
 def test_parse_hours_decimal_and_nested_path():
     """时长解析支持小数,且能从多层批次路径里取出。"""
     from core.capacity_bitable import _parse_hours
