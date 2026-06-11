@@ -107,10 +107,10 @@ def mock_feishu_send(monkeypatch):
     """捕获所有 Bot 回复，测试可断言内容。"""
     sent = []
 
-    from core import feishu_bot
-    monkeypatch.setattr(feishu_bot, "_feishu_reply",
+    from core.feishu_bot import messaging
+    monkeypatch.setattr(messaging, "_feishu_reply",
                         lambda msg_id, text: sent.append({"type": "reply", "text": text}))
-    monkeypatch.setattr(feishu_bot, "_feishu_send",
+    monkeypatch.setattr(messaging, "_feishu_send",
                         lambda chat_id, text: sent.append({"type": "send", "text": text}))
 
     yield sent

@@ -36,6 +36,9 @@ from tools.feishu.notify import _get_access_token
 from tools.jira.ticket import create_gpu_ticket, add_comment as jira_comment
 from core.dsw_scheduler import (scheduler, _redis_get, _redis_set, _redis_delete,
                                 _all_tracked_keys, check_quota, _cost_str, _set_approved)
+from . import messaging
+from .messaging import (_feishu_reply, _feishu_reply_with_chart,  # noqa: F401 (向后兼容再导出)
+                        _feishu_send, _send_text_to)
 
 app = Flask(__name__)
 
@@ -189,7 +192,7 @@ def _send_ak_register_card(message_id: str) -> None:
             logger.error("[AK注册卡片] 异常", exc_info=True)
 
     # 无模板降级：文字引导（明确告诉用户不要把 AK/SK 直接发到聊天里）
-    _feishu_reply(message_id,
+    messaging._feishu_reply(message_id,
         "## 🔐 绑定阿里云 AK/SK\n\n"
         "绑定后 Bot 会用你的 RAM 用户身份创建资源，控制台能直接看到归属。\n\n"
         "**推荐方式**：让管理员在飞书卡片构建器配置 `FEISHU_AK_REGISTER_TEMPLATE_ID`\n"
@@ -211,7 +214,7 @@ def _send_gpu_card(message_id: str) -> None:
             lines = ["**可用镜像（复制填入卡片「镜像」字段）：**"]
             for i, img in enumerate(images[:8], 1):
                 lines.append(f"{i}. `{img['name']}`")
-            _feishu_reply(message_id, "\n".join(lines))
+            messaging._feishu_reply(message_id, "\n".join(lines))
     except Exception as e:
         logger.warning("[GPU卡片] 镜像列表获取失败（已跳过）: %s", e)
 
@@ -314,7 +317,7 @@ def _handle_gpu_request(message_id: str, chat_id: str, open_id: str, parsed: dic
     duration_hours = parsed.get("duration_hours", "8")
     purpose        = parsed.get("purpose", "未说明")
 
-    _feishu_reply(message_id,
+    messaging._feishu_reply(message_id,
         f"⏳ 正在提交申请...\n实例：{instance_name}  GPU：{gpu_count}卡  时长：{duration_hours}h")
 
     def _do() -> None:
@@ -327,93 +330,14 @@ def _handle_gpu_request(message_id: str, chat_id: str, open_id: str, parsed: dic
             chat_id=chat_id,
         )
         if ticket_key:
-            _feishu_reply(message_id,
+            messaging._feishu_reply(message_id,
                 f"✅ 申请已提交！工单：{ticket_key}\n"
                 f"调度器将在 2 分钟内自动创建实例 {instance_name}（{gpu_count}GPU，{duration_hours}h），"
                 f"完成后飞书推送实例详情。")
         else:
-            _feishu_reply(message_id, "❌ Jira 工单创建失败，请联系运维人员。")
+            messaging._feishu_reply(message_id, "❌ Jira 工单创建失败，请联系运维人员。")
 
     threading.Thread(target=_do, daemon=True).start()
-
-
-def _feishu_reply(message_id: str, text: str) -> None:
-    """回复指定消息。"""
-    try:
-        token = _get_access_token()
-        resp  = requests.post(
-            f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/reply",
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json={"msg_type": "text", "content": json.dumps({"text": text})},
-            timeout=15,
-        )
-        data = resp.json()
-        if data.get("code") != 0:
-            logger.warning("[飞书回复] 失败: %s", data.get('msg'))
-    except Exception as e:
-        logger.error("[飞书回复] 异常", exc_info=True)
-
-
-def _feishu_reply_with_chart(message_id: str, text: str, image_key: str) -> None:
-    """以交互卡片形式回复：文本回答 + 实时指标趋势图"""
-    from datetime import datetime
-    from tools.feishu.notify import _upload_image  # noqa: F401 (确保路径可用)
-    card = {
-        "config": {"wide_screen_mode": True},
-        "elements": [
-            {
-                "tag": "div",
-                "text": {"tag": "lark_md", "content": text},
-            },
-            {"tag": "hr"},
-            {
-                "tag": "img",
-                "img_key": image_key,
-                "alt":     {"tag": "plain_text", "content": "实时指标趋势图"},
-                "mode":    "fit_horizontal",
-            },
-            {"tag": "hr"},
-            {
-                "tag": "note",
-                "elements": [{
-                    "tag":     "plain_text",
-                    "content": f"实时指标快照 · {datetime.now().strftime('%H:%M:%S')}",
-                }],
-            },
-        ],
-    }
-    try:
-        token = _get_access_token()
-        resp  = requests.post(
-            f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/reply",
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json={"msg_type": "interactive", "content": json.dumps(card)},
-            timeout=15,
-        )
-        data = resp.json()
-        if data.get("code") != 0:
-            logger.warning("[飞书卡片回复] 失败: %s", data.get('msg'))
-    except Exception as e:
-        logger.error("[飞书卡片回复] 异常", exc_info=True)
-
-
-def _feishu_send(chat_id: str, text: str) -> None:
-    """向指定会话主动发送消息（用于超时兜底提示）。"""
-    try:
-        token = _get_access_token()
-        requests.post(
-            "https://open.feishu.cn/open-apis/im/v1/messages",
-            params={"receive_id_type": "chat_id"},
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json={
-                "receive_id": chat_id,
-                "msg_type":   "text",
-                "content":    json.dumps({"text": text}),
-            },
-            timeout=15,
-        )
-    except Exception:
-        pass
 
 
 # ── 飞书↔阿里云身份绑定 ────────────────────────────────────────────────────
@@ -456,11 +380,11 @@ def _handle_ram_bind(message_id: str, open_id: str, text: str) -> bool:
     if re.search(r"解绑\s*ak|删除\s*ak|取消\s*绑定", text, re.IGNORECASE):
         from utils.aliyun_user_creds import delete_user_ak
         if delete_user_ak(open_id):
-            _feishu_reply(message_id,
+            messaging._feishu_reply(message_id,
                 "✅ 已解绑你的阿里云 AK/SK，加密数据已从 Redis 删除。\n"
                 "下次 Bot 操作将走 STS 兜底路径（资源归属为 Bot 角色）。")
         else:
-            _feishu_reply(message_id, "ℹ️ 你尚未绑定 AK/SK，无需解绑。")
+            messaging._feishu_reply(message_id, "ℹ️ 你尚未绑定 AK/SK，无需解绑。")
         return True
 
     # 「查看绑定 / 我的绑定」
@@ -484,18 +408,18 @@ def _handle_ram_bind(message_id: str, open_id: str, text: str) -> bool:
         ram_users = list_ram_users_api()
         matched = next((u for u in ram_users if u["user_name"] == ram_user_name), None)
         if not matched:
-            _feishu_reply(message_id,
+            messaging._feishu_reply(message_id,
                 f"❌ 未找到 RAM 用户 `{ram_user_name}`。\n"
                 "请确认用户名拼写正确，或联系运维人员协助绑定。")
             return True
         save_user_map(open_id, matched["display_name"] or ram_user_name, matched["user_id"])
-        _feishu_reply(message_id,
+        messaging._feishu_reply(message_id,
             f"✅ 已建立 RAM 映射：**{matched['display_name'] or ram_user_name}**。\n"
             "此为兜底路径（走 STS，资源归属为 Bot 角色）。\n"
             "如希望资源归属直接显示你的 RAM 用户名，请发送「绑定AK」走表单卡片。")
     except Exception as e:
         logger.error("[RAM绑定] 失败", exc_info=True)
-        _feishu_reply(message_id, f"❌ 绑定失败：{e}")
+        messaging._feishu_reply(message_id, f"❌ 绑定失败：{e}")
     return True
 
 
@@ -530,7 +454,7 @@ def _send_bind_status(message_id: str, open_id: str) -> None:
 
     lines.append("")
     lines.append("发送「绑定AK」绑定 AK/SK · 「解绑AK」取消绑定")
-    _feishu_reply(message_id, "\n".join(lines))
+    messaging._feishu_reply(message_id, "\n".join(lines))
 
 
 # ── 飞书用户 ↔ RAM 用户自动映射 ──────────────────────────────────────────────
@@ -571,7 +495,7 @@ def _query_my_instances(message_id: str, open_id: str, chat_id: str) -> None:
         if (s := _redis_get(k)) and s.get("open_id") == open_id
     ]
     if not user_tickets:
-        _feishu_reply(message_id,
+        messaging._feishu_reply(message_id,
             "你目前没有通过 Bot 运行中的 GPU 实例。\n发送「申请GPU」可提交新申请。")
         return
 
@@ -637,7 +561,7 @@ def _query_my_instances(message_id: str, open_id: str, chat_id: str) -> None:
         )
     except Exception as e:
         logger.error("[我的实例] 发送失败", exc_info=True)
-        _feishu_reply(message_id, "获取实例信息失败，请稍后重试。")
+        messaging._feishu_reply(message_id, "获取实例信息失败，请稍后重试。")
 
 
 # ── Agent 异步处理 ────────────────────────────────────────────────────────────
@@ -683,7 +607,7 @@ def _process_message(message_id: str, chat_id: str, user_text: str, open_id: str
     history = _load_history(chat_id)
 
     # 先发"思考中"提示，让用户知道 Bot 在处理
-    _feishu_reply(message_id, "🤔 正在分析，请稍候...")
+    messaging._feishu_reply(message_id, "🤔 正在分析，请稍候...")
 
     # 将 open_id 注入输入，供 analyze_gpu_training 等需要身份识别的工具使用
     agent_input = f"{user_text}\n[feishu_open_id={open_id}]" if open_id else user_text
@@ -709,14 +633,14 @@ def _process_message(message_id: str, chat_id: str, user_text: str, open_id: str
             png_bytes = build_metrics_chart(series)
             token     = _get_access_token()
             image_key = _upload_image(token, png_bytes)
-            _feishu_reply_with_chart(message_id, reply, image_key)
+            messaging._feishu_reply_with_chart(message_id, reply, image_key)
         except Exception as chart_err:
             logger.warning("[趋势图] 生成失败（已降级）: %s", chart_err)
-            _feishu_reply(message_id, reply)
+            messaging._feishu_reply(message_id, reply)
 
     except Exception as e:
         logger.error("处理消息出错", exc_info=True)
-        _feishu_reply(message_id, f"⚠️ 处理出错：{e}")
+        messaging._feishu_reply(message_id, f"⚠️ 处理出错：{e}")
     finally:
         clear_trace_id()
 
@@ -778,7 +702,7 @@ def _process_action(action_name: str, action_val: dict, open_id: str, chat_id: s
             _clear_gpu_state(chat_id, open_id)
             def _push_gpu_card():
                 import time; time.sleep(1)
-                _feishu_send(chat_id, "✅ AK 已绑定！正在为你打开 GPU 申请表单...")
+                messaging._feishu_send(chat_id, "✅ AK 已绑定！正在为你打开 GPU 申请表单...")
                 try:
                     template_id = settings.FEISHU_GPU_CARD_TEMPLATE_ID
                     content = json.dumps({"type": "template", "data": {"template_id": template_id}}) if template_id else json.dumps(_GPU_REQUEST_CARD)
@@ -867,16 +791,16 @@ def _process_action(action_name: str, action_val: dict, open_id: str, chat_id: s
             )
             if ticket_key:
                 if needs_approval:
-                    _send_text_to(open_id, chat_id,
+                    messaging._send_text_to(open_id, chat_id,
                         f"⏳ 工单 {ticket_key} 规格较大（{gpu_count}GPU · {duration_hours}h），"
                         f"已提交管理员审批，审批通过后自动创建实例。\n费用预估：{cost_hint}")
                 else:
-                    _send_text_to(open_id, chat_id,
+                    messaging._send_text_to(open_id, chat_id,
                         f"✅ 申请已提交！工单：{ticket_key}\n"
                         f"实例 {instance_name}（{gpu_count}GPU · {duration_hours}h）将在 2 分钟内创建，完成后飞书推送。\n"
                         f"费用预估：{cost_hint}")
             else:
-                _send_text_to(open_id, chat_id, "❌ Jira 工单创建失败，请联系运维人员。")
+                messaging._send_text_to(open_id, chat_id, "❌ Jira 工单创建失败，请联系运维人员。")
 
         threading.Thread(target=_do, daemon=True).start()
         return {
@@ -986,7 +910,7 @@ def _process_action(action_name: str, action_val: dict, open_id: str, chat_id: s
             return {"toast": {"type": "error", "content": "缺少工单号"}}
         _set_approved(ticket_key)
         jira_comment(ticket_key, "✅ 管理员已批准，调度器将在 20 秒内自动创建实例。")
-        _send_text_to(req_open_id, req_chat_id,
+        messaging._send_text_to(req_open_id, req_chat_id,
             f"✅ 工单 {ticket_key} 已获批准！调度器将在 20 秒内自动创建 GPU 实例。")
         return {
             "toast": {"type": "success", "content": f"工单 {ticket_key} 已批准"},
@@ -1008,7 +932,7 @@ def _process_action(action_name: str, action_val: dict, open_id: str, chat_id: s
             return {"toast": {"type": "error", "content": "缺少工单号"}}
         jira_comment(ticket_key, "❌ 管理员已拒绝此申请。")
         transition_ticket(ticket_key, "完成")
-        _send_text_to(req_open_id, req_chat_id,
+        messaging._send_text_to(req_open_id, req_chat_id,
             f"❌ 工单 {ticket_key} 的 GPU 申请已被管理员拒绝，如有疑问请联系运维团队。")
         return {
             "toast": {"type": "info", "content": f"工单 {ticket_key} 已拒绝"},
@@ -1063,24 +987,6 @@ def _handle_card_trigger_sync(data: dict) -> dict:
         else:
             action_name = "submit_gpu_request"
     return _process_action(action_name, action_val, open_id, chat_id, form_value=form_value)
-
-
-def _send_text_to(open_id: str, chat_id: str, text: str) -> None:
-    """向用户发文本消息（优先私信，降级群聊）。"""
-    try:
-        token     = _get_access_token()
-        target_id = open_id or chat_id
-        id_type   = "open_id" if open_id else "chat_id"
-        requests.post(
-            "https://open.feishu.cn/open-apis/im/v1/messages",
-            params={"receive_id_type": id_type},
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json={"receive_id": target_id, "msg_type": "text",
-                  "content": json.dumps({"text": text})},
-            timeout=15,
-        )
-    except Exception as e:
-        logger.error("[发消息] 失败", exc_info=True)
 
 
 # ── Webhook 路由 ──────────────────────────────────────────────────────────────
@@ -1290,7 +1196,7 @@ def run(host: str = "0.0.0.0", port: int = 8088, debug: bool = False):
     # 注册错误回调：ERROR 级别日志自动推送管理员飞书
     if settings.ADMIN_FEISHU_OPEN_ID:
         register_error_callback(
-            lambda msg: _send_text_to(settings.ADMIN_FEISHU_OPEN_ID, settings.FEISHU_CHAT_ID, msg)
+            lambda msg: messaging._send_text_to(settings.ADMIN_FEISHU_OPEN_ID, settings.FEISHU_CHAT_ID, msg)
         )
         logger.info("错误飞书推送已注册 → %s", settings.ADMIN_FEISHU_OPEN_ID)
 
