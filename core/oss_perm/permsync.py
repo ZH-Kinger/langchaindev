@@ -232,6 +232,25 @@ def build_policy(resolved):
     return {"Version": "1", "Statement": stmts}
 
 
+def coerce_level(resolved, level):
+    """按粒度档收紧 resolved。
+
+    level='bucket' → 把每个桶的读/写前缀塌缩成整桶（''），即「限制到桶」；
+    level='dir'    → 原样返回（按子目录前缀），即「限制到目录」。
+    保留读/写区分与桶集合，只动前缀粒度。
+    """
+    if level != "bucket":
+        return resolved
+    out = {}
+    for bucket, pr in resolved.items():
+        out[bucket] = {
+            "read":  {""} if pr["read"] else set(),
+            "write": {""} if pr["write"] else set(),
+            "display": pr["display"],
+        }
+    return out
+
+
 # ---------------------------------------------------------------------------
 # 对账：策略文档反解析 + 期望/实际差集
 # ---------------------------------------------------------------------------
@@ -521,6 +540,13 @@ def _pp(prefixes):
     return ", ".join(sorted(x or "<整桶>" for x in prefixes)) if prefixes else "—"
 
 
+def _scope_str(resolved):
+    """{桶:{read,write}} -> '桶A 读[..] 写[..]；桶B ...'，供结果卡列出每人实际下发范围。"""
+    parts = [f"{b} 读[{_pp(resolved[b]['read'])}] 写[{_pp(resolved[b]['write'])}]"
+             for b in sorted(resolved)]
+    return "；".join(parts) if parts else "—"
+
+
 def run_audit(client, plan, active_usernames, out_file, log=print):
     """只读对账：逐人 多授/少授/一致 + 孤儿策略。返回 (有差异人数, 孤儿dict)。"""
     log("\n" + "=" * 70)
@@ -603,6 +629,8 @@ def main():
     ap.add_argument("--build-map", action="store_true",
                     help="按「RAM 显示名==成员姓名」生成/合并映射表（--map 指定路径），保留手工项后退出")
     ap.add_argument("--include-inactive", action="store_true", help="包含离职成员")
+    ap.add_argument("--level", choices=["bucket", "dir"], default="dir",
+                    help="权限粒度：bucket 桶级（整桶读写，先放开观察）/ dir 目录级（按子目录前缀，默认）")
     ap.add_argument("--only", help="仅处理姓名或用户名包含该子串的成员")
     ap.add_argument("--out", help="把生成的策略计划写入该 JSON 文件")
     ap.add_argument("--app-token", default=os.environ.get("FEISHU_APP_TOKEN", DEFAULT_APP_TOKEN))
@@ -647,11 +675,11 @@ def main():
             agg["read"] |= pr["read"]
             agg["write"] |= pr["write"]
 
-    plan = [
-        {"member": slot["member"], "policy_name": POLICY_PREFIX + username,
-         "resolved": slot["resolved"], "doc": build_policy(slot["resolved"])}
-        for username, slot in by_user.items()
-    ]
+    plan = []
+    for username, slot in by_user.items():
+        eff = coerce_level(slot["resolved"], args.level)
+        plan.append({"member": slot["member"], "policy_name": POLICY_PREFIX + username,
+                     "resolved": eff, "doc": build_policy(eff), "level": args.level})
 
     # 2.3) 生成/合并 RAM 用户名映射表后退出
     if args.build_map:
@@ -682,8 +710,10 @@ def main():
         return
 
     # 3) 打印计划
+    _lvl_cn = "桶级" if args.level == "bucket" else "目录级"
     print("\n" + "=" * 70)
-    print(f"计划处理 {len(plan)} 位成员" + ("（DRY-RUN，未改动阿里云）" if not args.apply else "（APPLY）"))
+    print(f"计划处理 {len(plan)} 位成员 · 粒度={_lvl_cn}"
+          + ("（DRY-RUN，未改动阿里云）" if not args.apply else "（APPLY）"))
     print("=" * 70)
     for p in plan:
         mb = p["member"]
@@ -783,8 +813,12 @@ def load_members(include_inactive=False):
     return members, combos
 
 
-def build_plan(members, combos):
-    """members + 对照表 -> plan（按用户名合并多行）。"""
+def build_plan(members, combos, level="dir"):
+    """members + 对照表 -> plan（按用户名合并多行）。
+
+    level='bucket' 桶级（整桶读写）/ 'dir' 目录级（按子目录前缀，默认）。
+    plan 里的 resolved 与 doc 均为收紧后的实际下发范围，对账/卡片据此显示。
+    """
     by_user, warnings = {}, []
     for mb in members:
         if not mb["username"]:
@@ -797,9 +831,12 @@ def build_plan(members, combos):
             agg = slot["resolved"].setdefault(bucket, {"read": set(), "write": set(), "display": pr["display"]})
             agg["read"] |= pr["read"]
             agg["write"] |= pr["write"]
-    return [{"member": s["member"], "policy_name": POLICY_PREFIX + u,
-             "resolved": s["resolved"], "doc": build_policy(s["resolved"])}
-            for u, s in by_user.items()]
+    plan = []
+    for u, s in by_user.items():
+        eff = coerce_level(s["resolved"], level)
+        plan.append({"member": s["member"], "policy_name": POLICY_PREFIX + u,
+                     "resolved": eff, "doc": build_policy(eff), "level": level})
+    return plan
 
 
 def audit_diff(plan, active_usernames):
@@ -825,31 +862,36 @@ def audit_diff(plan, active_usernames):
 
 
 def apply_all(plan, create_users=False):
-    """全量下发 -> {ok, fail, no_user, lines}。用映射表解析真实 RAM 用户名。"""
+    """全量下发 -> {ok, fail, no_user, lines, level}。用映射表解析真实 RAM 用户名。
+
+    每条 line 带上该成员实际下发的读写范围（桶/前缀），供结果卡列清楚「限制了哪些权限」。
+    """
     client = make_ram_client()
     by_display, names = ram_username_map(client)
     user_map = load_user_map(_MAP_PATH)
+    level = plan[0].get("level", "dir") if plan else "dir"
     ok = fail = no_user = 0
     lines = []
     for p in plan:
         mb = p["member"]
+        scope = _scope_str(p["resolved"])
         real_user = map_username(mb, user_map, by_display, names)
         logs = []
         if real_user is None and not create_users:
             no_user += 1
             apply_user(client, mb["username"], p["policy_name"], p["doc"],
                        create_users=False, log=logs.append, attach=False)
-            lines.append(f"• {mb['name']}：仅建策略未附加（无 RAM 用户）")
+            lines.append(f"• {mb['name']}：仅建策略未附加（无 RAM 用户）｜ {scope}")
             continue
         attach_user = real_user or mb["username"]
         if apply_user(client, attach_user, p["policy_name"], p["doc"], create_users, logs.append):
             ok += 1
-            lines.append(f"• {mb['name']} → {attach_user} ✓")
+            lines.append(f"• {mb['name']} → {attach_user} ✓ ｜ {scope}")
         else:
             fail += 1
             lines.append(f"• {mb['name']} ✗ {(logs[-1].strip() if logs else '')}")
         time.sleep(0.15)
-    return {"ok": ok, "fail": fail, "no_user": no_user, "lines": lines}
+    return {"ok": ok, "fail": fail, "no_user": no_user, "lines": lines, "level": level}
 
 
 if __name__ == "__main__":

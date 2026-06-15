@@ -298,23 +298,71 @@ def _h_approve_oss_perm(action_val, open_id, chat_id, form_value):
     if open_id != _cfg.ADMIN_FEISHU_OPEN_ID:
         return {"toast": {"type": "error", "content": "仅管理员可批准下发"}}
 
+    level = action_val.get("level", "dir") if isinstance(action_val, dict) else "dir"
+    if level not in ("bucket", "dir"):
+        level = "dir"
+    level_cn = "桶级" if level == "bucket" else "目录级"
+
     def _do_oss_perm_apply() -> None:
         from core.dsw_scheduler import _send_card, _send_text
         try:
             from core.oss_perm import permsync
             from core.oss_perm.cards import result_card
             members, combos = permsync.load_members()
-            plan = permsync.build_plan(members, combos)
+            plan = permsync.build_plan(members, combos, level=level)
             summary = permsync.apply_all(plan)
             _send_card("", _cfg.FEISHU_CHAT_ID, result_card(summary))
-            logger.info("[OSSPerm] 下发完成：成功 %d 失败 %d 无用户 %d",
-                        summary["ok"], summary["fail"], summary["no_user"])
+            logger.info("[OSSPerm] 下发完成(%s)：成功 %d 失败 %d 无用户 %d",
+                        level, summary["ok"], summary["fail"], summary["no_user"])
         except Exception as e:
             logger.error("[OSSPerm] 下发失败", exc_info=True)
             _send_text("", _cfg.FEISHU_CHAT_ID, f"❌ OSS 权限下发失败：{e}")
 
     threading.Thread(target=_do_oss_perm_apply, daemon=True).start()
-    return {"toast": {"type": "success", "content": "已开始下发，完成后推送结果到群"}}
+    return {"toast": {"type": "success", "content": f"已开始下发（{level_cn}），完成后推送结果到群"}}
+
+
+# ── OSS 权限选择性下发：表单卡（粒度单选 + 成员多选）提交 → 仅下发勾选的人 ──────
+
+def _h_approve_oss_perm_selected(action_val, open_id, chat_id, form_value):
+    from config.settings import settings as _cfg
+    if open_id != _cfg.ADMIN_FEISHU_OPEN_ID:
+        return {"toast": {"type": "error", "content": "仅管理员可批准下发"}}
+
+    fv = form_value or {}
+    level = fv.get("level") or "dir"
+    if level not in ("bucket", "dir"):
+        level = "dir"
+    selected = fv.get("selected") or []
+    if isinstance(selected, str):       # 单选兜底（理论上 multi_select 给 list）
+        selected = [selected]
+    if not selected:
+        return {"toast": {"type": "error", "content": "未选择任何成员，已取消"}}
+    sel = set(selected)
+    level_cn = "桶级" if level == "bucket" else "目录级"
+
+    def _do_apply() -> None:
+        from core.dsw_scheduler import _send_card, _send_text
+        try:
+            from core.oss_perm import permsync
+            from core.oss_perm.cards import result_card
+            members, combos = permsync.load_members()
+            plan = permsync.build_plan(members, combos, level=level)
+            plan = [p for p in plan if p["member"]["username"] in sel]
+            if not plan:
+                _send_text("", _cfg.FEISHU_CHAT_ID, "⚠️ 勾选的成员均无可解析的下发计划，未执行。")
+                return
+            summary = permsync.apply_all(plan)
+            _send_card("", _cfg.FEISHU_CHAT_ID, result_card(summary))
+            logger.info("[OSSPerm] 选择性下发(%s) %d 人：成功 %d 失败 %d 无用户 %d",
+                        level, len(plan), summary["ok"], summary["fail"], summary["no_user"])
+        except Exception as e:
+            logger.error("[OSSPerm] 选择性下发失败", exc_info=True)
+            _send_text("", _cfg.FEISHU_CHAT_ID, f"❌ OSS 权限下发失败：{e}")
+
+    threading.Thread(target=_do_apply, daemon=True).start()
+    return {"toast": {"type": "success",
+                      "content": f"已开始下发（{level_cn} · {len(sel)} 人），完成后推送结果到群"}}
 
 
 _ACTION_HANDLERS = {
@@ -326,7 +374,8 @@ _ACTION_HANDLERS = {
     "stop_dsw":           _h_stop_dsw,
     "approve_gpu":        _h_approve_gpu,
     "reject_gpu":         _h_reject_gpu,
-    "approve_oss_perm":   _h_approve_oss_perm,
+    "approve_oss_perm":          _h_approve_oss_perm,
+    "approve_oss_perm_selected": _h_approve_oss_perm_selected,
 }
 
 

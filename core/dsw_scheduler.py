@@ -331,17 +331,16 @@ def _run_oss_perm_audit_push() -> None:
         return
     try:
         from core.oss_perm import permsync
-        from core.oss_perm.cards import audit_card
+        from core.oss_perm.cards import audit_form_card
         members, combos = permsync.load_members()
         plan = permsync.build_plan(members, combos)
         active = {m["username"] for m in members if m["username"]}
         diff = permsync.audit_diff(plan, active)
-        if diff["n_diff"] == 0 and not diff["orphans"]:
+        if diff["n_diff"] == 0:
             logger.info("[OSSPerm] 权限与表格一致，跳过推送")
             return
-        _send_card("", settings.FEISHU_CHAT_ID, audit_card(diff))
-        logger.info("[OSSPerm] 已推送对账卡片：%d 人待同步，%d 孤儿",
-                    diff["n_diff"], len(diff["orphans"]))
+        _send_card("", settings.FEISHU_CHAT_ID, audit_form_card(diff))
+        logger.info("[OSSPerm] 已推送对账表单卡：%d 人待同步", diff["n_diff"])
     except Exception as e:
         logger.error("[OSSPerm] 对账推送失败: %s", e, exc_info=True)
 

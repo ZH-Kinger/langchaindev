@@ -43,8 +43,8 @@ def test_audit_card_consistent_no_button():
     assert not any(el.get("tag") == "action" for el in card["elements"])
 
 
-def test_audit_card_orphans_only_still_has_button():
-    """无人需同步但有孤儿策略 → 仍橙色带按钮。"""
+def test_audit_card_orphans_not_shown():
+    """孤儿策略不再展示：仅孤儿（无人需同步）→ 绿色无按钮，body 不含孤儿名。"""
     from core.oss_perm.cards import audit_card
     diff = {
         "rows": [{"name": "李四", "username": "lisi", "status": "ok"}],
@@ -52,9 +52,10 @@ def test_audit_card_orphans_only_still_has_button():
         "n_diff": 0,
     }
     card = audit_card(diff)
-    assert card["header"]["template"] == "orange"
+    assert card["header"]["template"] == "green"
+    assert not any(el.get("tag") == "action" for el in card["elements"])
     body = "".join(el.get("text", {}).get("content", "") for el in card["elements"])
-    assert "ghost" in body
+    assert "ghost" not in body
 
 
 def test_audit_card_diff_detail_renders():
@@ -119,7 +120,9 @@ def test_apply_all_user_exists_ok(patch_apply, monkeypatch):
     monkeypatch.setattr(ps, "map_username", lambda *a: "zhangsan")
     monkeypatch.setattr(ps, "apply_user", lambda *a, **k: True)
     summary = ps.apply_all(_plan("张三", "zhangsan"))
-    assert summary == {"ok": 1, "fail": 0, "no_user": 0, "lines": ["• 张三 → zhangsan ✓"]}
+    # summary 现含 level（缺省 dir），行尾拼了范围串（resolved={} → _scope_str 得 —）
+    assert summary == {"ok": 1, "fail": 0, "no_user": 0,
+                       "lines": ["• 张三 → zhangsan ✓ ｜ —"], "level": "dir"}
 
 
 def test_apply_all_no_ram_user(patch_apply, monkeypatch):
@@ -244,3 +247,154 @@ def test_approve_oss_perm_admin_starts_thread(monkeypatch):
     resp = actions._process_action("approve_oss_perm", {}, open_id="ou_admin", chat_id="oc_x")
     assert resp["toast"]["type"] == "success"
     assert len(started) == 1   # 起了下发后台线程
+
+
+# ── permsync 桶级/目录级两档粒度 ──────────────────────────────────────────────
+
+def test_coerce_level_bucket_collapses():
+    """bucket 把非空读/写前缀塌缩成整桶(空串)，空集合保持空；dir 原样。"""
+    from core.oss_perm import permsync
+    resolved = {"b1": {"read": {"a/", "b/"}, "write": {"a/"}, "display": "桶1"},
+                "b2": {"read": set(), "write": {"x/"}, "display": "桶2"}}
+    assert permsync.coerce_level(resolved, "dir") is resolved          # dir 不动
+    out = permsync.coerce_level(resolved, "bucket")
+    assert out["b1"]["read"] == {""} and out["b1"]["write"] == {""}
+    assert out["b2"]["read"] == set() and out["b2"]["write"] == {""}   # 空读保持空
+    assert out["b1"]["display"] == "桶1"
+
+
+def test_build_policy_bucket_vs_dir():
+    """同一 resolved：桶级 → 整桶 ARN + List 无 Condition；目录级 → 前缀 ARN + List 带 Condition。"""
+    from core.oss_perm import permsync
+    resolved = {"wuji-ego-processed": {"read": {"batch_a/", "batch_b/"},
+                                       "write": {"batch_a/"}, "display": "杭州"}}
+
+    dir_doc = permsync.build_policy(permsync.coerce_level(resolved, "dir"))
+    dir_arns = [r for st in dir_doc["Statement"] for r in st["Resource"]]
+    assert any(a.endswith("/batch_a/*") for a in dir_arns)
+    dir_list = next(st for st in dir_doc["Statement"] if "oss:ListObjects" in st["Action"])
+    assert "Condition" in dir_list
+
+    bk_doc = permsync.build_policy(permsync.coerce_level(resolved, "bucket"))
+    bk_obj = [st for st in bk_doc["Statement"]
+              if "oss:GetObject" in st["Action"] or "oss:PutObject" in st["Action"]]
+    assert bk_obj and all(r.endswith("wuji-ego-processed/*")
+                          for st in bk_obj for r in st["Resource"])
+    bk_list = next(st for st in bk_doc["Statement"] if "oss:ListObjects" in st["Action"])
+    assert "Condition" not in bk_list
+
+
+def test_build_plan_threads_level():
+    """build_plan 把 level 烤进 plan，并据此塌缩 resolved；默认 dir。"""
+    from core.oss_perm import permsync
+    mb = _member("张三", "zhangsan", ["新加坡-wuji-sing"], ["egoscale/"], ["egoscale/"])
+    combos = {"新加坡-wuji-sing": {"egoscale/"}}
+
+    plan = permsync.build_plan([mb], combos)               # 默认目录级
+    assert plan[0]["level"] == "dir"
+    assert plan[0]["resolved"]["wuji-sing"]["read"] == {"egoscale/"}
+
+    planb = permsync.build_plan([mb], combos, level="bucket")
+    assert planb[0]["level"] == "bucket"
+    assert planb[0]["resolved"]["wuji-sing"]["read"] == {""}
+    assert planb[0]["resolved"]["wuji-sing"]["write"] == {""}
+
+
+def test_scope_str():
+    """_scope_str：具体前缀照列、空串显示 <整桶>、空 resolved → —。"""
+    from core.oss_perm.permsync import _scope_str
+    resolved = {"wuji-sing": {"read": {"a/", "b/"}, "write": {""}, "display": "x"}}
+    s = _scope_str(resolved)
+    assert "wuji-sing" in s and "读[a/, b/]" in s and "写[<整桶>]" in s
+    assert _scope_str({}) == "—"
+
+
+def test_apply_all_includes_level_and_scope(patch_apply, monkeypatch):
+    """apply_all 的 summary 带 level，每行拼上实际下发范围。"""
+    ps = patch_apply
+    monkeypatch.setattr(ps, "map_username", lambda *a: "zhangsan")
+    monkeypatch.setattr(ps, "apply_user", lambda *a, **k: True)
+    plan = [{"member": {"name": "张三", "username": "zhangsan"},
+             "policy_name": "wuji-oss-auto-zhangsan",
+             "resolved": {"wuji-sing": {"read": {""}, "write": {""}, "display": "x"}},
+             "doc": {"Version": "1", "Statement": []}, "level": "bucket"}]
+    summary = ps.apply_all(plan)
+    assert summary["level"] == "bucket"
+    assert "wuji-sing" in summary["lines"][0] and "<整桶>" in summary["lines"][0]
+
+
+# ── cards.audit_form_card（选择性下发 2.0 表单卡）────────────────────────────────
+
+def test_audit_form_card_structure():
+    """有差异 → 2.0 橙卡：成员多选只含有差异者且默认全选、粒度默认桶级、提交按钮 action 正确。"""
+    from core.oss_perm.cards import audit_form_card
+    diff = {"rows": [
+        {"name": "张三", "username": "zhangsan", "status": "missing"},
+        {"name": "李四", "username": "lisi", "status": "diff",
+         "diff": {"b": {"over": {"read": set(), "write": set()},
+                        "under": {"read": {"x/"}, "write": set()}}}},
+        {"name": "赵六", "username": "zhaoliu", "status": "ok"},
+    ], "orphans": {}, "n_diff": 2}
+    card = audit_form_card(diff)
+    assert card["schema"] == "2.0"
+    assert card["header"]["template"] == "orange"
+    form = next(e for e in card["body"]["elements"] if e.get("tag") == "form")
+    msel = next(e for e in form["elements"] if e.get("tag") == "multi_select_static")
+    ssel = next(e for e in form["elements"] if e.get("tag") == "select_static")
+    button = next(e for e in form["elements"] if e.get("tag") == "button")
+    assert [o["value"] for o in msel["options"]] == ["zhangsan", "lisi"]   # ok 行排除
+    assert msel["selected_values"] == ["zhangsan", "lisi"]                 # 默认全选
+    assert ssel["initial_option"] == "bucket"
+    assert button["behaviors"][0]["value"]["action"] == "approve_oss_perm_selected"
+
+
+def test_audit_form_card_consistent_green():
+    """无差异 → 绿色、无表单。"""
+    from core.oss_perm.cards import audit_form_card
+    diff = {"rows": [{"name": "李四", "username": "lisi", "status": "ok"}],
+            "orphans": {}, "n_diff": 0}
+    card = audit_form_card(diff)
+    assert card["header"]["template"] == "green"
+    assert not any(e.get("tag") == "form" for e in card["body"]["elements"])
+
+
+# ── actions._h_approve_oss_perm_selected（选择性下发权限/输入闸）────────────────
+
+def test_approve_selected_non_admin(monkeypatch):
+    from config.settings import settings
+    monkeypatch.setattr(settings, "ADMIN_FEISHU_OPEN_ID", "ou_admin")
+    from core.feishu_bot import actions
+    resp = actions._process_action("approve_oss_perm_selected", {},
+                                   open_id="ou_x", chat_id="oc_x",
+                                   form_value={"level": "bucket", "selected": ["zhangsan"]})
+    assert resp["toast"]["type"] == "error" and "管理员" in resp["toast"]["content"]
+
+
+def test_approve_selected_empty_selection(monkeypatch):
+    from config.settings import settings
+    monkeypatch.setattr(settings, "ADMIN_FEISHU_OPEN_ID", "ou_admin")
+    from core.feishu_bot import actions
+    resp = actions._process_action("approve_oss_perm_selected", {},
+                                   open_id="ou_admin", chat_id="oc_x",
+                                   form_value={"level": "bucket", "selected": []})
+    assert resp["toast"]["type"] == "error" and "未选择" in resp["toast"]["content"]
+
+
+def test_approve_selected_admin_starts_thread(monkeypatch):
+    from config.settings import settings
+    monkeypatch.setattr(settings, "ADMIN_FEISHU_OPEN_ID", "ou_admin")
+    started = []
+    from core.feishu_bot import actions
+    real_thread = actions.threading.Thread
+
+    def fake_thread(*args, **kwargs):
+        started.append(kwargs.get("target"))
+        return real_thread(target=lambda: None, daemon=True)
+    monkeypatch.setattr(actions.threading, "Thread", fake_thread)
+
+    resp = actions._process_action("approve_oss_perm_selected", {},
+                                   open_id="ou_admin", chat_id="oc_x",
+                                   form_value={"level": "bucket", "selected": ["zhangsan", "lisi"]})
+    assert resp["toast"]["type"] == "success"
+    assert "2 人" in resp["toast"]["content"]
+    assert len(started) == 1
