@@ -67,28 +67,51 @@ def test_confirm_handler_missing_job():
     assert out["toast"]["type"] == "error"
 
 
-def test_entry_card_with_options(monkeypatch):
+def test_entry_card_step1_with_regions(monkeypatch):
     from core.cpfs_dataflow import discovery
-    monkeypatch.setattr(discovery, "get_options",
-                        lambda *a, **k: [{"label": "cn-hangzhou·bmcpfs-a·oss://bk/wuji_il ↔ /cwr/",
-                                          "value": '{"fs_id":"bmcpfs-a"}'}])
+    monkeypatch.setattr(discovery, "regions", lambda *a, **k: ["cn-hangzhou", "cn-shanghai"])
     ec = cards.entry_card()
     form = ec["body"]["elements"][1]
     names = {e.get("name") for e in form["elements"]}
-    assert "target" in names and "subdir" in names    # 有绑定→下拉选择
+    assert "operation" in names and "region" in names    # 第1步：操作+地区
+    assert "cpfs_path" not in names                       # 不再是扁平/手填
 
 
-def test_submit_handler_with_selection(monkeypatch):
-    import json
+def test_wizard_step2_card_has_fs_and_bucket(monkeypatch):
+    from core.cpfs_dataflow import discovery
+    monkeypatch.setattr(discovery, "filesystems_in",
+                        lambda r, **k: [{"fs_id": "bmcpfs-a", "edition": "computing"}])
+    monkeypatch.setattr(discovery, "buckets_in", lambda r, **k: ["bk-1", "bk-2"])
+    out = actions._h_cpfs_wizard({}, "ou_1", "chat", {"operation": "sink", "region": "cn-hangzhou"})
+    card2 = out["card"]["data"]
+    form = card2["body"]["elements"][1]
+    names = {e.get("name") for e in form["elements"]}
+    assert {"fs_id", "cpfs_dir", "oss_bucket", "oss_subdir"} <= names
+
+
+def test_wizard_requires_region():
+    out = actions._h_cpfs_wizard({}, "ou_1", "chat", {"operation": "sink"})
+    assert out["toast"]["type"] == "error"
+
+
+def test_resolve_wizard_locates_dataflow(monkeypatch):
     import core.dsw_scheduler as sch
+    from core.cpfs_dataflow import engine_nas
     monkeypatch.setattr(sch, "_send_card", lambda *a, **k: None, raising=False)
     monkeypatch.setattr(sch, "_send_text", lambda *a, **k: None, raising=False)
-    sel = {"fs_id": "bmcpfs-a", "region": "cn-hangzhou", "data_flow_id": "df-1",
-           "oss_bucket": "bk", "oss_prefix": "wuji_il", "fs_path": "/cwr/"}
-    out = actions._h_submit_cpfs_dataflow(
-        {}, "ou_1", "chat",
-        {"operation": "sink", "target": json.dumps(sel), "subdir": "third_party_data/label"})
+    monkeypatch.setattr(engine_nas, "resolve_dataflow",
+                        lambda *a, **k: {"data_flow_id": "df-1", "oss_prefix": "wuji_il", "fs_path": "/cwr/"})
+    out = actions._h_resolve_cpfs_wizard(
+        {"operation": "sink", "region": "cn-hangzhou"}, "ou_1", "chat",
+        {"fs_id": "bmcpfs-a", "cpfs_dir": "/cwr/third_party_data/raw/",
+         "oss_bucket": "wuji-bucket-hangzhou", "oss_subdir": "label"})
     assert out["toast"]["type"] == "success"
+
+
+def test_resolve_wizard_requires_fields():
+    out = actions._h_resolve_cpfs_wizard(
+        {"operation": "sink", "region": "cn-hangzhou"}, "ou_1", "chat", {"fs_id": "bmcpfs-a"})
+    assert out["toast"]["type"] == "error"
 
 
 def test_confirm_handler_launches(monkeypatch):

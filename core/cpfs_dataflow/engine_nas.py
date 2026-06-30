@@ -185,27 +185,32 @@ def resolve_dataflow(fs_id: str, region: str = "", *, oss_bucket: str = "",
         raise NasDataflowError(
             f"文件系统 `{fs_id}` 下没有可用 DataFlow。请先在控制台创建 CPFS↔OSS DataFlow，"
             f"或在 CPFS_DATAFLOW_MAP 中配置。")
-    # ② 按 OSS bucket 匹配 SourceStorage
-    if oss_bucket:
-        for f in flows:
-            if oss_bucket in (f.get("source_storage") or ""):
-                return f
-    # ③ 按 CPFS 路径匹配：DataFlow 绑定目录通常更大（是目标目录的祖先），取最长前缀匹配
+    # 先按 OSS bucket 过滤候选
+    cand = [f for f in flows if oss_bucket in (f.get("source_storage") or "")] if oss_bucket else list(flows)
+    # 再按 CPFS 路径取最长祖先前缀消歧（一个桶可能绑多个 CPFS 路径）
     if fs_path:
         norm = normalize_dir(fs_path)
         best, best_len = None, -1
-        for f in flows:
+        for f in cand:
             fp = normalize_dir(f.get("fs_path") or "/")
             if norm.startswith(fp) and len(fp) > best_len:
                 best, best_len = f, len(fp)
         if best:
             return best
-    # ④ 唯一一条则直接用
+    if oss_bucket and cand:
+        if len(cand) == 1:
+            return cand[0]
+        raise NasDataflowError(
+            f"`{fs_id}` 与 OSS `{oss_bucket}` 间有 {len(cand)} 条 DataFlow，"
+            f"请把 CPFS 目录填得更具体以消歧。")
+    if oss_bucket and not cand:
+        raise NasDataflowError(
+            f"`{fs_id}` 与 OSS `{oss_bucket}` 之间没有 DataFlow 绑定，无法预热/沉降。"
+            f"请确认两者已建数据流动，或换一个桶。")
     if len(flows) == 1:
         return flows[0]
     raise NasDataflowError(
-        f"文件系统 `{fs_id}` 下有 {len(flows)} 个 DataFlow，无法据 OSS bucket / 路径唯一确定，"
-        f"请显式指定 OSS 路径或在 CPFS_DATAFLOW_MAP 中配置。")
+        f"文件系统 `{fs_id}` 下有 {len(flows)} 个 DataFlow，无法唯一确定，请指定 OSS 桶或更具体的 CPFS 目录。")
 
 
 # ── 任务提交 / 轮询 ──────────────────────────────────────────────────────────

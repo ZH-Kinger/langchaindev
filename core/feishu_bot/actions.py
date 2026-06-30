@@ -553,6 +553,64 @@ def _h_submit_cpfs_dataflow(action_val, open_id, chat_id, form_value):
     return {"toast": {"type": "success", "content": "正在解析，稍候推送确认卡"}}
 
 
+def _h_cpfs_wizard(action_val, open_id, chat_id, form_value):
+    """第1步→第2步：据所选地区刷出该地区的 CPFS / OSS 选项卡。"""
+    fv = form_value or {}
+    operation = (fv.get("operation") or "sink").strip()
+    region = (fv.get("region") or "").strip()
+    if not region:
+        return {"toast": {"type": "error", "content": "请选择地区"}}
+    from core.cpfs_dataflow import discovery
+    from core.cpfs_dataflow.cards import wizard_select_card
+    try:
+        fs_options = discovery.filesystems_in(region, open_id=open_id)
+        bucket_options = discovery.buckets_in(region, open_id=open_id)
+    except Exception as e:
+        logger.error("[CPFS] wizard step2 build failed", exc_info=True)
+        return {"toast": {"type": "error", "content": f"加载选项失败：{e}"}}
+    if not fs_options or not bucket_options:
+        return {"toast": {"type": "error", "content": f"地区 {region} 下没有可用 CPFS↔OSS 绑定"}}
+    return {"card": {"type": "raw", "data": wizard_select_card(operation, region, fs_options, bucket_options)}}
+
+
+def _h_resolve_cpfs_wizard(action_val, open_id, chat_id, form_value):
+    """第2步：按 fs+桶+CPFS目录 定位 DataFlow，推确认卡。"""
+    av = action_val if isinstance(action_val, dict) else {}
+    operation = av.get("operation", "sink")
+    region = av.get("region", "")
+    fv = form_value or {}
+    fs_id = (fv.get("fs_id") or "").strip()
+    cpfs_dir = (fv.get("cpfs_dir") or "").strip()
+    oss_bucket = (fv.get("oss_bucket") or "").strip()
+    oss_subdir = (fv.get("oss_subdir") or "").strip()
+    if not (fs_id and cpfs_dir and oss_bucket):
+        return {"toast": {"type": "error", "content": "请选 CPFS、填 CPFS 目录、选 OSS 桶"}}
+
+    def _do() -> None:
+        from core.dsw_scheduler import _send_card, _send_text
+        from core.cpfs_dataflow import orchestrator, engine_nas
+        from core.cpfs_dataflow.cards import confirm_card
+        try:
+            df = engine_nas.resolve_dataflow(fs_id, region, oss_bucket=oss_bucket,
+                                             fs_path=cpfs_dir, open_id=open_id)
+            oss_pfx = (df.get("oss_prefix") or "").rstrip("/")
+            sub = oss_subdir.strip("/")
+            oss_full = (f"oss://{oss_bucket}/{oss_pfx}/{sub}/" if sub
+                        else f"oss://{oss_bucket}/{oss_pfx}/")
+            plan = orchestrator.make_plan(operation, cpfs_dir, oss_full, fs_id=fs_id,
+                                          region=region, data_flow_id=df["data_flow_id"])
+            job = orchestrator.create_job_record(plan, open_id=open_id)
+            _send_card(open_id, _cfg_cpfs_chat(), confirm_card(job))
+        except engine_nas.NasDataflowError as e:
+            _send_text(open_id, _cfg_cpfs_chat(), f"❌ {e}")
+        except Exception as e:
+            logger.error("[CPFS] wizard resolve failed", exc_info=True)
+            _send_text(open_id, _cfg_cpfs_chat(), f"❌ 解析失败：{e}")
+
+    threading.Thread(target=_do, daemon=True).start()
+    return {"toast": {"type": "success", "content": "正在定位 DataFlow，稍候推送确认卡"}}
+
+
 def _h_confirm_cpfs_dataflow(action_val, open_id, chat_id, form_value):
     """后台启动预热/沉降任务，完成后推结果卡。"""
     job_id = action_val.get("job_id", "") if isinstance(action_val, dict) else ""
@@ -611,6 +669,8 @@ _ACTION_HANDLERS = {
     "confirm_transfer":   _h_confirm_transfer,
     "retry_transfer":     _h_retry_transfer,
     "submit_cpfs_dataflow":  _h_submit_cpfs_dataflow,
+    "cpfs_wizard":           _h_cpfs_wizard,
+    "resolve_cpfs_wizard":   _h_resolve_cpfs_wizard,
     "confirm_cpfs_dataflow": _h_confirm_cpfs_dataflow,
     "retry_cpfs_dataflow":   _h_retry_cpfs_dataflow,
 }

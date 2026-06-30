@@ -131,6 +131,26 @@ def get_options(refresh_if_empty: bool = True, open_id: str = "") -> list[dict]:
     return []
 
 
+def regions(open_id: str = "") -> list[str]:
+    """有可用 DataFlow 绑定的地区列表（供级联第一步）。"""
+    return sorted({o["region"] for o in get_options(open_id=open_id) if o.get("region")})
+
+
+def filesystems_in(region: str, open_id: str = "") -> list[dict]:
+    """某地区下的 CPFS 文件系统（去重），含 edition。"""
+    seen: dict[str, dict] = {}
+    for o in get_options(open_id=open_id):
+        if o.get("region") == region and o.get("fs_id") and o["fs_id"] not in seen:
+            seen[o["fs_id"]] = {"fs_id": o["fs_id"], "edition": o.get("edition", "")}
+    return list(seen.values())
+
+
+def buckets_in(region: str, open_id: str = "") -> list[str]:
+    """某地区下被 DataFlow 绑定的 OSS 桶（去重）。"""
+    return sorted({o["oss_bucket"] for o in get_options(open_id=open_id)
+                   if o.get("region") == region and o.get("oss_bucket")})
+
+
 def decode_selection(value: str) -> dict:
     """卡片 select 回传的 value(JSON) → dict。非法返回 {}。"""
     try:

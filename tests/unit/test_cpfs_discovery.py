@@ -69,6 +69,18 @@ def test_discover_region_scan(monkeypatch):
     assert {o["region"] for o in opts} == {"cn-hangzhou", "cn-shanghai"}
 
 
+def test_region_fs_bucket_helpers(monkeypatch):
+    opts = [
+        {"region": "cn-hangzhou", "fs_id": "bmcpfs-a", "edition": "computing", "oss_bucket": "bk1"},
+        {"region": "cn-hangzhou", "fs_id": "bmcpfs-a", "edition": "computing", "oss_bucket": "bk2"},
+        {"region": "cn-shanghai", "fs_id": "cpfs-b", "edition": "general", "oss_bucket": "bk3"},
+    ]
+    monkeypatch.setattr(discovery, "get_options", lambda *a, **k: opts)
+    assert discovery.regions() == ["cn-hangzhou", "cn-shanghai"]
+    assert discovery.filesystems_in("cn-hangzhou") == [{"fs_id": "bmcpfs-a", "edition": "computing"}]
+    assert discovery.buckets_in("cn-hangzhou") == ["bk1", "bk2"]
+
+
 def test_get_options_uses_cache(monkeypatch):
     calls = {"n": 0}
     def fake_list(fs, region, **k):
