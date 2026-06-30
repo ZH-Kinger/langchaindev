@@ -1,4 +1,4 @@
-# Core AI / LangChain
+﻿# Core AI / LangChain
 langchain==0.3.0
 langchain-core==0.3.0
 langchain-community==0.3.0
@@ -28,8 +28,12 @@ alibabacloud-ram20150501>=1.0.0
 alibabacloud-ecs20140526>=4.1.0
 oss2>=2.18.0
 aliyun-log-python-sdk>=0.9.0
+# 数据在线迁移服务（跨云 TOS→OSS，hcs_mgw）
+alibabacloud-hcs-mgw20240626>=1.0.0
 # 火山引擎 TOS（对象存储容量盘点）
 tos>=2.6.0
+# 火山引擎 OpenAPI SDK（IAM 子用户 / DMS 迁移）
+volcengine-python-sdk>=4.0.0
 # 容量巡检读 HDF5 数据集内部字段判模态（EgoDex 等）
 h5py>=3.8.0
 

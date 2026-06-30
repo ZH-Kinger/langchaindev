@@ -134,6 +134,78 @@ def get_sls_client(open_id: str = "", region: str = ""):
         return None
 
 
+# ── 数据在线迁移服务（hcs_mgw，跨云 TOS→OSS）─────────────────────────────────
+
+def get_mgw_client(open_id: str = ""):
+    """返回数据在线迁移服务 Client（alibabacloud_hcs_mgw20240626）。
+
+    迁移服务需 mgw:* 写权限，通常用主账号/全局 AK（背景任务无用户上下文）。
+    open_id 非空时仍走 STS，但需保证角色有迁移权限。
+    """
+    cred = _resolve_cred(open_id)
+    if not cred:
+        return None
+    return _build_mgw_client(
+        cred["ak"], cred["sk"], cred["token"],
+        endpoint=settings.MGW_ENDPOINT or "cn-beijing.mgw.aliyuncs.com",
+        region=settings.MGW_REGION or "cn-beijing",
+    )
+
+
+@lru_cache(maxsize=8)
+def _build_mgw_client(ak: str, sk: str, token: str, endpoint: str, region: str):
+    try:
+        from alibabacloud_hcs_mgw20240626.client import Client
+        from alibabacloud_tea_openapi import models as open_api_models
+    except ImportError:
+        logger.error("[ClientFactory] alibabacloud_hcs_mgw20240626 未安装，"
+                     "请 pip install alibabacloud_hcs_mgw20240626")
+        return None
+    cfg = open_api_models.Config(
+        access_key_id=ak,
+        access_key_secret=sk,
+        security_token=token or None,
+        region_id=region,
+        endpoint=endpoint,
+    )
+    return Client(cfg)
+
+
+# ── NAS DataFlow（CPFS 预热/沉降，RPC 通用 OpenAPI）──────────────────────────
+
+def get_nas_openapi_client(open_id: str = "", region: str = ""):
+    """返回调用 NAS(2017-06-26) RPC 接口的通用 OpenAPI Client。
+
+    NAS DataFlow 没有现成的 alibabacloud_nas SDK 装在本项目里，改用通用
+    alibabacloud-tea-openapi 的 call_api（同 core.ram_approval._make_ims_client 范式），
+    免新增依赖、部署免 rebuild。CreateDataFlowTask 等需 nas:* 写权限，默认走全局 AK。
+    """
+    region = region or settings.CPFS_REGION or "cn-hangzhou"
+    cred = _resolve_cred(open_id)
+    if not cred:
+        return None
+    return _build_nas_openapi_client(
+        cred["ak"], cred["sk"], cred["token"], f"nas.{region}.aliyuncs.com",
+    )
+
+
+@lru_cache(maxsize=8)
+def _build_nas_openapi_client(ak: str, sk: str, token: str, endpoint: str):
+    try:
+        from alibabacloud_tea_openapi.client import Client as OpenApiClient
+        from alibabacloud_tea_openapi import models as open_api_models
+    except ImportError:
+        logger.error("[ClientFactory] alibabacloud-tea-openapi 未安装")
+        return None
+    cfg = open_api_models.Config(
+        access_key_id=ak,
+        access_key_secret=sk,
+        security_token=token or None,
+        endpoint=endpoint,
+    )
+    return OpenApiClient(cfg)
+
+
 # ── 凭证统一解析 ─────────────────────────────────────────────────────────────
 
 def _resolve_cred(open_id: str) -> Optional[dict]:

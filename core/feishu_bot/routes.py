@@ -1,4 +1,4 @@
-"""Flask Webhook 路由：/feishu/event、/feishu/card_action、/health + run() 入口。"""
+﻿"""Flask Webhook 路由：/feishu/event、/feishu/card_action、/health + run() 入口。"""
 import json
 import re
 import threading
@@ -7,6 +7,7 @@ import time
 from flask import Flask, request, jsonify
 
 from config.settings import settings
+from core import ram_approval
 from utils.logger import get_logger, set_trace_id, register_error_callback
 
 logger = get_logger(__name__)
@@ -28,8 +29,19 @@ def feishu_event():
     header = data.get("header", {})
 
     # ② 可选：验证 token（在飞书后台 → 事件订阅 → Verification Token 里找）
+    #   token 位置随事件格式而异：schema 2.0 在 header.token；旧版 v1（如 leave_approval
+    #   等审批事件、challenge）在顶层 data["token"]。两处都取，否则旧版审批回调（无 header）
+    #   会因取不到 token 被 403 误杀。
     verification_token = settings.FEISHU_VERIFICATION_TOKEN
-    if verification_token and header.get("token") != verification_token:
+    request_token = header.get("token") or data.get("token")
+    if verification_token and request_token != verification_token:
+        logger.warning(
+            "[feishu_event] invalid token type=%s approval_code=%s instance=%s has_token=%s",
+            header.get("event_type") or data.get("type") or "-",
+            ram_approval.event_log_summary(data).get("approval_code") or "-",
+            ram_approval.event_log_summary(data).get("instance_code") or "-",
+            bool(request_token),
+        )
         return jsonify({"code": 1, "msg": "invalid token"}), 403
 
     # ③ 去重
@@ -45,6 +57,27 @@ def feishu_event():
     logger.debug("[事件] event_type=%r", event_type)
     if event_type == "card.action.trigger":
         return jsonify(actions._handle_card_trigger_sync(data))
+
+    approval_summary = ram_approval.event_log_summary(data)
+    is_approval_like = "approval" in (approval_summary.get("event_type") or "").lower() or bool(approval_summary.get("approval_code"))
+    should_handle_approval = ram_approval.should_handle_event(data)
+    if is_approval_like:
+        logger.info(
+            "[approval_event] received type=%s approval_code=%s instance=%s status=%s matched=%s target=%s",
+            approval_summary.get("event_type") or "-",
+            approval_summary.get("approval_code") or "-",
+            approval_summary.get("instance_code") or "-",
+            approval_summary.get("status") or "-",
+            should_handle_approval,
+            settings.FEISHU_RAM_APPROVAL_CODE or "-",
+        )
+    if should_handle_approval:
+        threading.Thread(
+            target=ram_approval.handle_approval_event,
+            args=(data,),
+            daemon=True,
+        ).start()
+        return jsonify({"code": 0})
 
     # ⑤ 只处理文本消息
     event      = data.get("event", {})
@@ -116,7 +149,9 @@ def feishu_card_action():
     action_name = action_val.get("action", "") if isinstance(action_val, dict) else ""
     if not action_name and form_value:
         # 根据表单字段区分注册卡片和 GPU 申请卡片
-        if "ak_id" in form_value or "ak_secret" in form_value:
+        if any(k in form_value for k in ("login_name", "user_name", "q")):
+            action_name = "submit_ram_query"
+        elif "ak_id" in form_value or "ak_secret" in form_value:
             action_name = "submit_ak_register"
         else:
             action_name = "submit_gpu_request"
@@ -124,6 +159,46 @@ def feishu_card_action():
 
     return jsonify(actions._process_action(action_name, action_val, open_id, chat_id, form_value=form_value))
 
+
+
+
+def _ram_api_authorized() -> bool:
+    expected = getattr(settings, "RAM_QUERY_API_TOKEN", "") or getattr(settings, "FEISHU_VERIFICATION_TOKEN", "")
+    if not expected:
+        return False
+    auth = request.headers.get("Authorization", "")
+    bearer = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    supplied = request.headers.get("X-API-Token", "") or bearer or request.args.get("token", "")
+    return supplied == expected
+
+
+@app.route("/api/ram/user", methods=["GET", "POST"])
+def api_ram_user():
+    """Read-only RAM account query. Never returns password or AccessKey Secret."""
+    if not _ram_api_authorized():
+        return jsonify({"ok": False, "error": "unauthorized"}), 403
+
+    body = request.get_json(silent=True) or {}
+    login_name = (
+        request.args.get("login_name")
+        or request.args.get("user_name")
+        or request.args.get("q")
+        or body.get("login_name")
+        or body.get("user_name")
+        or body.get("q")
+        or ""
+    )
+    if not str(login_name).strip():
+        return jsonify({"ok": False, "error": "missing login_name"}), 400
+
+    from core.ram_query import RamQueryError, RamUserNotFound, query_ram_account
+    try:
+        user = query_ram_account(str(login_name))
+        return jsonify({"ok": True, "exists": True, "user": user})
+    except RamUserNotFound:
+        return jsonify({"ok": True, "exists": False, "user": None}), 404
+    except RamQueryError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
 
 @app.route("/health", methods=["GET"])
 def health():

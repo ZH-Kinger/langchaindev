@@ -1,4 +1,4 @@
-"""卡片按钮动作处理（card.action.trigger / card_action 共用）。
+﻿"""卡片按钮动作处理（card.action.trigger / card_action 共用）。
 
 _ACTION_HANDLERS 注册表：action 名 → handler(action_val, open_id, chat_id, form_value)。
 同步路径须 <3s 内返回（飞书回调超时限制）：耗时操作（Jira / DSW API）一律放后台线程，
@@ -365,6 +365,235 @@ def _h_approve_oss_perm_selected(action_val, open_id, chat_id, form_value):
                       "content": f"已开始下发（{level_cn} · {len(sel)} 人），完成后推送结果到群"}}
 
 
+# RAM account query: open form / submit form
+
+def _h_open_ram_query(action_val, open_id, chat_id, form_value):
+    from core.ram_query_cards import query_entry_card
+    return {
+        "toast": {"type": "info", "content": "\u8bf7\u5148\u586b\u5199\u8d26\u53f7\u57fa\u672c\u4fe1\u606f"},
+        "card": {"type": "raw", "data": query_entry_card()},
+    }
+
+
+def _h_submit_ram_query(action_val, open_id, chat_id, form_value):
+    fv = form_value or {}
+    login_name = (fv.get("login_name") or fv.get("user_name") or fv.get("q") or "").strip()
+    requested = {
+        "login_name": login_name,
+        "display_name": (fv.get("display_name") or "").strip(),
+        "email": (fv.get("email") or "").strip(),
+        "mobile": (fv.get("mobile") or "").strip(),
+        "reason": (fv.get("reason") or "").strip(),
+    }
+    if not login_name:
+        return {"toast": {"type": "error", "content": "\u8bf7\u586b\u5199\u767b\u5f55\u540d\u79f0"}}
+
+    from core.ram_query import RamQueryError, RamUserNotFound, query_ram_account
+    from core.ram_query_cards import query_error_card, query_result_card
+    try:
+        user = query_ram_account(login_name)
+        return {
+            "toast": {"type": "success", "content": "\u67e5\u8be2\u5b8c\u6210"},
+            "card": {"type": "raw", "data": query_result_card(user, requested=requested)},
+        }
+    except RamUserNotFound:
+        return {
+            "toast": {"type": "info", "content": "\u672a\u627e\u5230\u8d26\u53f7"},
+            "card": {"type": "raw", "data": query_result_card(None, requested=requested)},
+        }
+    except RamQueryError as exc:
+        return {
+            "toast": {"type": "error", "content": "\u67e5\u8be2\u5931\u8d25"},
+            "card": {"type": "raw", "data": query_error_card(login_name, str(exc))},
+        }
+# Transfer: entry / confirm / retry
+
+def _h_submit_transfer(action_val, open_id, chat_id, form_value):
+    """Read source/dest/policy, then parse, estimate, and push confirm card."""
+    fv = form_value or {}
+    source = (fv.get("source") or "").strip()
+    dest = (fv.get("dest") or "").strip()
+    same_name_policy = fv.get("same_name_policy") or fv.get("overwrite_policy") or "skip"
+    if not source:
+        return {"toast": {"type": "error", "content": "\u8bf7\u586b\u5199\u6e90\u5730\u5740"}}
+
+    def _do_prepare() -> None:
+        from core.dsw_scheduler import _send_card, _send_text
+        from core.transfer import orchestrator
+        from core.transfer.cards import confirm_card
+        from core.transfer.paths import PathError
+        try:
+            plan = orchestrator.make_plan(source, dest)
+            if plan.engine not in ("mgw", "tos_mig"):
+                _send_text(open_id, _cfg_chat(),
+                           f"\u26a0\ufe0f \u65b9\u5411 {plan.direction} \u6682\u672a\u652f\u6301\uff08\u4e09\u671f\u6c89\u964d\u6bb5\uff09\u3002")
+                return
+            bytes_total, objects_total = orchestrator.estimate_source(plan)
+            job = orchestrator.create_job_record(
+                plan, open_id=open_id, same_name_policy=same_name_policy,
+                bytes_total=bytes_total, objects_total=objects_total)
+            need_appr = orchestrator.needs_approval(bytes_total)
+            _send_card(open_id, _cfg_chat(), confirm_card(job, need_approval=need_appr))
+        except PathError as e:
+            _send_text(open_id, _cfg_chat(), f"\u274c \u8def\u5f84\u9519\u8bef\uff1a{e}")
+        except Exception as e:
+            logger.error("[Transfer] prepare failed", exc_info=True)
+            _send_text(open_id, _cfg_chat(), f"\u274c \u8fc1\u79fb\u8bf7\u6c42\u5904\u7406\u5931\u8d25\uff1a{e}")
+
+    threading.Thread(target=_do_prepare, daemon=True).start()
+    return {"toast": {"type": "success", "content": "\u6b63\u5728\u89e3\u6790\u5730\u5740\u5e76\u9884\u4f30\uff0c\u7a0d\u5019\u63a8\u9001\u786e\u8ba4\u5361"}}
+
+
+def _h_confirm_transfer(action_val, open_id, chat_id, form_value):
+    """Start the transfer in background using the selected same-name policy."""
+    job_id = action_val.get("job_id", "") if isinstance(action_val, dict) else ""
+    if not job_id:
+        return {"toast": {"type": "error", "content": "\u7f3a\u5c11\u4efb\u52a1 ID"}}
+
+    from core.transfer import orchestrator
+    job = orchestrator.get_job(job_id)
+    if not job:
+        return {"toast": {"type": "error", "content": "\u4efb\u52a1\u4e0d\u5b58\u5728\u6216\u5df2\u8fc7\u671f"}}
+    if job["stage"] not in (orchestrator.STAGE_NEW, orchestrator.STAGE_FAILED):
+        return {"toast": {"type": "info", "content": f"\u4efb\u52a1\u5df2\u5728 {job['stage']}\uff0c\u65e0\u9700\u91cd\u590d"}}
+
+    fv = form_value or {}
+    same_name_policy = (
+        fv.get("same_name_policy")
+        or (action_val.get("same_name_policy") if isinstance(action_val, dict) else "")
+        or job.get("same_name_policy")
+        or job.get("overwrite_mode")
+    )
+    job = orchestrator.set_same_name_policy(job, same_name_policy)
+
+    if orchestrator.needs_approval(job.get("bytes_total", 0)) and open_id != settings.ADMIN_FEISHU_OPEN_ID:
+        return {"toast": {"type": "error", "content": "\u8d85\u8fc7\u5ba1\u6279\u9608\u503c\uff0c\u4ec5\u7ba1\u7406\u5458\u53ef\u786e\u8ba4\u4e0b\u53d1"}}
+
+    def _do_transfer() -> None:
+        from core.dsw_scheduler import _send_card, _send_text
+        from core.transfer.cards import result_card, progress_card
+        try:
+            def _on_update(j):
+                if j["stage"] in (orchestrator.STAGE_DONE, orchestrator.STAGE_FAILED):
+                    _send_card("", _cfg_chat(), result_card(j))
+                else:
+                    _send_card("", _cfg_chat(), progress_card(j))
+            orchestrator.run_to_completion(job, on_update=_on_update)
+        except Exception as e:
+            logger.error("[Transfer] execute failed job=%s", job_id, exc_info=True)
+            _send_text("", _cfg_chat(), f"\u274c \u8fc1\u79fb\u4efb\u52a1 {job_id} \u5931\u8d25\uff1a{e}")
+
+    threading.Thread(target=_do_transfer, daemon=True).start()
+    return {"toast": {"type": "success", "content": "\u5df2\u5f00\u59cb\u8fc1\u79fb\uff0c\u5b8c\u6210\u540e\u63a8\u9001\u7ed3\u679c"}}
+
+
+def _h_retry_transfer(action_val, open_id, chat_id, form_value):
+    """Retry a failed transfer with the same confirmation flow."""
+    job_id = action_val.get("job_id", "") if isinstance(action_val, dict) else ""
+    from core.transfer import orchestrator
+    job = orchestrator.get_job(job_id) if job_id else None
+    if not job:
+        return {"toast": {"type": "error", "content": "\u4efb\u52a1\u4e0d\u5b58\u5728\u6216\u5df2\u8fc7\u671f"}}
+    job["stage"] = orchestrator.STAGE_NEW
+    job["error"] = ""
+    return _h_confirm_transfer({"job_id": job_id}, open_id, chat_id, form_value)
+
+
+def _cfg_chat() -> str:
+    return settings.TRANSFER_CHAT_ID or settings.FEISHU_CHAT_ID
+
+
+# CPFS 预热/沉降：录入 / 确认 / 重试
+
+def _cfg_cpfs_chat() -> str:
+    return settings.CPFS_CHAT_ID or settings.FEISHU_CHAT_ID
+
+
+def _h_submit_cpfs_dataflow(action_val, open_id, chat_id, form_value):
+    """读取 operation + 绑定选择/子目录（或手填 cpfs_path/oss），解析后推确认卡。"""
+    fv = form_value or {}
+    operation = (fv.get("operation") or "sink").strip()
+    target = (fv.get("target") or "").strip()      # 选择的 CPFS↔OSS 绑定（JSON）
+    subdir = (fv.get("subdir") or "").strip()
+    cpfs_path = (fv.get("cpfs_path") or "").strip()
+    oss = (fv.get("oss") or "").strip()
+    region = (fv.get("region") or "").strip()
+    if not target and not cpfs_path:
+        return {"toast": {"type": "error", "content": "请选择绑定或填写 CPFS 目录"}}
+
+    def _do_prepare() -> None:
+        from core.dsw_scheduler import _send_card, _send_text
+        from core.cpfs_dataflow import orchestrator, discovery
+        from core.cpfs_dataflow.cards import confirm_card
+        from core.cpfs_dataflow.orchestrator import DataflowPathError
+        try:
+            if target:
+                sel = discovery.decode_selection(target)
+                sub = subdir.strip().strip("/")
+                fs_path = (sel.get("fs_path") or "/").rstrip("/")
+                oss_pfx = (sel.get("oss_prefix") or "").rstrip("/")
+                cpfs_dir = f"{fs_path}/{sub}/" if sub else f"{fs_path}/"
+                oss_full = (f"oss://{sel.get('oss_bucket','')}/{oss_pfx}/{sub}/" if sub
+                            else f"oss://{sel.get('oss_bucket','')}/{oss_pfx}/")
+                plan = orchestrator.make_plan(
+                    operation, cpfs_dir, oss_full,
+                    fs_id=sel.get("fs_id", ""), region=sel.get("region", ""),
+                    data_flow_id=sel.get("data_flow_id", ""))
+            else:
+                plan = orchestrator.make_plan(operation, cpfs_path, oss, region=region)
+            job = orchestrator.create_job_record(plan, open_id=open_id)
+            _send_card(open_id, _cfg_cpfs_chat(), confirm_card(job))
+        except DataflowPathError as e:
+            _send_text(open_id, _cfg_cpfs_chat(), f"❌ 路径错误：{e}")
+        except Exception as e:
+            logger.error("[CPFS] prepare failed", exc_info=True)
+            _send_text(open_id, _cfg_cpfs_chat(), f"❌ 请求处理失败：{e}")
+
+    threading.Thread(target=_do_prepare, daemon=True).start()
+    return {"toast": {"type": "success", "content": "正在解析，稍候推送确认卡"}}
+
+
+def _h_confirm_cpfs_dataflow(action_val, open_id, chat_id, form_value):
+    """后台启动预热/沉降任务，完成后推结果卡。"""
+    job_id = action_val.get("job_id", "") if isinstance(action_val, dict) else ""
+    if not job_id:
+        return {"toast": {"type": "error", "content": "缺少任务 ID"}}
+    from core.cpfs_dataflow import orchestrator
+    job = orchestrator.get_job(job_id)
+    if not job:
+        return {"toast": {"type": "error", "content": "任务不存在或已过期"}}
+    if job["stage"] not in (orchestrator.STAGE_NEW, orchestrator.STAGE_FAILED):
+        return {"toast": {"type": "info", "content": f"任务已在 {job['stage']}，无需重复"}}
+
+    def _do_run() -> None:
+        from core.dsw_scheduler import _send_card, _send_text
+        from core.cpfs_dataflow.cards import result_card, progress_card
+        try:
+            def _on_update(j):
+                if j["stage"] in (orchestrator.STAGE_DONE, orchestrator.STAGE_FAILED):
+                    _send_card("", _cfg_cpfs_chat(), result_card(j))
+                else:
+                    _send_card("", _cfg_cpfs_chat(), progress_card(j))
+            orchestrator.run_to_completion(job, on_update=_on_update)
+        except Exception as e:
+            logger.error("[CPFS] execute failed job=%s", job_id, exc_info=True)
+            _send_text("", _cfg_cpfs_chat(), f"❌ 任务 {job_id} 失败：{e}")
+
+    threading.Thread(target=_do_run, daemon=True).start()
+    return {"toast": {"type": "success", "content": "已下发，完成后推送结果"}}
+
+
+def _h_retry_cpfs_dataflow(action_val, open_id, chat_id, form_value):
+    job_id = action_val.get("job_id", "") if isinstance(action_val, dict) else ""
+    from core.cpfs_dataflow import orchestrator
+    job = orchestrator.get_job(job_id) if job_id else None
+    if not job:
+        return {"toast": {"type": "error", "content": "任务不存在或已过期"}}
+    job["stage"] = orchestrator.STAGE_NEW
+    job["error"] = ""
+    return _h_confirm_cpfs_dataflow({"job_id": job_id}, open_id, chat_id, form_value)
+
+
 _ACTION_HANDLERS = {
     "mfu_region":         _h_mfu_region,
     "submit_ak_register": _h_submit_ak_register,
@@ -376,6 +605,14 @@ _ACTION_HANDLERS = {
     "reject_gpu":         _h_reject_gpu,
     "approve_oss_perm":          _h_approve_oss_perm,
     "approve_oss_perm_selected": _h_approve_oss_perm_selected,
+    "open_ram_query":    _h_open_ram_query,
+    "submit_ram_query":  _h_submit_ram_query,
+    "submit_transfer":    _h_submit_transfer,
+    "confirm_transfer":   _h_confirm_transfer,
+    "retry_transfer":     _h_retry_transfer,
+    "submit_cpfs_dataflow":  _h_submit_cpfs_dataflow,
+    "confirm_cpfs_dataflow": _h_confirm_cpfs_dataflow,
+    "retry_cpfs_dataflow":   _h_retry_cpfs_dataflow,
 }
 
 
@@ -399,7 +636,9 @@ def _handle_card_trigger_sync(data: dict) -> dict:
     action_name = action_val.get("action", "") if isinstance(action_val, dict) else ""
     if not action_name and form_value:
         # 兼容旧 AK 表单（ak_id/ak_secret）和新 RAM 绑定表单（ram_user_name/user_name）
-        if any(k in form_value for k in ("ak_id", "ak_secret", "ram_user_name")):
+        if any(k in form_value for k in ("login_name", "user_name", "q")):
+            action_name = "submit_ram_query"
+        elif any(k in form_value for k in ("ak_id", "ak_secret", "ram_user_name")):
             action_name = "submit_ak_register"
         else:
             action_name = "submit_gpu_request"

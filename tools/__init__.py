@@ -13,6 +13,8 @@ from .aliyun import (
     cluster_mfu_report_tool,
 )
 from .volcano import tos_tool
+from .transfer import transfer_tool
+from .cpfs import cpfs_dataflow_tool
 from .feishu import feishu_tool
 from .jira import jira_tool, jira_workflow_tool
 from .github import github_workflow_tool
@@ -39,6 +41,10 @@ ALL_TOOLS = [
     cluster_mfu_report_tool,
     # ── 火山引擎 ─────────────────────────────────────────────
     tos_tool,
+    # ── 跨云迁移 ─────────────────────────────────────────────
+    transfer_tool,
+    # ── CPFS 预热/沉降 ───────────────────────────────────────
+    cpfs_dataflow_tool,
     # ── 飞书 / Jira / GitHub ─────────────────────────────────
     feishu_tool,
     jira_tool,
@@ -70,6 +76,8 @@ TOOL_GROUPS = {
     "oss":       {"manage_oss"},
     "sls":       {"manage_sls"},
     "tos":       {"manage_tos"},
+    "transfer":  {"manage_transfer"},
+    "cpfs":      {"manage_cpfs_dataflow"},
 }
 
 # 启动时校验 TOOL_GROUPS 中的名字与 ALL_TOOLS 一致，防止静默路由失效

@@ -25,6 +25,8 @@ class Config:
     PROMETHEUS_URL           = os.environ.get("PROMETHEUS_URL", "")
     ALIYUN_ACCESS_KEY_ID     = os.environ.get("ALIYUN_ACCESS_KEY_ID", "")
     ALIYUN_ACCESS_KEY_SECRET = os.environ.get("ALIYUN_ACCESS_KEY_SECRET", "")
+    ALIYUN_RAM_LOGIN_DOMAIN   = os.environ.get("ALIYUN_RAM_LOGIN_DOMAIN", "")
+    RAM_QUERY_API_TOKEN       = os.environ.get("RAM_QUERY_API_TOKEN", "")
 
     # 飞书企业自建应用
     FEISHU_APP_ID             = os.environ.get("FEISHU_APP_ID", "")
@@ -34,6 +36,52 @@ class Config:
     # GPU 申请表单卡片模板 ID（飞书卡片构建器发布后获取，留空则降级为 action buttons 卡片）
     FEISHU_GPU_CARD_TEMPLATE_ID    = os.environ.get("FEISHU_GPU_CARD_TEMPLATE_ID", "")
     FEISHU_AK_REGISTER_TEMPLATE_ID = os.environ.get("FEISHU_AK_REGISTER_TEMPLATE_ID", "")
+
+
+    # Feishu approval app: RAM sub-account creation
+    FEISHU_RAM_APPROVAL_CODE = os.environ.get(
+        "FEISHU_RAM_APPROVAL_CODE",
+        "09F25B71-E1FF-434F-842F-7F2A09F35FAB",
+    )
+    FEISHU_RAM_APPROVAL_RESULT_CHAT_ID = os.environ.get("FEISHU_RAM_APPROVAL_RESULT_CHAT_ID", "")
+    FEISHU_RAM_APPROVAL_DRY_RUN = os.environ.get("FEISHU_RAM_APPROVAL_DRY_RUN", "false").lower() == "true"
+    FEISHU_RAM_APPROVAL_ALLOWED_GROUPS_RAW = os.environ.get(
+        "FEISHU_RAM_APPROVAL_ALLOWED_GROUPS",
+        "wuji_Algorithm,wuji_Examination",
+    )
+    FEISHU_RAM_APPROVAL_FIELD_LOGIN_NAME = os.environ.get("FEISHU_RAM_APPROVAL_FIELD_LOGIN_NAME", "")
+    FEISHU_RAM_APPROVAL_FIELD_DISPLAY_NAME = os.environ.get("FEISHU_RAM_APPROVAL_FIELD_DISPLAY_NAME", "")
+    FEISHU_RAM_APPROVAL_FIELD_EMAIL = os.environ.get("FEISHU_RAM_APPROVAL_FIELD_EMAIL", "")
+    FEISHU_RAM_APPROVAL_FIELD_MOBILE = os.environ.get("FEISHU_RAM_APPROVAL_FIELD_MOBILE", "")
+    FEISHU_RAM_APPROVAL_FIELD_PASSWORD = os.environ.get("FEISHU_RAM_APPROVAL_FIELD_PASSWORD", "")
+    FEISHU_RAM_APPROVAL_FIELD_CONFIRM_PASSWORD = os.environ.get("FEISHU_RAM_APPROVAL_FIELD_CONFIRM_PASSWORD", "")
+    FEISHU_RAM_APPROVAL_FIELD_GROUPS = os.environ.get("FEISHU_RAM_APPROVAL_FIELD_GROUPS", "")
+    FEISHU_RAM_APPROVAL_FIELD_ALIYUN_GROUPS = os.environ.get("FEISHU_RAM_APPROVAL_FIELD_ALIYUN_GROUPS", "")
+    FEISHU_RAM_APPROVAL_FIELD_VOLCANO_GROUPS = os.environ.get("FEISHU_RAM_APPROVAL_FIELD_VOLCANO_GROUPS", "")
+    FEISHU_RAM_APPROVAL_FIELD_PLATFORMS = os.environ.get("FEISHU_RAM_APPROVAL_FIELD_PLATFORMS", "")
+    FEISHU_RAM_APPROVAL_FIELD_CONSOLE_ACCESS = os.environ.get("FEISHU_RAM_APPROVAL_FIELD_CONSOLE_ACCESS", "")
+    FEISHU_RAM_APPROVAL_FIELD_ACCESS_KEY = os.environ.get("FEISHU_RAM_APPROVAL_FIELD_ACCESS_KEY", "")
+    # Defaults are off when fields are absent or empty.
+    FEISHU_RAM_APPROVAL_FIELD_PASSWORD_RESET = os.environ.get("FEISHU_RAM_APPROVAL_FIELD_PASSWORD_RESET", "")
+    FEISHU_RAM_APPROVAL_FIELD_MFA_REQUIRED = os.environ.get("FEISHU_RAM_APPROVAL_FIELD_MFA_REQUIRED", "")
+    FEISHU_RAM_APPROVAL_FIELD_REASON = os.environ.get("FEISHU_RAM_APPROVAL_FIELD_REASON", "")
+    FEISHU_RAM_APPROVAL_FIELD_COMMENTS = os.environ.get("FEISHU_RAM_APPROVAL_FIELD_COMMENTS", "")
+    # Delivery mode for generated RAM account secrets. approval_comment writes back to the approval instance.
+    FEISHU_RAM_APPROVAL_DELIVERY = os.environ.get("FEISHU_RAM_APPROVAL_DELIVERY", "approval_comment")
+    FEISHU_RAM_APPROVAL_COMMENT_USER_ID = os.environ.get("FEISHU_RAM_APPROVAL_COMMENT_USER_ID", "")
+    FEISHU_RAM_APPROVAL_COMMENT_USER_ID_TYPE = os.environ.get("FEISHU_RAM_APPROVAL_COMMENT_USER_ID_TYPE", "open_id")
+
+    # SMTP account delivery. Required when FEISHU_RAM_APPROVAL_DELIVERY=email and console/AK secrets are created.
+    SMTP_HOST = os.environ.get("SMTP_HOST", "")
+    SMTP_PORT = int(os.environ.get("SMTP_PORT", "465" if os.environ.get("SMTP_USE_SSL", "true").lower() == "true" else "587"))
+    SMTP_USERNAME = os.environ.get("SMTP_USERNAME", "")
+    SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
+    SMTP_FROM = os.environ.get("SMTP_FROM", "")
+    SMTP_REPLY_TO = os.environ.get("SMTP_REPLY_TO", "")
+    SMTP_USE_SSL = os.environ.get("SMTP_USE_SSL", "true").lower() == "true"
+    SMTP_USE_TLS = os.environ.get("SMTP_USE_TLS", "true").lower() == "true"
+    SMTP_AUTH_REQUIRED = os.environ.get("SMTP_AUTH_REQUIRED", "true").lower() == "true"
+    SMTP_TIMEOUT_SECONDS = int(os.environ.get("SMTP_TIMEOUT_SECONDS", "20"))
 
     # 阿里云 PAI DSW（Python SDK，无需 Node.js）
     PAI_DSW_ACCESS_KEY_ID     = os.environ.get("PAI_DSW_ACCESS_KEY_ID", "")
@@ -122,6 +170,64 @@ class Config:
     TOS_SECRET_KEY = os.environ.get("TOS_SECRET_KEY", "")
     TOS_ENDPOINT   = os.environ.get("TOS_ENDPOINT", "tos-cn-shanghai.volces.com")
     TOS_REGION     = os.environ.get("TOS_REGION", "cn-shanghai")
+    VOLCANO_ACCESS_KEY = os.environ.get("VOLCANO_ACCESS_KEY", "")
+    VOLCANO_SECRET_KEY = os.environ.get("VOLCANO_SECRET_KEY", "")
+    VOLCANO_REGION = os.environ.get("VOLCANO_REGION", "cn-beijing")
+    VOLCANO_IAM_REGION = os.environ.get("VOLCANO_IAM_REGION", os.environ.get("VOLCANO_REGION", "cn-beijing"))
+    VOLCANO_IAM_LOGIN_URL = os.environ.get("VOLCANO_IAM_LOGIN_URL", "https://console.volcengine.com/auth/login/")
+    FEISHU_VOLCANO_IAM_ALLOWED_GROUPS_RAW = os.environ.get("FEISHU_VOLCANO_IAM_ALLOWED_GROUPS", "")
+
+    # 跨云数据迁移（一期 TOS→OSS：阿里在线迁移服务 hcs_mgw）
+    # 目的端拉取：进 OSS 用阿里在线迁移；源火山 TOS 用 access_id/secret 接入，目的 OSS 用 RAM role。
+    TRANSFER_ENABLED        = os.environ.get("TRANSFER_ENABLED", "false").lower() == "true"
+    MGW_ENDPOINT            = os.environ.get("MGW_ENDPOINT", "cn-beijing.mgw.aliyuncs.com")
+    MGW_REGION              = os.environ.get("MGW_REGION", "cn-beijing")
+    MGW_USER_ID             = os.environ.get("MGW_USER_ID", "")          # 在线迁移服务 userid（主账号 UID）
+    # 目的 OSS：数据地址用 RAM 角色名（控制台「角色配置」后获得，形如 oss-import-<ts>-<bucket>）
+    TRANSFER_OSS_ROLE       = os.environ.get("TRANSFER_OSS_ROLE", "")
+    TRANSFER_OSS_REGION     = os.environ.get("TRANSFER_OSS_REGION", "cn-hangzhou")   # 目的 OSS region
+    # 目的 OSS 走内网域名（迁移服务与 OSS 同区，免流量费）；wuji_il 即用内网
+    TRANSFER_OSS_INTERNAL   = os.environ.get("TRANSFER_OSS_INTERNAL", "true").lower() == "true"
+    # 源火山 TOS：迁移源区域 + 凭证（与容量巡检 TOS_* 解耦，可独立轮换）。留空回退 TOS_*。
+    TRANSFER_TOS_REGION     = os.environ.get("TRANSFER_TOS_REGION", "")   # 如 cn-shanghai；留空用 TOS_REGION
+    TRANSFER_TOS_ACCESS_KEY = os.environ.get("TRANSFER_TOS_ACCESS_KEY", "")  # 留空用 TOS_ACCESS_KEY
+    TRANSFER_TOS_SECRET_KEY = os.environ.get("TRANSFER_TOS_SECRET_KEY", "")  # 留空用 TOS_SECRET_KEY
+    # 迁移行为：真机探测服务端只接受 overwrite_mode=always；"跳过同名"靠 transfer_mode。
+    # lastmodified+always = 增量，同名未变化跳过（安全默认，= 不覆盖）；all+always = 全量覆盖。
+    TRANSFER_MODE_DEFAULT   = os.environ.get("TRANSFER_MODE_DEFAULT", "lastmodified")
+    TRANSFER_OVERWRITE_DEFAULT = os.environ.get("TRANSFER_OVERWRITE_DEFAULT", "always")
+    # 超过此 TB 阈值需管理员（ADMIN_FEISHU_OPEN_ID）审批
+    TRANSFER_APPROVAL_TB    = float(os.environ.get("TRANSFER_APPROVAL_TB", "1"))
+    TRANSFER_CHAT_ID        = os.environ.get("TRANSFER_CHAT_ID", "")     # 留空回退 FEISHU_CHAT_ID
+    # 源桶 → 目的桶映射（JSON）。键 '<scheme>://<bucket>'，值目的桶名。缺省给出可编辑示例。
+    TRANSFER_BUCKET_MAP_RAW = os.environ.get(
+        "TRANSFER_BUCKET_MAP",
+        '{"tos://wuji-egocentric-data":"wuji-bucket-hangzhou",'
+        '"oss://wuji-bucket-hangzhou":"wuji-egocentric-data"}',
+    )
+
+    # CPFS/NAS 数据预热(Import OSS→CPFS) + 沉降(Export CPFS→OSS)：阿里 NAS DataFlow
+    # 只查现有 DataFlow + 提交任务，不创建/删除绑定。凭证默认走全局主账号 AK（同 MGW）。
+    CPFS_DATAFLOW_ENABLED   = os.environ.get("CPFS_DATAFLOW_ENABLED", "false").lower() == "true"
+    CPFS_REGION             = os.environ.get("CPFS_REGION", "cn-hangzhou")    # CPFS 与 OSS 必须同地域
+    CPFS_FILE_SYSTEM_ID     = os.environ.get("CPFS_FILE_SYSTEM_ID", "")       # cpfs-*=通用版 / bmcpfs-*=智算版
+    # 多地域多文件系统：发现映射表的来源。逗号分隔 'fs_id@region'，region 缺省取 CPFS_REGION。
+    # 例：bmcpfs-xxx@cn-hangzhou,cpfs-yyy@cn-shanghai。对每个 fs 调 DescribeDataFlows 读出 OSS 绑定。
+    CPFS_FILE_SYSTEM_IDS    = os.environ.get("CPFS_FILE_SYSTEM_IDS", "")
+    # 多地域扫描：CPFS_FILE_SYSTEM_IDS 留空时，按这些地域 DescribeFileSystems 自动枚举 CPFS。
+    # 需 nas 读权限（AliyunNASFullAccess）。逗号分隔。
+    CPFS_REGIONS            = os.environ.get("CPFS_REGIONS", "cn-hangzhou,cn-shanghai,cn-beijing,cn-shenzhen,cn-wulanchabu")
+    CPFS_MAP_TTL_SECONDS    = int(os.environ.get("CPFS_MAP_TTL_SECONDS", str(6 * 3600)))
+    # 本地挂载前缀：用户给完整路径 /cpfs/cwr/.../ 时去掉它 → DataFlow 文件系统路径 /cwr/.../
+    CPFS_MOUNT_PREFIX       = os.environ.get("CPFS_MOUNT_PREFIX", "/cpfs")
+    # 同名冲突策略（智算版任务必填）：SKIP_THE_FILE / KEEP_LATEST / OVERWRITE_EXISTING
+    CPFS_CONFLICT_POLICY_DEFAULT = os.environ.get("CPFS_CONFLICT_POLICY_DEFAULT", "SKIP_THE_FILE")
+    # 显式覆盖 DataFlow 解析（JSON）：键 'oss://<bucket>' 或 cpfs FileSystemPath，值 DataFlowId。
+    # 留空则用 DescribeDataFlows 按 OSS bucket / FileSystemPath 自动匹配。
+    CPFS_DATAFLOW_MAP_RAW   = os.environ.get("CPFS_DATAFLOW_MAP", "{}")
+    # 超过此 GB 阈值需管理员审批（预热/沉降）
+    CPFS_APPROVAL_GB        = float(os.environ.get("CPFS_APPROVAL_GB", "500"))
+    CPFS_CHAT_ID            = os.environ.get("CPFS_CHAT_ID", "")              # 留空回退 FEISHU_CHAT_ID
 
     # 容量巡检（OSS + TOS 目录大小定时盘点 → 飞书主动推送）
     # 默认关闭，opt-in；TARGETS 为 JSON 数组，每项 {vendor,bucket,prefix[,region]}
@@ -179,6 +285,8 @@ class Config:
         ("REDIS_HOST",             "会话记忆 / 配额管理不可用（降级到内存）"),
         ("ADMIN_FEISHU_OPEN_ID",   "大规格申请审批流不可用（将自动批准）"),
         ("TOS_ACCESS_KEY",         "火山 TOS 容量统计 / 巡检不可用"),
+        ("MGW_USER_ID",            "跨云迁移(TOS→OSS)不可用：缺在线迁移服务 userid"),
+        ("CPFS_FILE_SYSTEM_ID",    "CPFS 预热/沉降不可用：缺默认文件系统 ID（可在 cpfs:// 路径里显式给）"),
     ]
 
     def validate(self) -> list[tuple[str, str]]:

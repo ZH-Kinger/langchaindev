@@ -47,6 +47,15 @@ pytest -k test_router                 # match by test name
 
 `tests/conftest.py` autoloads fixtures that replace Redis with `fakeredis`, inject a test Fernet key, and provide opt-in mocks for STS, RAM API, and Feishu sending. No lint or type-check is configured.
 
+## Deployment
+
+```powershell
+.\deploy.ps1            # 部署当前 HEAD 到 bot-server
+.\deploy.ps1 -Ref main  # 部署指定 ref
+```
+
+`deploy.ps1` syncs code to the server and restarts — no image rebuild. The server's `/root/langchaindev` is **not** a git repo; code is bind-mounted into the `aiops-bot` container via docker-compose (`.:/app`), so deploy = `git archive HEAD` → scp → 解压覆盖 → 清理已删文件/`__pycache__` → `docker compose restart bot` → poll `/health` (~10s). It tracks `.deployed_commit` on the server to delete files removed since last deploy (rsync-`--delete` equivalent). Only `requirements.txt` changes need a manual `docker compose up -d --build` (the script detects and warns).
+
 ## Architecture
 
 ### Modes and Entry Points
@@ -75,8 +84,10 @@ Subpackaged by vendor / domain. Single source of truth is `tools/__init__.py`:
 ```
 tools/
   aliyun/   pai_dsw, ecs, oss, sls, ram, prometheus, gpu_advisor,
-            gpu_training_advisor, cluster_health, dsw_inspector
+            gpu_training_advisor, cluster_health, cluster_mfu, dsw_inspector
             # oss also: dir_sizes (各子目录大小) + tree (目录结构), 自动探测地域
+            # cluster_mfu: 多区域算力效率(MFU)+容量+调度 日报，交互式飞书卡片(区域切换)，
+            #   24h Redis 快照，按钮回调只读缓存秒回
   volcano/  tos                 # 火山引擎 TOS 容量盘点 (静态 AK，无 STS)
   feishu/   notify, cards       # notify: message cards, GPU progress bars, token cache
                                 # cards: card-dict primitives (card/div/fields/btn/...) shared by
@@ -118,7 +129,49 @@ User-supplied AKs (from Feishu binding cards) are encrypted with Fernet (`utils/
 Background threads start with `bot` mode:
 - **Ticket poller** (every 2 min): scans Jira project `JIRA_PROJECT_KEY` for new GPU tickets → creates DSW instance via `manage_pai_dsw` → records state in Redis `dsw:ticket:{key}`.
 - **Idle/timeout watcher** (every 5 min): for tracked instances, sends a Feishu card 15 min before the requested duration ends; if no extend/stop response within `DSW_IDLE_STOP_MINUTES`, auto-stops.
-- **Capacity monitor** (`core/capacity_monitor.py`, opt-in via `CAPACITY_MONITOR_ENABLED`): every `CAPACITY_MONITOR_INTERVAL_HOURS`, scans each `CAPACITY_MONITOR_TARGETS` entry (OSS via `tools.aliyun.oss.compute_dir_sizes`, TOS via `tools.volcano.tos.compute_dir_sizes`), pushes a Feishu card with per-subdir sizes + delta-since-last-scan, reds the header if total exceeds `CAPACITY_ALERT_THRESHOLD_TB`. Snapshot in Redis `capacity:snapshot:{vendor}:{bucket}:{prefix}`.
+- **Capacity monitor** (`core/capacity_monitor.py`, opt-in via `CAPACITY_MONITOR_ENABLED`): every `CAPACITY_MONITOR_INTERVAL_HOURS`, scans each `CAPACITY_MONITOR_TARGETS` entry (OSS via `tools.aliyun.oss.compute_dir_sizes`, TOS via `tools.volcano.tos.compute_dir_sizes`), pushes a Feishu card with per-subdir sizes + delta-since-last-scan, reds the header if total exceeds `CAPACITY_ALERT_THRESHOLD_TB`. Snapshot in Redis `capacity:snapshot:{vendor}:{bucket}:{prefix}`. Also upserts per-vendor totals into a Feishu Bitable via `core/capacity_bitable.write_scan` (三表关联：巡检快照→厂家总量→批次明细，每次 upsert 去重旧行).
+- **Morning report** (daily 北京 9:00): pushes two cards — per-user DSW instance summary + cluster MFU summary (`tools.aliyun.cluster_mfu.build_mfu_card(refresh=True)`, which also warms the snapshot cache for the card's region-switch buttons). Skipped if `PROMETHEUS_URL`/`FEISHU_CHAT_ID` unset.
+- **OSS perm audit push** (`core/dsw_scheduler._oss_perm_loop`, opt-in via `OSS_PERM_PUSH_ENABLED`, daily 北京 `OSS_PERM_PUSH_HOUR`:20): see OSS Permission Sync below.
+
+### OSS Permission Sync (`core/oss_perm/`)
+
+Generates a least-privilege custom RAM policy per algo-team member from a Feishu Bitable and attaches it to their RAM user. Standalone script + bot flow share the same core.
+
+- **Source of truth**: Feishu「舞肌算法组权限统计」多维表格 — member table (姓名/账号/状态/`OSS_Bucket`/`子目录(读)`/`子目录(写)`) + bucket 对照表 (合法子目录). `BUCKET_MAP` maps display names → real `(region, bucket)`.
+- **Pipeline** (`permsync.py`): `load_members` → `build_plan` (`resolve_member` per row, merge by username) → policy doc `wuji-oss-auto-<username>`. `build_policy` emits object-level ARNs scoped to read/write prefixes + a prefix-scoped `ListObjects`.
+- **Two-tier granularity** (`coerce_level` + `build_plan(level=)`): `bucket` collapses every prefix to whole-bucket (`<bucket>/*`, no `oss:Prefix` condition) → `dir` keeps subdir prefixes. Roll out bucket-level first, observe, then tighten to dir-level.
+- **RAM user resolution**: display-name (==姓名) → email-prefix, overridable via `ram_user_map.json` (`--build-map` regenerates, keeps manual edits).
+- **CLI**: dry-run by default; `--apply` writes RAM, `--audit` read-only reconciles RAM-actual vs table-expected (多授/少授/孤儿), `--level bucket|dir`, `--only`, `--create-users`. Credentials: `ALIBABA_CLOUD_*` or `settings.ALIYUN_ACCESS_KEY_*` (needs RAM write) + Feishu app token.
+- **Bot flow**: scheduler pushes `cards.audit_form_card` (card JSON 2.0 form: 粒度单选默认桶级 / 成员多选默认全选 / 单个「确认下发」) to `FEISHU_CHAT_ID` when `audit_diff` finds drift. Admin (`ADMIN_FEISHU_OPEN_ID`) submits → `actions._h_approve_oss_perm_selected` reads `form_value{level, selected}`, filters the plan to selected members, `apply_all` downs them, replies `result_card` (per-member granted scope). Deselect a member = skip this round (not persisted). Legacy `audit_card`/`approve_oss_perm` (整批两按钮) kept as fallback.
+- Note: orphan-policy reporting is computed by `audit_diff` (CLI `--audit` shows it) but no longer rendered on the bot card.
+
+### Cross-Cloud Transfer (`core/transfer/`)
+
+Migrates object-storage data across clouds from a single user-given path. The chain is inherently two-stage — no PFS can skip its own object storage to reach the other cloud: `[PFS] --沉降(dataflow)--> [本厂对象存储] --跨云迁移--> [对方对象存储]`. **Direction decides engine** (destination-pull, by service design, not a choice): into OSS uses 阿里「在线迁移服务」(hcs_mgw, `alibabacloud_hcs_mgw20240626`); into TOS uses 火山「迁移服务」.
+
+- **Phasing**: Phase 1 (done) = `TOS→OSS` only (the proven `wuji_il` path, full SDK). Phase 2 = `OSS→TOS` (new `engine_tos.py`, pending Volcano migration OpenAPI verification). Phase 3 = full chain with CPFS/VePFS sink via `CreateDataFlowTask`. Direction判断 + 全链路抽象 already in `paths.py`; later phases only add engines/stages.
+- **`paths.py`** (pure logic): parses `tos://`/`oss://`/`cpfs://`/`vepfs://` URIs (dir-only, trailing `/`), derives destination bucket via `TRANSFER_BUCKET_MAP` (`{"<scheme>://<bucket>": "<dst-bucket>"}`), mirrors source prefix, builds a `Plan(source, dest, sink_target, engine, direction)`.
+- **`engine_mgw.py`**: 阿里在线迁移 call-chain — `create_address(源 tos: access_id/secret/bucket/prefix/domain)` → `verify_address` → `create_address(目的 oss: bucket/region_id/prefix/role)` → `verify` → `create_job(transfer_mode, overwrite_mode)` → `update_job(IMPORT_JOB_LAUNCHING)` → poll `get_job` until `IMPORT_JOB_FINISHED|INTERRUPTED`. OSS dest uses RAM **role** (no AK); source TOS uses static `TOS_ACCESS_KEY/SECRET`. Client via `aliyun_client_factory.get_mgw_client`.
+- **Known limitation: `OSS->TOS` target prefix**: Volcano DMS 1.0 only lets this integration specify the target **bucket**. `dest_prefix` is recorded by the tool but does not reliably change the TOS landing path; objects keep their source key structure under the target bucket. Example: migrating `oss://src/team/data/file.txt` to `tos://dst/custom/prefix/` lands as `tos://dst/team/data/file.txt`, not `tos://dst/custom/prefix/file.txt`. If a fixed TOS subdirectory is required, either pre-shape the source OSS keys or add a post-migration TOS copy/rename step.
+- **`orchestrator.py`**: state machine `NEW→CROSSING→DONE|FAILED` (Phase 3 adds `SINKING`). Job in Redis `transfer:job:{job_id}` (30-day TTL). Idempotent: `job_id = hash(source, dest, 当天)`. `estimate_source` probes size via TOS `_prefix_size` for the confirm card + approval gate (`needs_approval` vs `TRANSFER_APPROVAL_TB`, default 1 TB). `run_to_completion` launches + blocks-polls (60s/轮) in a background thread, calling `on_update(job)` on each stage change.
+- **Three entry points share the core** (like oss_perm): Feishu card (intent in `messages._is_transfer_intent`: 迁移动作词 + `tos://`/`oss://` path → `_handle_transfer_intent` sends `cards.confirm_card`); Agent tool `manage_transfer` (`plan`/`apply`/`status`); CLI `python -m core.transfer.cli plan|apply|status` (dry-run default, `--force` past threshold).
+- **Bot flow**: confirm form-card (`confirm_transfer`, `form_value{overwrite, job_id}`) → `actions._h_confirm_transfer` (>threshold requires `ADMIN_FEISHU_OPEN_ID`) launches background `run_to_completion`, pushes progress/result cards to `TRANSFER_CHAT_ID or FEISHU_CHAT_ID`. Failure card has a `retry_transfer` button (`_h_retry_transfer` resets stage→NEW).
+- **Config**: `TRANSFER_ENABLED`, `MGW_ENDPOINT`/`MGW_REGION`/`MGW_USER_ID`, `TRANSFER_OSS_ROLE` (RAM role for OSS dest), `TRANSFER_MODE_DEFAULT`/`TRANSFER_OVERWRITE_DEFAULT`, `TRANSFER_APPROVAL_TB`, `TRANSFER_BUCKET_MAP`. **Before go-live, fill real `wuji_il` values**: TOS domain/bucket, OSS rolename/bucket/region, transfer/overwrite modes, and the bucket map.
+- **Phase 3 SINKING is wired for 阿里 CPFS** via `core/cpfs_dataflow.engine_nas` (NAS DataFlow Export): `run_to_completion` runs `start_sinking`→`poll_sink_once` (CPFS→OSS sink_target) before `start_cross`. `vepfs→tos` sink (火山) still unimplemented (`start_sinking` fails with a clear message).
+
+### CPFS/NAS DataFlow — 数据预热 / 沉降 (`core/cpfs_dataflow/`)
+
+Aliyun NAS DataFlow (product `NAS`, version `2017-06-26`, RPC): **预热**(`TaskAction=Import`, OSS→CPFS, 加载) and **沉降**(`TaskAction=Export`, CPFS→OSS, 刷回). See `docs/aliyun_cpfs_oss_dataflow_api.md`.
+
+- **No new SDK**: NAS calls go through the generic `alibabacloud-tea-openapi` `call_api` (same pattern as `ram_approval._call_ims_api`) via `aliyun_client_factory.get_nas_openapi_client`. Deploy needs no rebuild.
+- **Only 查现有 + 提交任务**: `engine_nas.list_dataflows`/`resolve_dataflow` (DescribeDataFlows) + `submit_task` (CreateDataFlowTask) + `query_task` (DescribeDataFlowTasks). **No** CreateDataFlow/DeleteDataFlow (creating one clears the Fileset — dangerous). A DataFlow must already exist; its bound dir is usually broader, the task targets a sub-dir → `resolve_dataflow` picks the longest `FileSystemPath` prefix that is an ancestor of the target.
+- **Edition auto-branch**: `bmcpfs-*`=智算版 (`DataType=MetaAndData` + task requires `ConflictPolicy`) / `cpfs-*`=通用版.
+- **Full-path input**: users give a full path like `/cpfs/cwr/third_party_data/label`; the `CPFS_MOUNT_PREFIX` (`/cpfs`) is stripped → DataFlow FileSystemPath `/cwr/third_party_data/label`. OSS side `oss://bucket/prefix/`. `orchestrator.make_plan(operation, cpfs_path, oss)` orients Directory/DstDirectory per action (Import: OSS-side Directory→CPFS DstDirectory; Export: reverse).
+- **orchestrator.py**: state machine `NEW→RUNNING→DONE|FAILED`, Redis `cpfs:dataflow:job:{job_id}` (30-day TTL), idempotent `job_id=hash(op, fs, dir, oss, 当天)`, `run_to_completion` background-polls.
+- **Three entry points** (mirror transfer): Feishu (`messages._is_sink_preheat_entry_intent` → `cards.entry_card`; `actions._h_submit_cpfs_dataflow`→`confirm_card`, `_h_confirm_cpfs_dataflow` launches + pushes progress/result, `retry_cpfs_dataflow`); Agent tool `manage_cpfs_dataflow` (`list`/`preheat`/`sink`/`status`, TOOL_GROUP `cpfs`); CLI `python -m core.cpfs_dataflow.cli list|preheat|sink|status` (`--dry-run`).
+- **Discovery / selectable map** (`discovery.py`): `discover` iterates `CPFS_FILE_SYSTEM_IDS` (`fs_id@region,...`), calls `engine_nas.list_dataflows` per fs, and builds a list of `{region, fs_id, data_flow_id, oss_bucket, oss_prefix, fs_path, label, value}` options — cached in Redis `cpfs:dataflow:map` (`CPFS_MAP_TTL_SECONDS`, 6h). **`cri`-prefixed OSS buckets are excluded** (镜像仓库, not data). The Feishu `entry_card` renders these as a `select_static` so users pick a CPFS↔OSS binding + 相对子目录 instead of typing full paths (free-text inputs are the fallback when the map is empty). Selection `value` is a JSON blob decoded by `discovery.decode_selection` → `make_plan(..., fs_id=, region=, data_flow_id=)` (explicit binding skips `resolve_dataflow`). Refresh via CLI `discover --refresh` or tool `action=discover`.
+- **Config**: `CPFS_DATAFLOW_ENABLED`, `CPFS_REGION`, `CPFS_FILE_SYSTEM_ID` (single default), `CPFS_FILE_SYSTEM_IDS` (multi-fs discovery list), `CPFS_MAP_TTL_SECONDS`, `CPFS_MOUNT_PREFIX`, `CPFS_CONFLICT_POLICY_DEFAULT`, `CPFS_DATAFLOW_MAP` (JSON override: `oss://<bucket>` or FileSystemPath → DataFlowId), `CPFS_APPROVAL_GB`, `CPFS_CHAT_ID`.
+- **Prereq for the map**: the bot AK needs `nas:DescribeDataFlows` (default master AK is RAMReadOnly+STS — may need granting); fill `CPFS_FILE_SYSTEM_IDS` with the real fs/region list. CPFS 智算版(`bmcpfs-`) 全量枚举(DescribeFileSystems)未实现,故按配置 fs 清单逐个 DescribeDataFlows。
 
 ### Redis Usage (`utils/redis_client.py`)
 
@@ -130,7 +183,11 @@ Single client, `decode_responses=True`. Failures degrade silently. Key namespace
 - `feishu:event_dedup:{event_id}` — 1h TTL, primary mechanism for webhook idempotency (in-memory `_seen_events_fallback` set only when Redis is down).
 - `dsw:ticket:{ticket_key}` — 7-day TTL, scheduler state.
 - `capacity:snapshot:{vendor}:{bucket}:{prefix}` — 30-day TTL, last capacity scan per target (for delta).
+- `mfu:snapshot` — 24h TTL, full cluster-MFU snapshot (~25 PromQL/region, 1–2 min to collect); card region-switch buttons read it for instant <3s callbacks. `mfu:refresh_lock` guards the single background refresher when stale (>15 min).
 - `user:ak:{open_id}` — encrypted user AK/SK; 30-day idle TTL via `USER_AK_IDLE_TTL_SECONDS`.
+- `transfer:job:{job_id}` — 30-day TTL, cross-cloud transfer state machine record (stage/engine/bytes/error).
+- `cpfs:dataflow:job:{job_id}` — 30-day TTL, CPFS 预热/沉降 task state (operation/fs/dataflow/task_id/progress).
+- `cpfs:dataflow:map` — `CPFS_MAP_TTL_SECONDS` (6h) TTL, discovered CPFS↔OSS DataFlow binding options for the Feishu selector.
 
 ### Vector Store & RAG (`core/vector_store.py`)
 

@@ -48,6 +48,7 @@ _FAST_PATH_TOKENS = (
     "ecs", "云服务器",
     "oss", "bucket", "对象存储",
     "tos", "火山", "volcano",
+    "迁移", "传输", "跨云", "transfer", "migration",
     "sls", "logstore", "日志服务",
     "k8s", "pod",
     "grafana", "prometheus",
@@ -107,6 +108,32 @@ def _select_tools(user_input: str) -> list:
     return _legacy_keyword_route(text)
 
 
+
+_TRANSFER_ROUTE_TOKENS = (
+    "迁移", "传输", "同步", "复制", "拷贝", "搬迁", "跨云",
+    "transfer", "migration",
+)
+_TRANSFER_STORAGE_TOKENS = (
+    "tos", "oss", "cpfs", "vepfs", "对象存储", "bucket", "存储桶", "火山",
+)
+_TRANSFER_URI_TOKENS = ("tos://", "oss://", "cpfs://", "vepfs://")
+_TRANSFER_DIRECTION_TOKENS = (
+    "tos到oss", "oss到tos", "tos 到 oss", "oss 到 tos",
+    "tos->oss", "oss->tos", "tos -> oss", "oss -> tos",
+)
+
+
+def _looks_like_transfer(text: str) -> bool:
+    if any(k in text for k in _TRANSFER_DIRECTION_TOKENS):
+        return True
+    uri_hits = sum(1 for k in _TRANSFER_URI_TOKENS if k in text)
+    if uri_hits >= 2:
+        return True
+    has_route_action = any(k in text for k in _TRANSFER_ROUTE_TOKENS)
+    has_storage_ref = any(k in text for k in _TRANSFER_STORAGE_TOKENS)
+    return has_route_action and has_storage_ref
+
+
 def _legacy_keyword_route(text: str) -> list:
     """老的关键词路由（保留作为 LLM 路由失败/快通道命中的执行体）。
 
@@ -122,6 +149,8 @@ def _legacy_keyword_route(text: str) -> list:
         names = TOOL_GROUPS["jira"] | TOOL_GROUPS["pai_dsw"]
     elif any(k in text for k in ("ecs", "云服务器", "重启服务器", "服务器列表", "服务器实例")):
         names = TOOL_GROUPS["ecs"]
+    elif _looks_like_transfer(text):
+        names = TOOL_GROUPS["transfer"]
     elif any(k in text for k in ("tos", "火山", "volcano")):
         names = TOOL_GROUPS["tos"]
     elif any(k in text for k in ("oss", "对象存储", "bucket", "存储桶", "存储空间",

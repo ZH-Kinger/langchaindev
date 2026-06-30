@@ -32,6 +32,8 @@ INTENT_DESCRIPTIONS: dict[str, str] = {
     "ecs":       "ECS 云服务器：列出、详情、启停、重启、释放",
     "oss":       "OSS 对象存储：列 bucket / 对象、上传、删除、统计用量、各子目录大小、目录树",
     "tos":       "火山引擎 TOS 对象存储：各子目录大小、容量盘点、列对象",
+    "transfer":  "跨云/跨对象存储数据迁移和传输：TOS 与 OSS 之间复制、同步、覆盖或跳过同名文件",
+    "cpfs":      "CPFS/NAS 数据预热(OSS→CPFS 加载)与数据沉降(CPFS→OSS 刷回)、列 DataFlow",
     "sls":       "SLS 日志服务：列项目、查日志、创建 logstore",
     "monitor":   "查 Prometheus 指标 / CPU / 内存 / 趋势 / 系统资源",
     "advisor":   "GPU 集群优化建议：成本、效率、散热、调度、瓶颈分析",

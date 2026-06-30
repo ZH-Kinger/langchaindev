@@ -34,3 +34,20 @@ def test_package_reexports():
     assert callable(fb._is_registered)
     assert callable(fb._process_action)
     assert fb.app is fb.routes.app
+
+
+
+def test_event_accepts_legacy_top_level_token(monkeypatch):
+    from core.feishu_bot import routes
+
+    monkeypatch.setattr(routes.settings, "FEISHU_VERIFICATION_TOKEN", "secret")
+    resp = _client().post("/feishu/event", json={"token": "secret", "event": {}})
+    assert resp.status_code == 200
+
+
+def test_event_rejects_missing_token_when_configured(monkeypatch):
+    from core.feishu_bot import routes
+
+    monkeypatch.setattr(routes.settings, "FEISHU_VERIFICATION_TOKEN", "secret")
+    resp = _client().post("/feishu/event", json={"event": {}})
+    assert resp.status_code == 403

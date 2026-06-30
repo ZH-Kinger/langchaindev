@@ -57,6 +57,23 @@ def _feishu_reply_with_chart(message_id: str, text: str, image_key: str) -> None
         logger.error("[飞书卡片回复] 异常", exc_info=True)
 
 
+def _feishu_reply_card(message_id: str, card_payload: dict) -> None:
+    """以交互卡片形式回复指定消息（card_payload 为完整卡片 dict）。"""
+    try:
+        token = _get_access_token()
+        resp = requests.post(
+            f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/reply",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"msg_type": "interactive", "content": json.dumps(card_payload)},
+            timeout=15,
+        )
+        data = resp.json()
+        if data.get("code") != 0:
+            logger.warning("[飞书卡片回复] 失败: %s", data.get('msg'))
+    except Exception:
+        logger.error("[飞书卡片回复] 异常", exc_info=True)
+
+
 def _feishu_send(chat_id: str, text: str) -> None:
     """向指定会话主动发送消息（用于超时兜底提示）。"""
     try:

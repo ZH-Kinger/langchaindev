@@ -58,6 +58,109 @@ _GPU_QUERY_WORDS    = ("查看", "查询", "列出", "列表", "看一下", "有
                        "显示", "我的实例", "已有", "运行中", "停止", "删除", "关闭")
 
 
+# ── 跨云迁移意图：出现迁移动作词 + 含迁移路径（tos:// 或 oss://）─────────────────
+_TRANSFER_SCHEMES = "tos|oss|cpfs|vepfs"
+_TRANSFER_PATH_RE = re.compile(rf"\b(?:{_TRANSFER_SCHEMES})://[^\s，,。；;]+", re.IGNORECASE)
+_TRANSFER_NEXT_PATH_RE = re.compile(rf"\s*(?:到|至|->|=>|→)\s*(?=(?:{_TRANSFER_SCHEMES})://)", re.IGNORECASE)
+_TRANSFER_ACTION_WORDS = ("迁移", "搬", "传输", "转移", "同步到", "拷到", "拷贝到", "搬运", "导入", "导出")
+_TRANSFER_DIRECTION_RE = re.compile(r"\b(?:tos|oss|cpfs|vepfs)\s*(?:到|至|->|=>|→)\s*(?:tos|oss|cpfs|vepfs)\b", re.IGNORECASE)
+
+
+def _extract_transfer_paths(text: str):
+    """从文本里抽取迁移路径，返回 (source, dest)；不足返回 (None, None)。"""
+    normalized = _TRANSFER_NEXT_PATH_RE.sub(" ", text or "")
+    spans = []
+    for match in _TRANSFER_PATH_RE.finditer(normalized):
+        path = match.group(0).strip().strip("`'\"<>[]()（）")
+        path = re.sub(r"(?:到|至|->|=>|→)+$", "", path).rstrip("，,。；;")
+        if path:
+            spans.append(path)
+    if not spans:
+        return None, None
+    source = spans[0]
+    dest = spans[1] if len(spans) > 1 else ""
+    return source, dest
+
+
+def _is_transfer_intent(text: str) -> bool:
+    """含迁移动作词且带路径，或同时给出源/目的两条路径。"""
+    source, dest = _extract_transfer_paths(text)
+    if not source:
+        return False
+    if dest:
+        return True
+    return any(w in text for w in _TRANSFER_ACTION_WORDS)
+
+
+# 录入意图：纯迁移关键词、无路径 → 弹录入卡让用户填地址
+_TRANSFER_ENTRY_WORDS = (
+    "跨云迁移", "数据迁移", "迁移数据", "新建迁移", "发起迁移",
+    "跨平台对象存储迁移", "对象存储迁移", "对象存储传输", "跨平台迁移",
+    "tos到oss", "tos 到 oss", "tos->oss", "tos→oss", "oss到tos", "oss 到 tos",
+    "迁移卡片", "填写迁移", "填迁移", "发起传输",
+)
+
+_SINK_PREHEAT_ENTRY_WORDS = (
+    "数据沉降/预热", "数据沉降", "数据预热", "沉降/预热", "沉降预热",
+    "cepfs沉降", "vepfs沉降", "cpfs沉降", "文件沉降", "数据加载",
+)
+
+
+def _is_sink_preheat_entry_intent(text: str) -> bool:
+    compact = re.sub(r"\s+", "", text or "").lower()
+    return any(word.replace(" ", "").lower() in compact for word in _SINK_PREHEAT_ENTRY_WORDS)
+
+
+def _is_transfer_entry_intent(text: str) -> bool:
+    """命中录入关键词且没带路径（带路径走 _is_transfer_intent 直接解析）。"""
+    if _extract_transfer_paths(text)[0]:
+        return False
+    compact = re.sub(r"\s+", "", text or "").lower()
+    if any(w.replace(" ", "") in compact for w in _TRANSFER_ENTRY_WORDS):
+        return True
+    if _TRANSFER_DIRECTION_RE.search(text or ""):
+        return True
+    if "卡片" in compact and any(w in compact for w in ("填", "迁移", "传输", "tos", "oss", "卡片消息")):
+        return True
+    return False
+
+_TRANSFER_CONFIRM_RE = re.compile(r"^\s*(确认|确定|开始|执行|提交|确认迁移|开始迁移)\s*$")
+
+
+def _is_transfer_confirm_text(text: str) -> bool:
+    return bool(_TRANSFER_CONFIRM_RE.match(text or ""))
+
+
+# RAM account query intent. Text/menu entry opens a form; actual query runs only after submit.
+_RAM_QUERY_ENTRY_WORDS = (
+    "queryramaccount", "queryramuser", "ramaccountquery", "ramuserquery",
+    "aliyunaccountquery", "aliyunuserquery", "aliyunram", "aliyun ram",
+    "\u963f\u91cc\u4e91ram", "\u963f\u91cc\u4e91 ram", "\u963f\u91cc\u4e91RAM", "\u963f\u91cc\u4e91 RAM",
+    "ram\u8d26\u53f7\u67e5\u8be2", "ram\u8d26\u6237\u67e5\u8be2", "\u67e5\u8be2ram\u8d26\u53f7", "\u67e5\u8be2ram\u8d26\u6237",
+    "\u67e5ram\u8d26\u53f7", "\u67e5ram\u8d26\u6237", "\u67e5\u8be2\u8d26\u53f7", "\u67e5\u8be2\u8d26\u6237",
+    "\u67e5\u8d26\u53f7", "\u67e5\u8d26\u6237",
+    "\u963f\u91cc\u4e91\u8d26\u53f7\u67e5\u8be2", "\u963f\u91cc\u4e91\u8d26\u6237\u67e5\u8be2",
+    "\u67e5\u8be2\u963f\u91cc\u4e91\u8d26\u53f7", "\u67e5\u8be2\u963f\u91cc\u4e91\u8d26\u6237",
+)
+
+_VOLCANO_ACCOUNT_QUERY_ENTRY_WORDS = (
+    "volcanoaccountquery", "volcanouserquery", "volcengineaccountquery", "volcengineuserquery",
+    "volcanoiam", "volcengineiam", "volcano iam", "volcengine iam",
+    "\u706b\u5c71\u5f15\u64ceiam", "\u706b\u5c71\u5f15\u64ce iam", "\u706b\u5c71iam", "\u706b\u5c71 iam",
+    "\u706b\u5c71\u5f15\u64ce\u8d26\u53f7\u67e5\u8be2", "\u706b\u5c71\u5f15\u64ce\u8d26\u6237\u67e5\u8be2",
+    "\u706b\u5c71\u8d26\u53f7\u67e5\u8be2", "\u706b\u5c71\u8d26\u6237\u67e5\u8be2",
+    "\u67e5\u8be2\u706b\u5c71\u5f15\u64ce\u8d26\u53f7", "\u67e5\u8be2\u706b\u5c71\u5f15\u64ce\u8d26\u6237",
+)
+
+
+def _is_ram_query_entry_intent(text: str) -> bool:
+    compact = re.sub(r"\s+", "", text or "").lower()
+    return any(word.lower() in compact for word in _RAM_QUERY_ENTRY_WORDS)
+
+def _is_volcano_account_query_entry_intent(text: str) -> bool:
+    compact = re.sub(r"\s+", "", text or "").lower()
+    return any(word.lower() in compact for word in _VOLCANO_ACCOUNT_QUERY_ENTRY_WORDS)
+
 def _is_gpu_intent(text: str) -> bool:
     t = text.lower()
     # 包含查询/管理词 → 交给 Agent 处理，不弹申请卡片
@@ -269,6 +372,40 @@ def _query_my_instances(message_id: str, open_id: str, chat_id: str) -> None:
         messaging._feishu_reply(message_id, "获取实例信息失败，请稍后重试。")
 
 
+# ── 跨云迁移意图处理 ──────────────────────────────────────────────────────────
+
+def _handle_transfer_intent(message_id: str, chat_id: str, open_id: str,
+                            source: str, dest: str) -> None:
+    """解析迁移路径 → 预估大小 → 回发确认表单卡。错误回纯文本。"""
+    from core.transfer import orchestrator
+    from core.transfer.cards import confirm_card
+    from core.transfer.paths import PathError
+    try:
+        plan = orchestrator.make_plan(source, dest or "")
+        if plan.engine not in ("mgw", "tos_mig"):
+            messaging._feishu_reply(
+                message_id,
+                f"⚠️ 方向 {plan.direction} 暂未支持（三期沉降段）。")
+            return
+        bytes_total, objects_total = orchestrator.estimate_source(plan)
+        job = orchestrator.create_job_record(
+            plan, open_id=open_id, bytes_total=bytes_total, objects_total=objects_total)
+        need_appr = orchestrator.needs_approval(bytes_total)
+        payload = confirm_card(job, need_approval=need_appr)
+        token = _get_access_token()
+        requests.post(
+            f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/reply",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"msg_type": "interactive", "content": json.dumps(payload)},
+            timeout=15,
+        )
+    except PathError as e:
+        messaging._feishu_reply(message_id, f"❌ 路径错误：{e}")
+    except Exception as e:
+        logger.error("[Transfer] 意图处理失败", exc_info=True)
+        messaging._feishu_reply(message_id, f"❌ 迁移请求处理失败：{e}")
+
+
 # ── Agent 异步处理 ────────────────────────────────────────────────────────────
 
 def _process_message(message_id: str, chat_id: str, user_text: str, open_id: str = "") -> None:
@@ -283,7 +420,41 @@ def _process_message(message_id: str, chat_id: str, user_text: str, open_id: str
         ).start()
         return
 
-    # ③ GPU 申请意图 → 必须先注册个人 AK/SK
+    # ③ 跨云迁移录入意图（纯关键词、无路径）→ 弹录入卡让用户填地址
+    if _is_sink_preheat_entry_intent(user_text):
+        from core.cpfs_dataflow.cards import entry_card
+        messaging._feishu_reply_card(message_id, entry_card())
+        return
+
+    if _is_volcano_account_query_entry_intent(user_text):
+        messaging._feishu_reply(message_id, "\u706b\u5c71\u5f15\u64ce\u8d26\u6237\u67e5\u8be2\u6682\u672a\u63a5\u5165\u3002\u5f53\u524d\u5df2\u63a5\u5165\u7684\u662f\u963f\u91cc\u4e91 RAM \u8d26\u6237\u67e5\u8be2\uff0c\u8bf7\u70b9\u201c\u963f\u91cc\u4e91\u8d26\u6237\u67e5\u8be2\u201d\u3002")
+        return
+
+    if _is_ram_query_entry_intent(user_text):
+        from core.ram_query_cards import query_entry_card
+        messaging._feishu_reply_card(message_id, query_entry_card())
+        return
+
+    if _is_transfer_entry_intent(user_text):
+        from core.transfer.cards import entry_card
+        messaging._feishu_reply_card(message_id, entry_card())
+        return
+
+    # ③.5 跨云迁移意图（含迁移路径 + 动作词）→ 解析、预估、弹确认卡
+    if _is_transfer_intent(user_text):
+        source, dest = _extract_transfer_paths(user_text)
+        threading.Thread(
+            target=_handle_transfer_intent,
+            args=(message_id, chat_id, open_id, source, dest), daemon=True
+        ).start()
+        return
+
+    # ③.6 纯文本确认不提交迁移，避免 Agent 编造任务 ID；必须点击确认卡按钮。
+    if _is_transfer_confirm_text(user_text):
+        messaging._feishu_reply(message_id, "请点击上一张迁移确认卡里的“确认迁移”按钮；只回复文字不会提交迁移任务。")
+        return
+
+    # ④ GPU 申请意图 → 必须先注册个人 AK/SK
     if _is_gpu_intent(user_text):
         if not _is_registered(open_id):
             gpu_flow._send_ak_register_card(message_id)
