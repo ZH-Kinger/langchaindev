@@ -114,3 +114,29 @@ def test_query_progress_done(monkeypatch):
 def test_query_progress_missing():
     out = actions._h_query_cpfs_progress({"job_id": "cpfs-none"}, "ou_1", "chat", {})
     assert out["toast"]["type"] == "error"
+
+
+def test_progress_query_text_intent():
+    assert messages._is_progress_query_text("查询进度")
+    assert messages._is_progress_query_text("查询进度 cpfs-abc123ff")
+    assert not messages._is_progress_query_text("帮我建个实例")
+
+
+def test_progress_query_no_id_gives_hint(monkeypatch):
+    from core.feishu_bot import messaging as mg
+    cap = []
+    monkeypatch.setattr(mg, "_feishu_reply", lambda mid, text: cap.append(text))
+    messages._handle_progress_query("m1", "查询进度")
+    assert cap and ("任务ID" in cap[0] or "按钮" in cap[0])   # 提示带ID/点按钮，不落 LLM
+
+
+def test_progress_query_by_cpfs_id(monkeypatch):
+    from core.feishu_bot import messaging as mg
+    job = orchestrator.create_job_record(
+        orchestrator.make_plan("sink", "/cwr/p/", "oss://bk/p/", fs_id="bmcpfs-x", region="cn-hangzhou"))
+    job["stage"] = orchestrator.STAGE_RUNNING
+    orchestrator._save(job)
+    cap = []
+    monkeypatch.setattr(mg, "_feishu_reply", lambda mid, text: cap.append(text))
+    messages._handle_progress_query("m1", f"查询进度 {job['job_id']}")
+    assert cap and job["job_id"] in cap[0] and "RUNNING" in cap[0]

@@ -161,6 +161,50 @@ def _is_volcano_account_query_entry_intent(text: str) -> bool:
     compact = re.sub(r"\s+", "", text or "").lower()
     return any(word.lower() in compact for word in _VOLCANO_ACCOUNT_QUERY_ENTRY_WORDS)
 
+
+# 进度查询：拦在 Agent 之前，避免 LLM 劫持 + 吃旧会话历史
+_PROGRESS_QUERY_RE = re.compile(r"(查询进度|进度查询|查进度|任务进度|查询任务)")
+_JOB_ID_RE = re.compile(r"\b(cpfs-[0-9a-fA-F]{6,}|tr-[0-9a-fA-F]{6,})\b")
+
+
+def _is_progress_query_text(text: str) -> bool:
+    return bool(_PROGRESS_QUERY_RE.search(text or ""))
+
+
+def _handle_progress_query(message_id: str, text: str) -> None:
+    """按任务ID直接查进度（cpfs-→CPFS 预热/沉降；tr-→跨云迁移）。无ID给提示。"""
+    m = _JOB_ID_RE.search(text or "")
+    if not m:
+        messaging._feishu_reply(
+            message_id,
+            "请带上任务ID,如「查询进度 cpfs-xxxxxx」或「查询进度 tr-xxxxxx」;"
+            "也可直接点卡片上的「🔄 查询进度」按钮。")
+        return
+    jid = m.group(1)
+    try:
+        if jid.lower().startswith("cpfs-"):
+            from core.cpfs_dataflow import orchestrator as o
+            job = o.get_job(jid)
+            if not job:
+                messaging._feishu_reply(message_id, f"未找到任务 `{jid}`（可能已过期）。")
+                return
+            msg = (f"任务 `{jid}`：**{job['stage']}** {job.get('operation_label','')}\n"
+                   f"进度 {job.get('files_done',0)}/{job.get('files_total',0)} 文件，"
+                   f"{o.fmt_size(job.get('bytes_done',0))}"
+                   + (f"\n错误：{job['error']}" if job.get('error') else ""))
+        else:  # tr-
+            from core.transfer import orchestrator as o
+            job = o.get_job(jid)
+            if not job:
+                messaging._feishu_reply(message_id, f"未找到任务 `{jid}`（可能已过期）。")
+                return
+            msg = (f"任务 `{jid}`：**{job['stage']}** {job.get('direction','')}\n"
+                   f"{o.fmt_size(job.get('bytes_total',0))}"
+                   + (f"\n错误：{job['error']}" if job.get('error') else ""))
+        messaging._feishu_reply(message_id, msg)
+    except Exception as e:
+        messaging._feishu_reply(message_id, f"查询失败：{e}")
+
 def _is_gpu_intent(text: str) -> bool:
     t = text.lower()
     # 包含查询/管理词 → 交给 Agent 处理，不弹申请卡片
@@ -418,6 +462,11 @@ def _process_message(message_id: str, chat_id: str, user_text: str, open_id: str
         threading.Thread(
             target=_query_my_instances, args=(message_id, open_id, chat_id), daemon=True
         ).start()
+        return
+
+    # ②.5 进度查询（拦在 Agent 之前，避免 LLM 劫持 + 吃旧会话历史）
+    if _is_progress_query_text(user_text):
+        _handle_progress_query(message_id, user_text)
         return
 
     # ③ 跨云迁移录入意图（纯关键词、无路径）→ 弹录入卡让用户填地址
