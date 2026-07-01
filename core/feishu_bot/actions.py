@@ -523,6 +523,20 @@ def _h_confirm_transfer(action_val, open_id, chat_id, form_value):
     return {"toast": {"type": "success", "content": "\u5df2\u5f00\u59cb\u8fc1\u79fb\uff0c\u5b8c\u6210\u540e\u63a8\u9001\u7ed3\u679c"}}
 
 
+def _h_query_transfer_progress(action_val, open_id, chat_id, form_value):
+    """点“查询这条”：拉迁移任务最新状态，原地刷成进度/结果卡。"""
+    job_id = action_val.get("job_id", "") if isinstance(action_val, dict) else ""
+    from core.transfer import orchestrator
+    from core.transfer.cards import progress_card, result_card
+    job = orchestrator.get_job(job_id) if job_id else None
+    if not job:
+        return {"toast": {"type": "error", "content": "任务不存在或已过期"}}
+    card = (result_card(job) if job["stage"] in (orchestrator.STAGE_DONE, orchestrator.STAGE_FAILED)
+            else progress_card(job))
+    return {"toast": {"type": "success", "content": f"当前阶段：{job['stage']}"},
+            "card": {"type": "raw", "data": card}}
+
+
 def _h_retry_transfer(action_val, open_id, chat_id, form_value):
     """Retry a failed transfer with the same confirmation flow."""
     job_id = action_val.get("job_id", "") if isinstance(action_val, dict) else ""
@@ -648,6 +662,7 @@ _ACTION_HANDLERS = {
     "submit_volcano_query": _h_submit_volcano_query,
     "submit_transfer":    _h_submit_transfer,
     "confirm_transfer":   _h_confirm_transfer,
+    "query_transfer_progress": _h_query_transfer_progress,
     "retry_transfer":     _h_retry_transfer,
     "submit_cpfs_dataflow":  _h_submit_cpfs_dataflow,
     "confirm_cpfs_dataflow": _h_confirm_cpfs_dataflow,

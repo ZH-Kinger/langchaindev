@@ -130,6 +130,19 @@ def test_progress_query_no_id_gives_hint(monkeypatch):
     assert cap and ("任务ID" in cap[0] or "按钮" in cap[0])   # 提示带ID/点按钮，不落 LLM
 
 
+def test_progress_query_no_id_lists_recent_tasks(monkeypatch):
+    import json as _j
+    from core.feishu_bot import messaging as mg
+    job = orchestrator.create_job_record(
+        orchestrator.make_plan("sink", "/cwr/recent/", "oss://bk/r/", fs_id="bmcpfs-x", region="cn-hangzhou"),
+        open_id="ou_me")
+    sent = []
+    monkeypatch.setattr(mg, "_feishu_reply_card", lambda mid, card: sent.append(card))
+    monkeypatch.setattr(mg, "_feishu_reply", lambda mid, text: sent.append({"text": text}))
+    messages._handle_progress_query("m1", "查询进度", "ou_me")
+    assert sent and job["job_id"] in _j.dumps(sent[0], ensure_ascii=False)   # 卡片列出了该任务
+
+
 def test_progress_query_by_cpfs_id(monkeypatch):
     from core.feishu_bot import messaging as mg
     job = orchestrator.create_job_record(
