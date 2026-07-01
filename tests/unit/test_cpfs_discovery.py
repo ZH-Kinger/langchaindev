@@ -73,12 +73,18 @@ def test_region_fs_bucket_helpers(monkeypatch):
     opts = [
         {"region": "cn-hangzhou", "fs_id": "bmcpfs-a", "edition": "computing", "oss_bucket": "bk1"},
         {"region": "cn-hangzhou", "fs_id": "bmcpfs-a", "edition": "computing", "oss_bucket": "bk2"},
-        {"region": "cn-shanghai", "fs_id": "cpfs-b", "edition": "general", "oss_bucket": "bk3"},
+    ]
+    # 文件系统清单含北京(无绑定)——地区/文件系统下拉来自它
+    fss = [
+        {"region": "cn-hangzhou", "fs_id": "bmcpfs-a", "edition": "computing"},
+        {"region": "cn-beijing", "fs_id": "bmcpfs-b", "edition": "computing"},
     ]
     monkeypatch.setattr(discovery, "get_options", lambda *a, **k: opts)
-    assert discovery.regions() == ["cn-hangzhou", "cn-shanghai"]
-    assert discovery.filesystems_in("cn-hangzhou") == [{"fs_id": "bmcpfs-a", "edition": "computing"}]
+    monkeypatch.setattr(discovery, "get_filesystems", lambda *a, **k: fss)
+    assert discovery.regions() == ["cn-beijing", "cn-hangzhou"]           # 北京也在(无绑定)
+    assert discovery.filesystems_in("cn-beijing") == [{"fs_id": "bmcpfs-b", "edition": "computing"}]
     assert discovery.buckets_in("cn-hangzhou") == ["bk1", "bk2"]
+    assert discovery.buckets_in("cn-beijing") == []                       # 无绑定→空桶
 
 
 def test_get_options_uses_cache(monkeypatch):

@@ -112,6 +112,40 @@ def test_query_task_parses_progress(monkeypatch):
     assert st["bytes_total"] == 1000
 
 
+def test_create_dataflow_computing(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(eng, "_call",
+                        lambda c, a, q: captured.update(action=a, query=q) or {"DataFlowId": "df-x"})
+    monkeypatch.setattr(eng, "_client", lambda *a, **k: object())
+    dfid = eng.create_dataflow("bmcpfs-a", "cn-hangzhou", oss_bucket="bk",
+                               oss_path="/wuji_il/", fs_path="/cwr/")
+    assert dfid == "df-x" and captured["action"] == "CreateDataFlow"
+    q = captured["query"]
+    assert q["SourceStorage"] == "oss://bk"
+    assert q["FileSystemPath"] == "/cwr/" and q["SourceStoragePath"] == "/wuji_il/"
+
+
+def test_create_dataflow_general_rejected(monkeypatch):
+    monkeypatch.setattr(eng, "_client", lambda *a, **k: object())
+    with pytest.raises(eng.NasDataflowError):
+        eng.create_dataflow("cpfs-general", "cn-hangzhou", oss_bucket="bk")
+
+
+def test_wait_dataflow_running_ok(monkeypatch):
+    monkeypatch.setattr(eng, "_call", lambda *a, **k: {"DataFlows": {"DataFlow": [
+        {"DataFlowId": "df-1", "Status": "Running"}]}})
+    monkeypatch.setattr(eng, "_client", lambda *a, **k: object())
+    eng.wait_dataflow_running("bmcpfs-a", "cn-hangzhou", "df-1", retries=1)   # 不抛即通过
+
+
+def test_wait_dataflow_misconfigured_raises(monkeypatch):
+    monkeypatch.setattr(eng, "_call", lambda *a, **k: {"DataFlows": {"DataFlow": [
+        {"DataFlowId": "df-1", "Status": "Misconfigured", "ErrorMessage": "SourceStorageUnreachable"}]}})
+    monkeypatch.setattr(eng, "_client", lambda *a, **k: object())
+    with pytest.raises(eng.NasDataflowError):
+        eng.wait_dataflow_running("bmcpfs-a", "cn-hangzhou", "df-1", retries=1)
+
+
 def test_list_filesystems_filters_cpfs(monkeypatch):
     body = {"FileSystems": {"FileSystem": [
         {"FileSystemId": "bmcpfs-a"}, {"FileSystemId": "cpfs-b"},

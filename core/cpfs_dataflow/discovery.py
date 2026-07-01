@@ -92,10 +92,9 @@ def _fs_pairs(open_id: str = "") -> list[tuple[str, str]]:
     return pairs
 
 
-def discover(open_id: str = "") -> list[dict]:
-    """枚举所有 fs 的 DataFlow，返回 options 列表。单 fs/地域失败不影响其它。"""
+def _discover_from_pairs(pairs: list[tuple[str, str]], open_id: str = "") -> list[dict]:
     options: list[dict] = []
-    for fs_id, region in _fs_pairs(open_id=open_id):
+    for fs_id, region in pairs:
         try:
             for flow in engine_nas.list_dataflows(fs_id, region, open_id=open_id):
                 bucket, _ = _split_source_storage(flow.get("source_storage", ""))
@@ -107,41 +106,68 @@ def discover(open_id: str = "") -> list[dict]:
     return options
 
 
+def discover(open_id: str = "") -> list[dict]:
+    """枚举所有 fs 的 DataFlow 绑定，返回 options 列表（兼容 CLI/旧调用）。"""
+    return _discover_from_pairs(_fs_pairs(open_id=open_id), open_id=open_id)
+
+
 def refresh(open_id: str = "") -> list[dict]:
-    """重新发现并写缓存。"""
-    options = discover(open_id=open_id)
+    """重新发现并写缓存。缓存含 options（绑定）+ filesystems（所有 CPFS，含无绑定的）。"""
+    pairs = _fs_pairs(open_id=open_id)
+    filesystems = [{"region": r, "fs_id": f, "edition": engine_nas.edition(f)} for f, r in pairs]
+    options = _discover_from_pairs(pairs, open_id=open_id)
     try:
         get_redis().setex(_MAP_KEY, settings.CPFS_MAP_TTL_SECONDS,
-                          json.dumps(options, ensure_ascii=False))
+                          json.dumps({"options": options, "filesystems": filesystems}, ensure_ascii=False))
     except Exception:
         logger.warning("[CPFS] 写 DataFlow 映射缓存失败")
     return options
 
 
-def get_options(refresh_if_empty: bool = True, open_id: str = "") -> list[dict]:
-    """读缓存映射表；空且允许则实时发现并回填。"""
+def _cached(open_id: str = "", refresh_if_empty: bool = True) -> dict:
     try:
         raw = get_redis().get(_MAP_KEY)
         if raw:
-            return json.loads(raw)
+            d = json.loads(raw)
+            if isinstance(d, dict):
+                return d
+            if isinstance(d, list):     # 兼容旧版纯 options 缓存
+                return {"options": d, "filesystems": []}
     except Exception:
         pass
     if refresh_if_empty:
-        return refresh(open_id=open_id)
-    return []
+        refresh(open_id=open_id)
+        try:
+            raw = get_redis().get(_MAP_KEY)
+            if raw:
+                d = json.loads(raw)
+                return d if isinstance(d, dict) else {"options": d, "filesystems": []}
+        except Exception:
+            pass
+    return {"options": [], "filesystems": []}
+
+
+def get_options(refresh_if_empty: bool = True, open_id: str = "") -> list[dict]:
+    """DataFlow 绑定选项（有绑定的 fs 才有）。"""
+    return _cached(open_id, refresh_if_empty).get("options", [])
+
+
+def get_filesystems(open_id: str = "") -> list[dict]:
+    """所有扫描到的 CPFS 文件系统（含无 DataFlow 的），用于地区/文件系统下拉。"""
+    return _cached(open_id).get("filesystems", [])
 
 
 def regions(open_id: str = "") -> list[str]:
-    """有可用 DataFlow 绑定的地区列表（供级联第一步）。"""
-    return sorted({o["region"] for o in get_options(open_id=open_id) if o.get("region")})
+    """有 CPFS 文件系统的地区列表（含暂无 DataFlow 的，供级联第一步）。"""
+    return sorted({f["region"] for f in get_filesystems(open_id=open_id) if f.get("region")})
 
 
 def filesystems_in(region: str, open_id: str = "") -> list[dict]:
     """某地区下的 CPFS 文件系统（去重），含 edition。"""
     seen: dict[str, dict] = {}
-    for o in get_options(open_id=open_id):
-        if o.get("region") == region and o.get("fs_id") and o["fs_id"] not in seen:
-            seen[o["fs_id"]] = {"fs_id": o["fs_id"], "edition": o.get("edition", "")}
+    for f in get_filesystems(open_id=open_id):
+        if f.get("region") == region and f.get("fs_id") and f["fs_id"] not in seen:
+            seen[f["fs_id"]] = {"fs_id": f["fs_id"], "edition": f.get("edition", "")}
     return list(seen.values())
 
 

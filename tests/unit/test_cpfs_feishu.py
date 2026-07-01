@@ -1,34 +1,6 @@
-"""CPFS 飞书接线：意图、卡片结构、action handler。"""
+"""CPFS 飞书接线：意图、卡片结构、地址→建流 handler。"""
 from core.feishu_bot import messages, actions
-from core.cpfs_dataflow import cards, orchestrator
-
-
-def test_sink_preheat_intent_keywords():
-    assert messages._is_sink_preheat_entry_intent("数据预热")
-    assert messages._is_sink_preheat_entry_intent("数据沉降")
-    assert messages._is_sink_preheat_entry_intent("cpfs沉降")
-    assert not messages._is_sink_preheat_entry_intent("查一下 GPU 利用率")
-
-
-def test_cards_build(monkeypatch):
-    from core.cpfs_dataflow import discovery
-    monkeypatch.setattr(discovery, "get_options", lambda *a, **k: [])   # 测回退手填表单
-    ec = cards.entry_card()
-    assert ec["schema"] == "2.0"
-    # 回退表单含 operation/cpfs_path/oss
-    form = ec["body"]["elements"][1]
-    names = {e.get("name") for e in form["elements"]}
-    assert {"operation", "cpfs_path", "oss"} <= names
-
-    job = orchestrator.create_job_record(
-        orchestrator.make_plan("sink", "cpfs://bmcpfs-x/o/", "oss://bk/e/"))
-    cc = cards.confirm_card(job)
-    # 确认卡按钮回调 action 正确
-    assert _find_action(cc) == "confirm_cpfs_dataflow"
-    job["stage"] = "DONE"
-    assert cards.result_card(job)["header"]["template"] == "green"
-    job["stage"] = "FAILED"
-    assert cards.result_card(job)["header"]["template"] == "red"
+from core.cpfs_dataflow import cards, orchestrator, engine_nas
 
 
 def _find_action(obj):
@@ -47,8 +19,45 @@ def _find_action(obj):
     return None
 
 
-def test_submit_handler_requires_path():
-    out = actions._h_submit_cpfs_dataflow({}, "ou_1", "chat", {"operation": "sink"})
+def test_sink_preheat_intent_keywords():
+    assert messages._is_sink_preheat_entry_intent("数据预热")
+    assert messages._is_sink_preheat_entry_intent("数据沉降")
+    assert messages._is_sink_preheat_entry_intent("cpfs沉降")
+    assert not messages._is_sink_preheat_entry_intent("查一下 GPU 利用率")
+
+
+def test_entry_card_addresses(monkeypatch):
+    from core.cpfs_dataflow import discovery
+    monkeypatch.setattr(discovery, "regions", lambda *a, **k: ["cn-hangzhou", "cn-beijing"])
+    ec = cards.entry_card()
+    assert ec["schema"] == "2.0"
+    form = ec["body"]["elements"][1]
+    names = {e.get("name") for e in form["elements"]}
+    assert {"region", "source", "dest"} <= names
+    assert _find_action(ec) == "submit_cpfs_dataflow"
+
+
+def test_entry_card_region_fallback_input(monkeypatch):
+    from core.cpfs_dataflow import discovery
+    monkeypatch.setattr(discovery, "regions", lambda *a, **k: [])   # 无发现→地区改输入框
+    ec = cards.entry_card()
+    form = ec["body"]["elements"][1]
+    region_elem = next(e for e in form["elements"] if e.get("name") == "region")
+    assert region_elem["tag"] == "input"
+
+
+def test_confirm_result_cards():
+    job = orchestrator.create_job_record(
+        orchestrator.make_plan("sink", "/cwr/o/", "oss://bk/e/", fs_id="bmcpfs-x", region="cn-hangzhou"))
+    assert _find_action(cards.confirm_card(job)) == "confirm_cpfs_dataflow"
+    job["stage"] = "DONE"
+    assert cards.result_card(job)["header"]["template"] == "green"
+    job["stage"] = "FAILED"
+    assert cards.result_card(job)["header"]["template"] == "red"
+
+
+def test_submit_handler_requires_fields():
+    out = actions._h_submit_cpfs_dataflow({}, "ou_1", "chat", {"region": "cn-hangzhou"})
     assert out["toast"]["type"] == "error"
 
 
@@ -56,9 +65,14 @@ def test_submit_handler_accepts(monkeypatch):
     import core.dsw_scheduler as sch
     monkeypatch.setattr(sch, "_send_card", lambda *a, **k: None, raising=False)
     monkeypatch.setattr(sch, "_send_text", lambda *a, **k: None, raising=False)
+    # 不真正建流：mock plan_from_addresses
+    monkeypatch.setattr(orchestrator, "plan_from_addresses",
+                        lambda region, s, d, **k: orchestrator.make_plan(
+                            "sink", "/cwr/o/", "oss://bk/e/", fs_id="bmcpfs-x", region=region,
+                            data_flow_id="df-new"))
     out = actions._h_submit_cpfs_dataflow(
         {}, "ou_1", "chat",
-        {"operation": "sink", "cpfs_path": "cpfs://bmcpfs-x/o/", "oss": "oss://bk/e/"})
+        {"region": "cn-hangzhou", "source": "/cpfs/cwr/o/", "dest": "oss://bk/e/"})
     assert out["toast"]["type"] == "success"
 
 
@@ -67,56 +81,9 @@ def test_confirm_handler_missing_job():
     assert out["toast"]["type"] == "error"
 
 
-def test_entry_card_step1_with_regions(monkeypatch):
-    from core.cpfs_dataflow import discovery
-    monkeypatch.setattr(discovery, "regions", lambda *a, **k: ["cn-hangzhou", "cn-shanghai"])
-    ec = cards.entry_card()
-    form = ec["body"]["elements"][1]
-    names = {e.get("name") for e in form["elements"]}
-    assert "operation" in names and "region" in names    # 第1步：操作+地区
-    assert "cpfs_path" not in names                       # 不再是扁平/手填
-
-
-def test_wizard_step2_card_has_fs_and_bucket(monkeypatch):
-    from core.cpfs_dataflow import discovery
-    monkeypatch.setattr(discovery, "filesystems_in",
-                        lambda r, **k: [{"fs_id": "bmcpfs-a", "edition": "computing"}])
-    monkeypatch.setattr(discovery, "buckets_in", lambda r, **k: ["bk-1", "bk-2"])
-    out = actions._h_cpfs_wizard({}, "ou_1", "chat", {"operation": "sink", "region": "cn-hangzhou"})
-    card2 = out["card"]["data"]
-    form = card2["body"]["elements"][1]
-    names = {e.get("name") for e in form["elements"]}
-    assert {"fs_id", "cpfs_dir", "oss_bucket", "oss_subdir"} <= names
-
-
-def test_wizard_requires_region():
-    out = actions._h_cpfs_wizard({}, "ou_1", "chat", {"operation": "sink"})
-    assert out["toast"]["type"] == "error"
-
-
-def test_resolve_wizard_locates_dataflow(monkeypatch):
-    import core.dsw_scheduler as sch
-    from core.cpfs_dataflow import engine_nas
-    monkeypatch.setattr(sch, "_send_card", lambda *a, **k: None, raising=False)
-    monkeypatch.setattr(sch, "_send_text", lambda *a, **k: None, raising=False)
-    monkeypatch.setattr(engine_nas, "resolve_dataflow",
-                        lambda *a, **k: {"data_flow_id": "df-1", "oss_prefix": "wuji_il", "fs_path": "/cwr/"})
-    out = actions._h_resolve_cpfs_wizard(
-        {"operation": "sink", "region": "cn-hangzhou"}, "ou_1", "chat",
-        {"fs_id": "bmcpfs-a", "cpfs_dir": "/cwr/third_party_data/raw/",
-         "oss_bucket": "wuji-bucket-hangzhou", "oss_subdir": "label"})
-    assert out["toast"]["type"] == "success"
-
-
-def test_resolve_wizard_requires_fields():
-    out = actions._h_resolve_cpfs_wizard(
-        {"operation": "sink", "region": "cn-hangzhou"}, "ou_1", "chat", {"fs_id": "bmcpfs-a"})
-    assert out["toast"]["type"] == "error"
-
-
 def test_confirm_handler_launches(monkeypatch):
     monkeypatch.setattr(orchestrator, "run_to_completion", lambda job, **k: job)
     job = orchestrator.create_job_record(
-        orchestrator.make_plan("sink", "cpfs://bmcpfs-y/o2/", "oss://bk/e2/"))
+        orchestrator.make_plan("sink", "/cwr/o2/", "oss://bk/e2/", fs_id="bmcpfs-y", region="cn-hangzhou"))
     out = actions._h_confirm_cpfs_dataflow({"job_id": job["job_id"]}, "ou_1", "chat", {})
     assert out["toast"]["type"] == "success"

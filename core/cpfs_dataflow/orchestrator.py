@@ -153,6 +153,65 @@ def make_plan(operation: str, cpfs_path: str = "", oss: str = "", *,
     )
 
 
+def _classify(addr: str) -> str:
+    a = (addr or "").strip()
+    low = a.lower()
+    if low.startswith("oss://"):
+        return "oss"
+    if low.startswith(("cpfs://", "bmcpfs://", "cepfs://")) or a.startswith("/"):
+        return "cpfs"
+    return ""
+
+
+def _region_fs(region: str, open_id: str = "") -> str:
+    fss = engine_nas.list_filesystems(region, open_id=open_id)
+    if not fss:
+        raise DataflowPathError(f"地区 {region} 下没有 CPFS 文件系统")
+    return fss[0]
+
+
+def plan_from_addresses(region: str, source: str, dest: str, *, open_id: str = "",
+                        create: bool = True) -> DataflowPlan:
+    """按 源/目的地址 定方向并（总是）新建 DataFlow，返回计划。
+
+    源是 CPFS、目的是 OSS → 沉降(Export)；源是 OSS、目的是 CPFS → 预热(Import)。
+    地区由卡片给定；该地区唯一的 CPFS 文件系统自动选中（cpfs://<fs> 显式则用之）。
+    """
+    region = (region or settings.CPFS_REGION or "").strip()
+    if not region:
+        raise DataflowPathError("请先选择地区")
+    s_kind, d_kind = _classify(source), _classify(dest)
+    if {s_kind, d_kind} != {"cpfs", "oss"}:
+        raise DataflowPathError("源/目的必须一个是 CPFS 路径、另一个是 oss:// 路径")
+    if s_kind == "cpfs":
+        operation, cpfs_addr, oss_addr = OP_SINK, source, dest
+    else:
+        operation, cpfs_addr, oss_addr = OP_PREHEAT, dest, source
+
+    if "://" in cpfs_addr:
+        fs_id, fs_path = _parse_cpfs(cpfs_addr)
+    else:
+        fs_id = _region_fs(region, open_id=open_id)
+        mount = (settings.CPFS_MOUNT_PREFIX or "").rstrip("/")
+        p = cpfs_addr.strip()
+        if mount and (p == mount or p.startswith(mount + "/")):
+            p = p[len(mount):] or "/"
+        fs_path = engine_nas.normalize_dir(p)
+    oss_bucket, oss_prefix = _parse_oss(oss_addr)
+    if not oss_bucket:
+        raise DataflowPathError("OSS 地址缺少 bucket")
+
+    data_flow_id = ""
+    if create:
+        data_flow_id = engine_nas.create_dataflow(
+            fs_id, region, oss_bucket=oss_bucket, oss_path=oss_prefix or "/",
+            fs_path=fs_path, open_id=open_id)
+        engine_nas.wait_dataflow_running(fs_id, region, data_flow_id, open_id=open_id)
+
+    return make_plan(operation, fs_path, f"oss://{oss_bucket}/{oss_prefix}",
+                     fs_id=fs_id, region=region, data_flow_id=data_flow_id)
+
+
 def _job_id(plan: DataflowPlan) -> str:
     day = datetime.now(_BJ).strftime("%Y%m%d")
     raw = f"{plan.operation}|{plan.fs_id}|{plan.cpfs_dir}|{plan.oss_bucket}/{plan.oss_prefix}|{day}"

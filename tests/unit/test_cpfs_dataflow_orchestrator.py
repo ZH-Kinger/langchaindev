@@ -43,6 +43,37 @@ def test_make_plan_full_path_strips_mount(monkeypatch):
     assert plan.dst_directory == "/cwr/third_party_data/label/"
 
 
+def test_plan_from_addresses_sink(monkeypatch):
+    monkeypatch.setattr(engine_nas, "list_filesystems", lambda region, **k: ["bmcpfs-a"])
+    monkeypatch.setattr(engine_nas, "create_dataflow", lambda *a, **k: "df-new")
+    monkeypatch.setattr(engine_nas, "wait_dataflow_running", lambda *a, **k: None)
+    plan = orch.plan_from_addresses("cn-hangzhou", "/cpfs/cwr/label/", "oss://bk/wuji_il/")
+    assert plan.operation == "sink" and plan.action == "Export"
+    assert plan.fs_id == "bmcpfs-a" and plan.data_flow_id == "df-new"
+    assert plan.cpfs_dir == "/cwr/label/"          # 去 /cpfs 挂载前缀
+    assert plan.oss_bucket == "bk" and plan.oss_prefix == "wuji_il/"
+
+
+def test_plan_from_addresses_preheat(monkeypatch):
+    monkeypatch.setattr(engine_nas, "list_filesystems", lambda region, **k: ["bmcpfs-a"])
+    monkeypatch.setattr(engine_nas, "create_dataflow", lambda *a, **k: "df-1")
+    monkeypatch.setattr(engine_nas, "wait_dataflow_running", lambda *a, **k: None)
+    plan = orch.plan_from_addresses("cn-hangzhou", "oss://bk/raw/", "/cpfs/cwr/dataset/")
+    assert plan.operation == "preheat" and plan.action == "Import"
+    assert plan.cpfs_dir == "/cwr/dataset/" and plan.oss_bucket == "bk"
+
+
+def test_plan_from_addresses_bad_pair():
+    with pytest.raises(orch.DataflowPathError):
+        orch.plan_from_addresses("cn-hangzhou", "oss://a/", "oss://b/")   # 两个都是 oss
+
+
+def test_plan_from_addresses_needs_region(monkeypatch):
+    monkeypatch.setattr(orch.settings, "CPFS_REGION", "")
+    with pytest.raises(orch.DataflowPathError):
+        orch.plan_from_addresses("", "/cpfs/x/", "oss://b/")
+
+
 def test_make_plan_bad_operation():
     with pytest.raises(orch.DataflowPathError):
         orch.make_plan("evict", "cpfs://bmcpfs-x/d/")

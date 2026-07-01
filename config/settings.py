@@ -216,7 +216,7 @@ class Config:
     CPFS_FILE_SYSTEM_IDS    = os.environ.get("CPFS_FILE_SYSTEM_IDS", "")
     # 多地域扫描：CPFS_FILE_SYSTEM_IDS 留空时，按这些地域 DescribeFileSystems 自动枚举 CPFS。
     # 需 nas 读权限（AliyunNASFullAccess）。逗号分隔。
-    CPFS_REGIONS            = os.environ.get("CPFS_REGIONS", "cn-hangzhou,cn-shanghai,cn-beijing,cn-shenzhen,cn-wulanchabu")
+    CPFS_REGIONS            = os.environ.get("CPFS_REGIONS", "cn-hangzhou,cn-beijing,ap-southeast-1")
     CPFS_MAP_TTL_SECONDS    = int(os.environ.get("CPFS_MAP_TTL_SECONDS", str(6 * 3600)))
     # 本地挂载前缀：用户给完整路径 /cpfs/cwr/.../ 时去掉它 → DataFlow 文件系统路径 /cwr/.../
     CPFS_MOUNT_PREFIX       = os.environ.get("CPFS_MOUNT_PREFIX", "/cpfs")

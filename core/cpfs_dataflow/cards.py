@@ -22,40 +22,30 @@ def _region_options(open_id: str = ""):
 
 
 def entry_card(region_options=None):
-    """第1步：选 操作 + 地区。有发现的地区→级联；否则回退手填。"""
+    """填 源地址 + 目的地址 + 选地区 → 后端建 DataFlow + 迁移任务。方向由地址类型自动判断。"""
     if region_options is None:
         region_options = _region_options()
-    op_select = {"tag": "select_static", "name": "operation", "initial_option": "sink",
-                 "placeholder": _pt("选择操作"), "options": _op_options()}
-    if region_options:
-        intro = ("**第 1 步**：选操作 + 地区，下一步再选 CPFS 与 OSS。\n"
-                 "> 预热=OSS→CPFS 加载；沉降=CPFS→OSS 刷回。镜像仓库（cri 开头）已屏蔽。")
-        form_elems = [
-            op_select,
-            {"tag": "select_static", "name": "region", "placeholder": _pt("选择地区"),
-             "options": region_options},
-            {"tag": "button", "text": _pt("➡️ 下一步"), "type": "primary",
-             "form_action_type": "submit", "name": "next",
-             "behaviors": [{"type": "callback", "value": {"action": "cpfs_wizard"}}]},
-        ]
-    else:
-        intro = ("未发现绑定，请**按规范**手填：\n"
-                 "• CPFS：`cpfs://<fs-id>/<dir>/` 或完整路径 `/cpfs/<dir>/`\n"
-                 "• OSS：`oss://<bucket>/<prefix>/`（可留空）\n"
-                 "• 地域：与 CPFS/OSS 同区，示例 cn-hangzhou / cn-wulanchabu\n"
-                 "> 预热=OSS→CPFS；沉降=CPFS→OSS。镜像仓库（cri 开头）请勿填。")
-        form_elems = [
-            op_select,
-            {"tag": "input", "name": "cpfs_path", "label": _pt("CPFS 目录"), "required": True,
-             "placeholder": _pt("如 cpfs://bmcpfs-xxx/cwr/label/ 或 /cpfs/cwr/label/")},
-            {"tag": "input", "name": "oss", "label": _pt("OSS 路径（可留空）"),
-             "placeholder": _pt("如 oss://wuji-bucket-hangzhou/wuji_il/")},
-            {"tag": "input", "name": "region", "label": _pt("地域（可留空，默认 CPFS_REGION）"),
-             "placeholder": _pt("如 cn-hangzhou")},
-            {"tag": "button", "text": _pt("➡️ 解析"), "type": "primary",
-             "form_action_type": "submit", "name": "submit",
-             "behaviors": [{"type": "callback", "value": {"action": "submit_cpfs_dataflow"}}]},
-        ]
+    region_elem = (
+        {"tag": "select_static", "name": "region", "placeholder": _pt("选择地区"),
+         "options": region_options}
+        if region_options else
+        {"tag": "input", "name": "region", "label": _pt("地区"), "required": True,
+         "placeholder": _pt("如 cn-hangzhou")}
+    )
+    intro = ("填**源地址**、**目的地址**并选地区，我来建 DataFlow + 迁移任务。\n"
+             "• 源 CPFS → 目的 OSS = **沉降**；源 OSS → 目的 CPFS = **预热**\n"
+             "• CPFS：`/cpfs/<dir>/` 或 `cpfs://<fs-id>/<dir>/`；OSS：`oss://<bucket>/<prefix>/`\n"
+             "> CPFS 与 OSS 须同地区。镜像仓库（cri 开头）请勿填。")
+    form_elems = [
+        region_elem,
+        {"tag": "input", "name": "source", "label": _pt("源地址"), "required": True,
+         "placeholder": _pt("如 /cpfs/cwr/label/ 或 oss://bk/prefix/")},
+        {"tag": "input", "name": "dest", "label": _pt("目的地址"), "required": True,
+         "placeholder": _pt("如 oss://wuji-bucket-hangzhou/wuji_il/ 或 /cpfs/cwr/label/")},
+        {"tag": "button", "text": _pt("➡️ 解析并建流"), "type": "primary",
+         "form_action_type": "submit", "name": "submit",
+         "behaviors": [{"type": "callback", "value": {"action": "submit_cpfs_dataflow"}}]},
+    ]
     return {
         "schema": "2.0",
         "config": {"wide_screen_mode": True},
@@ -63,37 +53,6 @@ def entry_card(region_options=None):
         "body": {"elements": [
             {"tag": "markdown", "content": intro},
             {"tag": "form", "name": "cpfs_entry", "elements": form_elems},
-        ]},
-    }
-
-
-def wizard_select_card(operation: str, region: str, fs_options: list, bucket_options: list):
-    """第2步：在所选地区下，独立选 CPFS 文件系统 + 目录、OSS 桶 + 子目录。"""
-    op_label = {"preheat": "预热(OSS→CPFS)", "sink": "沉降(CPFS→OSS)"}.get(operation, operation)
-    fs_opts = [{"text": _pt(f"{f['fs_id']}（{f.get('edition','')}）"), "value": f["fs_id"]}
-               for f in fs_options]
-    bk_opts = [{"text": _pt(b), "value": b} for b in bucket_options]
-    return {
-        "schema": "2.0",
-        "config": {"wide_screen_mode": True},
-        "header": {"title": _pt("\U0001f504 第 2 步：选 CPFS 与 OSS"), "template": "blue"},
-        "body": {"elements": [
-            {"tag": "markdown", "content": f"**操作**：{op_label}　**地区**：{region}"},
-            {"tag": "form", "name": "cpfs_wizard2", "elements": [
-                {"tag": "select_static", "name": "fs_id", "placeholder": _pt("选择 CPFS 文件系统"),
-                 "options": fs_opts},
-                {"tag": "input", "name": "cpfs_dir", "label": _pt("CPFS 目录"), "required": True,
-                 "placeholder": _pt("如 /cwr/third_party_data/raw/")},
-                {"tag": "select_static", "name": "oss_bucket", "placeholder": _pt("选择 OSS 桶"),
-                 "options": bk_opts},
-                {"tag": "input", "name": "oss_subdir", "label": _pt("OSS 子目录（可留空）"),
-                 "placeholder": _pt("如 label/")},
-                {"tag": "button", "text": _pt("➡️ 解析"), "type": "primary",
-                 "form_action_type": "submit", "name": "resolve",
-                 "behaviors": [{"type": "callback",
-                                "value": {"action": "resolve_cpfs_wizard",
-                                          "operation": operation, "region": region}}]},
-            ]},
         ]},
     }
 

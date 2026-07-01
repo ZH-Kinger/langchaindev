@@ -151,6 +151,61 @@ def list_dataflows(fs_id: str, region: str = "", *, open_id: str = "") -> list[d
     return uniq
 
 
+def create_dataflow(fs_id: str, region: str = "", *, oss_bucket: str, oss_path: str = "/",
+                    fs_path: str = "/", description: str = "", open_id: str = "") -> str:
+    """CreateDataFlow：把 CPFS FileSystemPath 与 oss://bucket/SourceStoragePath 绑定，返回 DataFlowId。
+
+    目前实现 CPFS 智算版(bmcpfs-)参数（SourceStoragePath + FileSystemPath）。通用版需 FsetId/Throughput，
+    另行支持。前置：OSS 桶需打标签 cpfs-dataflow=true + 服务关联角色。异步，需 wait_dataflow_running。
+    """
+    region = region or settings.CPFS_REGION or "cn-hangzhou"
+    if edition(fs_id) != "computing":
+        raise NasDataflowError("目前仅支持 CPFS 智算版(bmcpfs-)自动创建 DataFlow；通用版需 FsetId/Throughput。")
+    client = _client(open_id, region)
+    body = _call(client, "CreateDataFlow", {
+        "RegionId": region,
+        "FileSystemId": fs_id,
+        "SourceStorage": f"oss://{oss_bucket}",
+        "SourceStoragePath": normalize_dir(oss_path),
+        "FileSystemPath": normalize_dir(fs_path),
+        "Description": description or "auto-created by aiops-bot",
+    })
+    for d in _iter_dicts(body):
+        dfid = _get(d, "DataFlowId")
+        if dfid:
+            logger.info("[CPFS] CreateDataFlow ok fs=%s %s ↔ oss://%s%s → %s",
+                        fs_id, normalize_dir(fs_path), oss_bucket, normalize_dir(oss_path), dfid)
+            return dfid
+    raise NasDataflowError(f"CreateDataFlow 未返回 DataFlowId：{body}")
+
+
+def describe_dataflow(fs_id: str, region: str, data_flow_id: str, *, open_id: str = "") -> dict:
+    client = _client(open_id, region)
+    body = _call(client, "DescribeDataFlows", {
+        "RegionId": region, "FileSystemId": fs_id,
+        "Filters": [{"Key": "DataFlowIds", "Value": data_flow_id}],
+    })
+    for d in _dicts_with(body, "DataFlowId"):
+        if _get(d, "DataFlowId") == data_flow_id:
+            return {"status": _get(d, "Status"), "error": _get(d, "ErrorMessage")}
+    return {"status": "", "error": ""}
+
+
+def wait_dataflow_running(fs_id: str, region: str, data_flow_id: str, *,
+                          open_id: str = "", retries: int = 30, interval: float = 4.0) -> None:
+    """轮询 DataFlow 到 Running。Misconfigured/Deleting/Stopped 抛错；超时放行（建任务时服务端复检）。"""
+    import time
+    for _ in range(max(1, retries)):
+        st = describe_dataflow(fs_id, region, data_flow_id, open_id=open_id)
+        s = (st.get("status") or "").lower()
+        if s == "running":
+            return
+        if s in ("misconfigured", "deleting", "stopped"):
+            raise NasDataflowError(f"DataFlow {data_flow_id} 状态 {st.get('status')}：{st.get('error') or ''}")
+        time.sleep(interval)
+    logger.warning("[CPFS] DataFlow %s 未在轮询内 Running，继续建任务", data_flow_id)
+
+
 def list_filesystems(region: str, *, open_id: str = "") -> list[str]:
     """DescribeFileSystems 列出某地域的 CPFS/CPFS 智算版文件系统 ID（cpfs-/bmcpfs- 前缀）。
 
