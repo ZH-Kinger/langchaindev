@@ -406,6 +406,42 @@ def _h_submit_ram_query(action_val, open_id, chat_id, form_value):
             "toast": {"type": "error", "content": "\u67e5\u8be2\u5931\u8d25"},
             "card": {"type": "raw", "data": query_error_card(login_name, str(exc))},
         }
+
+
+# \u706b\u5c71\u5f15\u64ce IAM \u8d26\u6237\u67e5\u8be2\uff1a\u5f55\u5165 / \u63d0\u4ea4
+
+def _h_open_volcano_query(action_val, open_id, chat_id, form_value):
+    from core.volcano_iam_query_cards import query_entry_card
+    return {"toast": {"type": "info", "content": "\u8bf7\u586b\u5199\u7528\u6237\u540d"},
+            "card": {"type": "raw", "data": query_entry_card()}}
+
+
+def _h_submit_volcano_query(action_val, open_id, chat_id, form_value):
+    fv = form_value or {}
+    user_name = (fv.get("user_name") or fv.get("login_name") or fv.get("q") or "").strip()
+    requested = {"user_name": user_name, "display_name": fv.get("display_name", ""),
+                 "email": fv.get("email", ""), "mobile": fv.get("mobile", "")}
+    from core.volcano_iam_query import (query_volcano_iam_account, VolcanoQueryError,
+                                        VolcanoUserNotFound)
+    from core.volcano_iam_query_cards import query_result_card, query_error_card
+    if not user_name:
+        return {"toast": {"type": "error", "content": "\u8bf7\u586b\u5199\u7528\u6237\u540d"}}
+    try:
+        user = query_volcano_iam_account(user_name)
+        return {"toast": {"type": "success", "content": "\u67e5\u8be2\u5b8c\u6210"},
+                "card": {"type": "raw", "data": query_result_card(user, requested=requested)}}
+    except VolcanoUserNotFound:
+        return {"toast": {"type": "info", "content": "\u672a\u627e\u5230\u7528\u6237"},
+                "card": {"type": "raw", "data": query_result_card(None, requested=requested)}}
+    except VolcanoQueryError as exc:
+        return {"toast": {"type": "error", "content": "\u67e5\u8be2\u5931\u8d25"},
+                "card": {"type": "raw", "data": query_error_card(user_name, str(exc))}}
+    except Exception as exc:
+        logger.error("[VolcanoQuery] failed", exc_info=True)
+        return {"toast": {"type": "error", "content": "\u67e5\u8be2\u5931\u8d25"},
+                "card": {"type": "raw", "data": query_error_card(user_name, str(exc))}}
+
+
 # Transfer: entry / confirm / retry
 
 def _h_submit_transfer(action_val, open_id, chat_id, form_value):
@@ -608,6 +644,8 @@ _ACTION_HANDLERS = {
     "approve_oss_perm_selected": _h_approve_oss_perm_selected,
     "open_ram_query":    _h_open_ram_query,
     "submit_ram_query":  _h_submit_ram_query,
+    "open_volcano_query":   _h_open_volcano_query,
+    "submit_volcano_query": _h_submit_volcano_query,
     "submit_transfer":    _h_submit_transfer,
     "confirm_transfer":   _h_confirm_transfer,
     "retry_transfer":     _h_retry_transfer,

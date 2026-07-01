@@ -427,7 +427,8 @@ def _process_message(message_id: str, chat_id: str, user_text: str, open_id: str
         return
 
     if _is_volcano_account_query_entry_intent(user_text):
-        messaging._feishu_reply(message_id, "\u706b\u5c71\u5f15\u64ce\u8d26\u6237\u67e5\u8be2\u6682\u672a\u63a5\u5165\u3002\u5f53\u524d\u5df2\u63a5\u5165\u7684\u662f\u963f\u91cc\u4e91 RAM \u8d26\u6237\u67e5\u8be2\uff0c\u8bf7\u70b9\u201c\u963f\u91cc\u4e91\u8d26\u6237\u67e5\u8be2\u201d\u3002")
+        from core.volcano_iam_query_cards import query_entry_card
+        messaging._feishu_reply_card(message_id, query_entry_card())
         return
 
     if _is_ram_query_entry_intent(user_text):
