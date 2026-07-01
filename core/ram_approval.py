@@ -631,23 +631,30 @@ def _list_volcano_access_key_ids(client: Any, models: Any, user_name: str) -> li
 
 
 def _volcano_err_code(exc: Exception) -> str:
-    for attr in ("code", "error_code", "status", "reason"):
-        value = getattr(exc, attr, "")
-        if value:
-            return str(value)
+    # 优先读响应 body 里的 Error.Code/Message（如 UserNotExist），比 HTTP status(404) 更有意义。
     body = getattr(exc, "body", "") or ""
     if body:
         try:
             data = json.loads(body)
-            return _deep_first(data, ("Code", "code", "ErrorCode", "error_code", "Message", "message")) or str(body)
+            found = _deep_first(data, ("Code", "code", "ErrorCode", "error_code", "Message", "message"))
+            if found:
+                return found
         except Exception:
-            return str(body)
+            pass
+    for attr in ("code", "error_code", "reason", "status"):
+        value = getattr(exc, attr, "")
+        if value:
+            return str(value)
+    if body:
+        return str(body)
     return str(exc)
 
 
 def _volcano_is_not_exist(exc: Exception) -> bool:
-    text = _volcano_err_code(exc).lower()
-    return any(token in text for token in ("notfound", "not_found", "notexist", "not exist", "no such"))
+    # 同时看 err_code 和完整异常串（body 里常含 "does not exist"）。
+    text = (_volcano_err_code(exc) + " " + str(exc)).lower()
+    return any(token in text for token in
+               ("notfound", "not_found", "notexist", "not exist", "no such", "does not exist"))
 
 
 def _volcano_is_already_exists(exc: Exception) -> bool:

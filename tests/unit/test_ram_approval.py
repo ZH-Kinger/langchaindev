@@ -786,3 +786,21 @@ def test_create_accounts_for_platforms_aggregates_results(monkeypatch):
     assert [r.platform for r in result.platform_results] == ["aliyun_ram", "volcano_iam"]
     assert "ali_ak" in text
     assert "volc_ak" in text
+
+
+def test_volcano_not_exist_recognized_from_404_body():
+    """火山 get_user 404 UserNotExist 应被识别为“用户不存在”，走创建而非报错。"""
+    from core import ram_approval as ra
+
+    class ApiExc(Exception):
+        status = 404
+        reason = "404 Page not found"
+        body = ('{"ResponseMetadata":{"Error":{"Code":"UserNotExist",'
+                '"Message":"User \'test\' does not exist."}}}')
+        def __str__(self):
+            return f"(404) Reason: 404 Page not found HTTP response body: {self.body}"
+
+    e = ApiExc()
+    assert ra._volcano_is_not_exist(e) is True
+    assert ra._volcano_is_already_exists(e) is False
+    assert "UserNotExist" == ra._volcano_err_code(e)
