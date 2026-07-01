@@ -534,7 +534,7 @@ def _h_submit_cpfs_dataflow(action_val, open_id, chat_id, form_value):
             _send_text(open_id, _cfg_cpfs_chat(), f"❌ 请求处理失败：{e}")
 
     threading.Thread(target=_do_prepare, daemon=True).start()
-    return {"toast": {"type": "success", "content": "正在建 DataFlow 并解析，稍候推送确认卡"}}
+    return {"toast": {"type": "success", "content": "正在解析，稍候推送确认卡"}}
 
 
 def _h_confirm_cpfs_dataflow(action_val, open_id, chat_id, form_value):
@@ -565,8 +565,8 @@ def _h_confirm_cpfs_dataflow(action_val, open_id, chat_id, form_value):
 
     threading.Thread(target=_do_run, daemon=True).start()
     from core.cpfs_dataflow.cards import progress_card
-    # 直接把确认卡换成带「查询进度」按钮的进度卡
-    return {"toast": {"type": "success", "content": "已下发，完成后推送结果；也可点“查询进度”"},
+    # 直接把确认卡换成带「查询进度」按钮的进度卡，toast 回带任务 ID
+    return {"toast": {"type": "success", "content": f"已下发，任务 {job_id}；可点“查询进度”"},
             "card": {"type": "raw", "data": progress_card(job)}}
 
 

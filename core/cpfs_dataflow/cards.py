@@ -59,6 +59,7 @@ def entry_card(region_options=None):
 
 def confirm_card(job: dict):
     info_md = (
+        f"**任务ID**：`{job['job_id']}`\n"
         f"**操作**：{job['operation_label']}\n"
         f"**文件系统**：`{job['fs_id']}`（{job.get('edition','')}）　**区域**：{job['region']}\n"
         f"**CPFS 目录**：`{job['cpfs_dir']}`\n"
@@ -81,7 +82,8 @@ def confirm_card(job: dict):
 
 def progress_card(job: dict):
     return card(f"⏳ {job['operation_label']}进行中", [
-        fields(("任务", f"`{job['job_id']}`"), ("阶段", job["stage"]),
+        fields(("任务ID", f"`{job['job_id']}`"), ("阶段", job["stage"]),
+               ("TaskId", f"`{job.get('task_id') or '-'}`"),
                ("文件", f"{job.get('files_done',0)}/{job.get('files_total',0)}")),
         div(f"**fs** `{job['fs_id']}`\n**目录** `{job['directory']}`"),
         hr(),
@@ -96,15 +98,15 @@ def result_card(job: dict):
     finished = job.get("finished_ts", 0)
     if ok:
         return card(f"✅ {job['operation_label']}完成", [
-            fields(("任务", f"`{job['job_id']}`"),
+            fields(("任务ID", f"`{job['job_id']}`"), ("TaskId", f"`{job.get('task_id') or '-'}`"),
                    ("文件数", str(job.get("files_done", 0))),
                    ("数据量", fmt_size(job.get("bytes_done", 0))),
                    ("耗时", fmt_duration(created, finished))),
             div(f"**fs** `{job['fs_id']}`\n**目录** `{job['directory']}`"),
         ], color="green")
     return card(f"❌ {job['operation_label']}失败", [
-        fields(("任务", f"`{job['job_id']}`"), ("阶段", job["stage"]),
-               ("结束", fmt_ts(finished))),
+        fields(("任务ID", f"`{job['job_id']}`"), ("TaskId", f"`{job.get('task_id') or '-'}`"),
+               ("阶段", job["stage"]), ("结束", fmt_ts(finished))),
         div(f"**fs** `{job['fs_id']}`\n**目录** `{job['directory']}`\n"
             f"**失败原因**：{job.get('error') or '未知'}"),
         hr(),
