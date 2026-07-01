@@ -63,6 +63,20 @@ def normalize_dir(path: str) -> str:
     return p
 
 
+def safe_description(desc: str) -> str:
+    """NAS CreateDataFlow 的 Description 约束：仅允许 字母/中文/数字/下划线/短划线/半角冒号，
+    须以字母或中文开头，2~128 字符，不能以 http:// 开头。空格等非法字符会报 IllegalCharacters。"""
+    import re
+    d = (desc or "").strip()
+    # 非法字符（含空格）替换为短划线
+    d = re.sub(r"[^0-9A-Za-z_\-:一-鿿]", "-", d)
+    # 去掉开头非字母/中文的字符
+    d = re.sub(r"^[^A-Za-z一-鿿]+", "", d)
+    if len(d) < 2:
+        d = "aiops-auto"
+    return d[:128]
+
+
 def _dataflow_map() -> dict:
     try:
         return json.loads(getattr(settings, "CPFS_DATAFLOW_MAP_RAW", "") or "{}")
@@ -168,7 +182,7 @@ def create_dataflow(fs_id: str, region: str = "", *, oss_bucket: str, oss_path: 
         "SourceStorage": f"oss://{oss_bucket}",
         "SourceStoragePath": normalize_dir(oss_path),
         "FileSystemPath": normalize_dir(fs_path),
-        "Description": description or "auto-created by aiops-bot",
+        "Description": safe_description(description or "aiops-auto-dataflow"),
     })
     for d in _iter_dicts(body):
         dfid = _get(d, "DataFlowId")
