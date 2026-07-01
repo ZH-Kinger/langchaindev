@@ -32,7 +32,7 @@ def entry_card(region_options=None):
         {"tag": "input", "name": "region", "label": _pt("地区"), "required": True,
          "placeholder": _pt("如 cn-hangzhou")}
     )
-    intro = ("填**源地址**、**目的地址**并选地区，我来建 DataFlow + 迁移任务。\n"
+    intro = ("填**源地址**、**目的地址**并选地区 → 解析预览 → 确认下发时才建 DataFlow + 任务（用完自动删）。\n"
              "• 源 CPFS → 目的 OSS = **沉降**；源 OSS → 目的 CPFS = **预热**\n"
              "• CPFS：`/cpfs/<dir>/` 或 `cpfs://<fs-id>/<dir>/`；OSS：`oss://<bucket>/<prefix>/`\n"
              "> CPFS 与 OSS 须同地区。镜像仓库（cri 开头）请勿填。")
@@ -42,7 +42,7 @@ def entry_card(region_options=None):
          "placeholder": _pt("如 /cpfs/cwr/label/ 或 oss://bk/prefix/")},
         {"tag": "input", "name": "dest", "label": _pt("目的地址"), "required": True,
          "placeholder": _pt("如 oss://wuji-bucket-hangzhou/wuji_il/ 或 /cpfs/cwr/label/")},
-        {"tag": "button", "text": _pt("➡️ 解析并建流"), "type": "primary",
+        {"tag": "button", "text": _pt("➡️ 解析预览"), "type": "primary",
          "form_action_type": "submit", "name": "submit",
          "behaviors": [{"type": "callback", "value": {"action": "submit_cpfs_dataflow"}}]},
     ]
