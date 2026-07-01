@@ -183,7 +183,12 @@ def handle_approval_event(payload: dict[str, Any]) -> dict[str, Any]:
         save_approval_record(req, detail=detail, event_payload=payload, result_status="processing")
 
         _assert_account_delivery_ready(req)
-        approval_comment_id = notify_processing(req)
+        # 处理中通知为 best-effort：评论/邮件失败绝不阻断建号（建号才是主目标）
+        try:
+            approval_comment_id = notify_processing(req)
+        except Exception:
+            logger.warning("[ram_approval] notify_processing failed (non-blocking)", exc_info=True)
+            approval_comment_id = ""
 
         if getattr(settings, "FEISHU_RAM_APPROVAL_DRY_RUN", False):
             result = dry_run_account_result(req)
@@ -963,10 +968,11 @@ def _approval_comment_user_id(req: RamAccountRequest | None = None) -> str:
     configured = getattr(settings, "FEISHU_RAM_APPROVAL_COMMENT_USER_ID", "")
     if configured:
         return configured
-    admin = getattr(settings, "ADMIN_FEISHU_OPEN_ID", "")
-    if admin:
-        return admin
-    return req.requester_open_id if req else ""
+    # 申请人 open_id 来自本 app 的事件/实例，跨 app 安全；优先于全局 ADMIN_FEISHU_OPEN_ID
+    # （后者可能是别的 app 的 open_id，写评论会报 99992361 open_id cross app）。
+    if req and req.requester_open_id:
+        return req.requester_open_id
+    return getattr(settings, "ADMIN_FEISHU_OPEN_ID", "") or ""
 
 
 def _approval_comment_user_id_type() -> str:
