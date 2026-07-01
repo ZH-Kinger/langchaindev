@@ -741,7 +741,7 @@ def test_create_volcano_iam_account_calls_expected_sdk_requests(monkeypatch):
     assert result.account_id == "volc-account"
     assert client.create_user_req.display_name == "Volc User"
     assert client.create_user_req.email == "volc@example.com"
-    assert client.create_user_req.mobile_phone == "86-13800138000"
+    assert client.create_user_req.mobile_phone == "13800138000"      # 火山去掉 86- 前缀
     assert client.update_user_req.new_user_name == "volcuser"
     assert client.login_req.login_allowed is True
     assert client.login_req.password_reset_required is False
@@ -804,3 +804,11 @@ def test_volcano_not_exist_recognized_from_404_body():
     assert ra._volcano_is_not_exist(e) is True
     assert ra._volcano_is_already_exists(e) is False
     assert "UserNotExist" == ra._volcano_err_code(e)
+
+
+def test_volcano_mobile_strips_aliyun_prefix():
+    from core.ram_approval import _volcano_mobile
+    assert _volcano_mobile("86-13100000000") == "13100000000"
+    assert _volcano_mobile("13100000000") == "13100000000"
+    assert _volcano_mobile("+86 131 0000 0000") == "13100000000"
+    assert _volcano_mobile("") == ""

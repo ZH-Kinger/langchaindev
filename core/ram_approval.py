@@ -512,7 +512,7 @@ def create_volcano_iam_account(
                 user_name=req.login_name,
                 display_name=req.display_name or req.login_name,
                 email=req.email or None,
-                mobile_phone=req.mobile_phone or None,
+                mobile_phone=_volcano_mobile(req.mobile_phone) or None,
                 description=_comments(req) or None,
             ))
             user = getattr(resp, "user", None)
@@ -609,8 +609,9 @@ def _ensure_volcano_user_profile(
         updates["new_display_name"] = desired_display
     if req.email and (force or req.email != getattr(existing_user, "email", "")):
         updates["new_email"] = req.email
-    if req.mobile_phone and (force or req.mobile_phone != getattr(existing_user, "mobile_phone", "")):
-        updates["new_mobile_phone"] = req.mobile_phone
+    vmobile = _volcano_mobile(req.mobile_phone)
+    if vmobile and (force or vmobile != getattr(existing_user, "mobile_phone", "")):
+        updates["new_mobile_phone"] = vmobile
     comments = _comments(req)
     if comments and (force or comments != getattr(existing_user, "description", "")):
         updates["new_description"] = comments
@@ -648,6 +649,16 @@ def _volcano_err_code(exc: Exception) -> str:
     if body:
         return str(body)
     return str(exc)
+
+
+def _volcano_mobile(raw: str) -> str:
+    """火山 IAM 手机号格式：去掉阿里式 '86-' 前缀/横杠，保留纯 11 位号码（否则报 InvalidMobilePhone）。"""
+    digits = "".join(ch for ch in (raw or "") if ch.isdigit())
+    if not digits:
+        return ""
+    if digits.startswith("86") and len(digits) > 11:
+        digits = digits[-11:]
+    return digits
 
 
 def _volcano_is_not_exist(exc: Exception) -> bool:
