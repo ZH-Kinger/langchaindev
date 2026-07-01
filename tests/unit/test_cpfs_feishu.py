@@ -4,9 +4,11 @@ from core.cpfs_dataflow import cards, orchestrator, engine_nas
 
 
 def _find_action(obj):
+    """兼容 schema2.0 behaviors.callback 与 btn() 的 value.action 两种结构。"""
     if isinstance(obj, dict):
-        if obj.get("type") == "callback" and isinstance(obj.get("value"), dict):
-            return obj["value"].get("action")
+        val = obj.get("value")
+        if isinstance(val, dict) and val.get("action"):
+            return val["action"]
         for v in obj.values():
             r = _find_action(v)
             if r:
@@ -87,3 +89,28 @@ def test_confirm_handler_launches(monkeypatch):
         orchestrator.make_plan("sink", "/cwr/o2/", "oss://bk/e2/", fs_id="bmcpfs-y", region="cn-hangzhou"))
     out = actions._h_confirm_cpfs_dataflow({"job_id": job["job_id"]}, "ou_1", "chat", {})
     assert out["toast"]["type"] == "success"
+    # 确认后原地换成带「查询进度」按钮的进度卡
+    assert _find_action(out["card"]["data"]) == "query_cpfs_progress"
+
+
+def test_query_progress_running(monkeypatch):
+    job = orchestrator.create_job_record(
+        orchestrator.make_plan("sink", "/cwr/q/", "oss://bk/q/", fs_id="bmcpfs-z", region="cn-hangzhou"))
+    job["stage"] = orchestrator.STAGE_RUNNING
+    orchestrator._save(job)
+    out = actions._h_query_cpfs_progress({"job_id": job["job_id"]}, "ou_1", "chat", {})
+    assert out["card"]["data"]["header"]["template"] == "blue"     # 进度卡
+
+
+def test_query_progress_done(monkeypatch):
+    job = orchestrator.create_job_record(
+        orchestrator.make_plan("sink", "/cwr/q2/", "oss://bk/q2/", fs_id="bmcpfs-z", region="cn-hangzhou"))
+    job["stage"] = orchestrator.STAGE_DONE
+    orchestrator._save(job)
+    out = actions._h_query_cpfs_progress({"job_id": job["job_id"]}, "ou_1", "chat", {})
+    assert out["card"]["data"]["header"]["template"] == "green"    # 结果卡
+
+
+def test_query_progress_missing():
+    out = actions._h_query_cpfs_progress({"job_id": "cpfs-none"}, "ou_1", "chat", {})
+    assert out["toast"]["type"] == "error"

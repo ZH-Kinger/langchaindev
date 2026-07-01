@@ -206,6 +206,15 @@ def wait_dataflow_running(fs_id: str, region: str, data_flow_id: str, *,
     logger.warning("[CPFS] DataFlow %s 未在轮询内 Running，继续建任务", data_flow_id)
 
 
+def delete_dataflow(fs_id: str, region: str, data_flow_id: str, *, open_id: str = "") -> None:
+    """DeleteDataFlow：删除绑定关系（仅删绑定，不动已迁移的数据）。仅 Running/Stopped 可删。"""
+    client = _client(open_id, region)
+    _call(client, "DeleteDataFlow", {
+        "RegionId": region, "FileSystemId": fs_id, "DataFlowId": data_flow_id,
+    })
+    logger.info("[CPFS] DeleteDataFlow ok fs=%s df=%s", fs_id, data_flow_id)
+
+
 def list_filesystems(region: str, *, open_id: str = "") -> list[str]:
     """DescribeFileSystems 列出某地域的 CPFS/CPFS 智算版文件系统 ID（cpfs-/bmcpfs- 前缀）。
 

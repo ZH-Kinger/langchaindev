@@ -170,12 +170,12 @@ def _region_fs(region: str, open_id: str = "") -> str:
     return fss[0]
 
 
-def plan_from_addresses(region: str, source: str, dest: str, *, open_id: str = "",
-                        create: bool = True) -> DataflowPlan:
-    """按 源/目的地址 定方向并（总是）新建 DataFlow，返回计划。
+def plan_from_addresses(region: str, source: str, dest: str, *, open_id: str = "") -> DataflowPlan:
+    """按 源/目的地址 定方向、解析计划（不建 DataFlow；建流延后到下发时做）。
 
     源是 CPFS、目的是 OSS → 沉降(Export)；源是 OSS、目的是 CPFS → 预热(Import)。
     地区由卡片给定；该地区唯一的 CPFS 文件系统自动选中（cpfs://<fs> 显式则用之）。
+    DataFlow 在 start_task 时临时创建、任务终态后自动删除（用完即删，不占 10 个/CPFS 上限）。
     """
     region = (region or settings.CPFS_REGION or "").strip()
     if not region:
@@ -201,15 +201,8 @@ def plan_from_addresses(region: str, source: str, dest: str, *, open_id: str = "
     if not oss_bucket:
         raise DataflowPathError("OSS 地址缺少 bucket")
 
-    data_flow_id = ""
-    if create:
-        data_flow_id = engine_nas.create_dataflow(
-            fs_id, region, oss_bucket=oss_bucket, oss_path=oss_prefix or "/",
-            fs_path=fs_path, open_id=open_id)
-        engine_nas.wait_dataflow_running(fs_id, region, data_flow_id, open_id=open_id)
-
     return make_plan(operation, fs_path, f"oss://{oss_bucket}/{oss_prefix}",
-                     fs_id=fs_id, region=region, data_flow_id=data_flow_id)
+                     fs_id=fs_id, region=region, data_flow_id="")
 
 
 def _job_id(plan: DataflowPlan) -> str:
@@ -274,15 +267,20 @@ def create_job_record(plan: DataflowPlan, *, open_id: str = "") -> dict:
 
 
 def start_task(job: dict) -> dict:
-    """解析 DataFlow + 提交任务，置 RUNNING。失败置 FAILED。"""
+    """（需要则临时建 DataFlow）+ 提交任务，置 RUNNING。失败置 FAILED。"""
     try:
-        if not job.get("data_flow_id"):
-            df = engine_nas.resolve_dataflow(
+        if not job.get("data_flow_id") or job.get("dataflow_deleted"):
+            # 用完即删的临时 DataFlow：建 → 等 Running → 标记 ephemeral（重试时也会重建）
+            job["data_flow_id"] = engine_nas.create_dataflow(
                 job["fs_id"], job["region"],
-                oss_bucket=job.get("oss_bucket", ""), fs_path=job.get("cpfs_dir", ""),
-                open_id=job.get("created_by", ""),
+                oss_bucket=job.get("oss_bucket", ""), oss_path=job.get("oss_prefix", "") or "/",
+                fs_path=job.get("cpfs_dir", ""), open_id=job.get("created_by", ""),
             )
-            job["data_flow_id"] = df["data_flow_id"]
+            job["dataflow_ephemeral"] = True
+            job["dataflow_deleted"] = False
+            _save(job)
+            engine_nas.wait_dataflow_running(
+                job["fs_id"], job["region"], job["data_flow_id"], open_id=job.get("created_by", ""))
         task_id = engine_nas.submit_task(
             fs_id=job["fs_id"], data_flow_id=job["data_flow_id"], action=job["action"],
             directory=job.get("directory", ""), dst_directory=job.get("dst_directory", ""),
@@ -321,28 +319,44 @@ def poll_once(job: dict) -> dict:
     return job
 
 
+def _cleanup_ephemeral(job: dict) -> None:
+    """任务终态后删除临时 DataFlow（用完即删，不占 10 个/CPFS 上限）。best-effort。"""
+    if not job.get("dataflow_ephemeral") or job.get("dataflow_deleted"):
+        return
+    dfid = job.get("data_flow_id")
+    if not dfid:
+        return
+    try:
+        engine_nas.delete_dataflow(job["fs_id"], job["region"], dfid, open_id=job.get("created_by", ""))
+        job["dataflow_deleted"] = True
+        _save(job)
+    except Exception:
+        logger.warning("[CPFS] 清理临时 DataFlow 失败 df=%s", dfid, exc_info=True)
+
+
 def run_to_completion(job: dict, *, on_update=None, poll_interval: int = 60,
                       max_polls: int = 1440) -> dict:
-    """启动任务并阻塞轮询至终态（供后台线程调用）。"""
+    """启动任务并阻塞轮询至终态（供后台线程调用）；终态后删临时 DataFlow。"""
     job = start_task(job)
     if on_update:
         on_update(job)
-    if job["stage"] == STAGE_FAILED:
-        return job
-    for _ in range(max_polls):
-        time.sleep(poll_interval)
-        prev = job["stage"]
-        job = poll_once(job)
-        if job["stage"] != prev and on_update:
-            on_update(job)
-        if job["stage"] in (STAGE_DONE, STAGE_FAILED):
-            return job
-    job["stage"] = STAGE_FAILED
-    job["error"] = f"轮询超时（>{max_polls * poll_interval // 3600}h 未完成）"
-    job["finished_ts"] = time.time()
-    _save(job)
-    if on_update:
-        on_update(job)
+    if job["stage"] != STAGE_FAILED:
+        for _ in range(max_polls):
+            time.sleep(poll_interval)
+            prev = job["stage"]
+            job = poll_once(job)
+            if job["stage"] != prev and on_update:
+                on_update(job)
+            if job["stage"] in (STAGE_DONE, STAGE_FAILED):
+                break
+        else:
+            job["stage"] = STAGE_FAILED
+            job["error"] = f"轮询超时（>{max_polls * poll_interval // 3600}h 未完成）"
+            job["finished_ts"] = time.time()
+            _save(job)
+            if on_update:
+                on_update(job)
+    _cleanup_ephemeral(job)   # 无论成功/失败/超时，跑完删临时 DataFlow
     return job
 
 

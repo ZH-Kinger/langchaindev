@@ -84,6 +84,8 @@ def progress_card(job: dict):
         fields(("任务", f"`{job['job_id']}`"), ("阶段", job["stage"]),
                ("文件", f"{job.get('files_done',0)}/{job.get('files_total',0)}")),
         div(f"**fs** `{job['fs_id']}`\n**目录** `{job['directory']}`"),
+        hr(),
+        buttons(btn("\U0001f504 查询进度", {"action": "query_cpfs_progress", "job_id": job["job_id"]})),
     ], color="blue")
 
 

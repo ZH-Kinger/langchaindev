@@ -564,7 +564,24 @@ def _h_confirm_cpfs_dataflow(action_val, open_id, chat_id, form_value):
             _send_text("", _cfg_cpfs_chat(), f"❌ 任务 {job_id} 失败：{e}")
 
     threading.Thread(target=_do_run, daemon=True).start()
-    return {"toast": {"type": "success", "content": "已下发，完成后推送结果"}}
+    from core.cpfs_dataflow.cards import progress_card
+    # 直接把确认卡换成带「查询进度」按钮的进度卡
+    return {"toast": {"type": "success", "content": "已下发，完成后推送结果；也可点“查询进度”"},
+            "card": {"type": "raw", "data": progress_card(job)}}
+
+
+def _h_query_cpfs_progress(action_val, open_id, chat_id, form_value):
+    """点“查询进度”：拉最新任务状态，未完→进度卡、终态→结果卡（原地刷新）。"""
+    job_id = action_val.get("job_id", "") if isinstance(action_val, dict) else ""
+    from core.cpfs_dataflow import orchestrator
+    from core.cpfs_dataflow.cards import progress_card, result_card
+    job = orchestrator.get_job(job_id) if job_id else None
+    if not job:
+        return {"toast": {"type": "error", "content": "任务不存在或已过期"}}
+    card = (result_card(job) if job["stage"] in (orchestrator.STAGE_DONE, orchestrator.STAGE_FAILED)
+            else progress_card(job))
+    return {"toast": {"type": "success", "content": f"当前阶段：{job['stage']}"},
+            "card": {"type": "raw", "data": card}}
 
 
 def _h_retry_cpfs_dataflow(action_val, open_id, chat_id, form_value):
@@ -596,6 +613,7 @@ _ACTION_HANDLERS = {
     "retry_transfer":     _h_retry_transfer,
     "submit_cpfs_dataflow":  _h_submit_cpfs_dataflow,
     "confirm_cpfs_dataflow": _h_confirm_cpfs_dataflow,
+    "query_cpfs_progress":   _h_query_cpfs_progress,
     "retry_cpfs_dataflow":   _h_retry_cpfs_dataflow,
 }
 
