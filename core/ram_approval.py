@@ -527,20 +527,25 @@ def create_volcano_iam_account(
         result.updated_user_profile = True
 
     if req.console_access:
+        # 火山 get_login_profile 对不存在的 profile 也返回默认桩(login_allowed=False)、不报错，
+        # 不能靠它判断存在与否。直接 create 开启登录；已存在则 update 打开 login_allowed。
         try:
-            client.get_login_profile(models.GetLoginProfileRequest(user_name=req.login_name))
-            result.skipped.append("volcano_login_profile_exists")
+            client.create_login_profile(models.CreateLoginProfileRequest(
+                user_name=req.login_name,
+                password=req.password,
+                password_reset_required=req.password_reset_required,
+                login_allowed=True,
+            ))
+            result.created_login_profile = True
         except Exception as exc:
-            if _volcano_is_not_exist(exc):
-                client.create_login_profile(models.CreateLoginProfileRequest(
+            if _volcano_is_already_exists(exc):
+                client.update_login_profile(models.UpdateLoginProfileRequest(
                     user_name=req.login_name,
-                    password=req.password,
+                    password=req.password or None,
                     password_reset_required=req.password_reset_required,
                     login_allowed=True,
                 ))
                 result.created_login_profile = True
-            elif _volcano_is_already_exists(exc):
-                result.skipped.append("volcano_login_profile_exists")
             else:
                 raise
 
