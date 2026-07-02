@@ -673,9 +673,15 @@ def _h_query_progress_by_id(action_val, open_id, chat_id, form_value):
     """
     jid = ((form_value or {}).get("job_id") or "").strip()
     if not jid:
-        # 飞书对同一次提交会双投递：老式回调不带 form_value（job_id 空），
-        # 真正带值的是 schema 2.0 那条。空投递静默 no-op，避免误弹"请填任务 ID"。
         return {}
+    # 飞书对同一次点击会双投递（老式回调 + schema 2.0 事件，两条都带 job_id）。
+    # 推送式返回会各推一张卡 → 两张。按 (open_id, job_id) 原子去重，同一次点击只推一张。
+    try:
+        from utils.redis_client import get_redis
+        if not get_redis().set(f"cpfs:query:{open_id}:{jid}", 1, nx=True, ex=8):
+            return {"toast": {"type": "info", "content": "查询中…"}}
+    except Exception:
+        pass
     from core.dsw_scheduler import _send_card
     low = jid.lower()
     if low.startswith("cpfs-"):
