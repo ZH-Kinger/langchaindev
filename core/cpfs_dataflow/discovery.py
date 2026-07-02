@@ -112,9 +112,17 @@ def discover(open_id: str = "") -> list[dict]:
 
 
 def refresh(open_id: str = "") -> list[dict]:
-    """重新发现并写缓存。缓存含 options（绑定）+ filesystems（所有 CPFS，含无绑定的）。"""
+    """重新发现并写缓存。缓存含 options（绑定）+ filesystems（所有 CPFS，含无绑定的，带名称）。"""
     pairs = _fs_pairs(open_id=open_id)
-    filesystems = [{"region": r, "fs_id": f, "edition": engine_nas.edition(f)} for f, r in pairs]
+    name_by_region: dict[str, dict] = {}
+    for _f, r in pairs:
+        if r not in name_by_region:
+            try:
+                name_by_region[r] = engine_nas.filesystem_names(r, open_id=open_id)
+            except Exception:
+                name_by_region[r] = {}
+    filesystems = [{"region": r, "fs_id": f, "edition": engine_nas.edition(f),
+                    "name": name_by_region.get(r, {}).get(f, "")} for f, r in pairs]
     options = _discover_from_pairs(pairs, open_id=open_id)
     try:
         get_redis().setex(_MAP_KEY, settings.CPFS_MAP_TTL_SECONDS,
@@ -175,6 +183,23 @@ def buckets_in(region: str, open_id: str = "") -> list[str]:
     """某地区下被 DataFlow 绑定的 OSS 桶（去重）。"""
     return sorted({o["oss_bucket"] for o in get_options(open_id=open_id)
                    if o.get("region") == region and o.get("oss_bucket")})
+
+
+def cpfs_select_options(open_id: str = "") -> list[dict]:
+    """录入卡「选 CPFS」下拉：每项含地区+名称+fs-id，value 编码 region+fs_id。
+    地区与 CPFS 合成一个下拉（飞书卡片做不到联动过滤），选中即定地区。"""
+    opts: list[dict] = []
+    seen: set[str] = set()
+    for f in get_filesystems(open_id=open_id):
+        fid, region = f.get("fs_id"), f.get("region")
+        if not fid or fid in seen:
+            continue
+        seen.add(fid)
+        name = f.get("name") or ""
+        label = f"{region} · {name} ({fid})" if name else f"{region} · {fid}"
+        opts.append({"text": {"tag": "plain_text", "content": label[:100]},
+                     "value": json.dumps({"region": region, "fs_id": fid}, ensure_ascii=False)})
+    return opts
 
 
 def decode_selection(value: str) -> dict:

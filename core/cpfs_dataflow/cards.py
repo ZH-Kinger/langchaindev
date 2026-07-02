@@ -21,31 +21,62 @@ def _region_options(open_id: str = ""):
         return []
 
 
-def entry_card(region_options=None):
-    """填 源地址 + 目的地址 + 选地区 → 后端建 DataFlow + 迁移任务。方向由地址类型自动判断。"""
-    if region_options is None:
-        region_options = _region_options()
-    region_elem = (
-        {"tag": "select_static", "name": "region", "placeholder": _pt("选择地区"),
-         "options": region_options}
-        if region_options else
-        {"tag": "input", "name": "region", "label": _pt("地区"), "required": True,
-         "placeholder": _pt("如 cn-hangzhou")}
-    )
-    intro = ("填**源地址**、**目的地址**并选地区 → 解析预览 → 确认下发时才建 DataFlow + 任务（用完自动删）。\n"
-             "• 源 CPFS → 目的 OSS = **沉降**；源 OSS → 目的 CPFS = **预热**\n"
-             "• CPFS：`/cpfs/<dir>/` 或 `cpfs://<fs-id>/<dir>/`；OSS：`oss://<bucket>/<prefix>/`\n"
-             "> CPFS 与 OSS 须同地区。镜像仓库（cri 开头）请勿填。")
-    form_elems = [
-        region_elem,
-        {"tag": "input", "name": "source", "label": _pt("源地址"), "required": True,
-         "placeholder": _pt("如 /cpfs/cwr/label/ 或 oss://bk/prefix/")},
-        {"tag": "input", "name": "dest", "label": _pt("目的地址"), "required": True,
-         "placeholder": _pt("如 oss://wuji-bucket-hangzhou/wuji_il/ 或 /cpfs/cwr/label/")},
-        {"tag": "button", "text": _pt("➡️ 解析预览"), "type": "primary",
-         "form_action_type": "submit", "name": "submit",
-         "behaviors": [{"type": "callback", "value": {"action": "submit_cpfs_dataflow"}}]},
-    ]
+def _cpfs_options(open_id: str = ""):
+    try:
+        from core.cpfs_dataflow import discovery
+        return discovery.cpfs_select_options(open_id=open_id)
+    except Exception:
+        return []
+
+
+def entry_card(region_options=None, open_id: str = ""):
+    """选 操作 + 选 CPFS（地区·名称·fs-id 合成一个下拉）+ 填 CPFS 目录 + 填 OSS 地址 → 解析预览。
+
+    地区与 CPFS 合成一个下拉，避免飞书卡片无法联动过滤。无法枚举 CPFS 时回退为纯文本地址填写。
+    """
+    cpfs_opts = _cpfs_options(open_id)
+    if cpfs_opts:
+        intro = ("选**操作** + **CPFS 文件系统**（同一下拉里带地区+名称），填 **CPFS 目录** 和 **OSS 地址**"
+                 " → 解析预览 → 确认下发时才建 DataFlow + 任务（用完自动删）。\n"
+                 "> CPFS 与 OSS 须同地区。OSS 请填该地区的桶（镜像仓库 cri 开头勿填）。")
+        form_elems = [
+            {"tag": "select_static", "name": "operation", "label": _pt("操作"), "required": True,
+             "placeholder": _pt("预热 / 沉降"), "options": _op_options()},
+            {"tag": "select_static", "name": "cpfs", "label": _pt("CPFS 文件系统"), "required": True,
+             "placeholder": _pt("选择 CPFS（地区 · 名称 · fs-id）"), "options": cpfs_opts},
+            {"tag": "input", "name": "cpfs_dir", "label": _pt("CPFS 目录"), "required": True,
+             "placeholder": _pt("如 /wzh/ 或 /cwr/label/")},
+            {"tag": "input", "name": "oss", "label": _pt("OSS 地址"), "required": True,
+             "placeholder": _pt("如 oss://wuji-data-tran/test/")},
+            {"tag": "button", "text": _pt("➡️ 解析预览"), "type": "primary",
+             "form_action_type": "submit", "name": "submit",
+             "behaviors": [{"type": "callback", "value": {"action": "submit_cpfs_dataflow"}}]},
+        ]
+    else:
+        # 回退：枚举不到 CPFS（权限/缓存空）时仍支持纯文本地址
+        if region_options is None:
+            region_options = _region_options(open_id)
+        region_elem = (
+            {"tag": "select_static", "name": "region", "placeholder": _pt("选择地区"),
+             "options": region_options}
+            if region_options else
+            {"tag": "input", "name": "region", "label": _pt("地区"), "required": True,
+             "placeholder": _pt("如 cn-hangzhou")}
+        )
+        intro = ("填**源地址**、**目的地址**并选地区 → 解析预览。\n"
+                 "• 源 CPFS → 目的 OSS = **沉降**；源 OSS → 目的 CPFS = **预热**\n"
+                 "• CPFS：`/cpfs/<dir>/` 或 `cpfs://<fs-id>/<dir>/`；OSS：`oss://<bucket>/<prefix>/`\n"
+                 "> CPFS 与 OSS 须同地区。镜像仓库（cri 开头）请勿填。")
+        form_elems = [
+            region_elem,
+            {"tag": "input", "name": "source", "label": _pt("源地址"), "required": True,
+             "placeholder": _pt("如 /cpfs/cwr/label/ 或 oss://bk/prefix/")},
+            {"tag": "input", "name": "dest", "label": _pt("目的地址"), "required": True,
+             "placeholder": _pt("如 oss://wuji-bucket-hangzhou/wuji_il/ 或 /cpfs/cwr/label/")},
+            {"tag": "button", "text": _pt("➡️ 解析预览"), "type": "primary",
+             "form_action_type": "submit", "name": "submit",
+             "behaviors": [{"type": "callback", "value": {"action": "submit_cpfs_dataflow"}}]},
+        ]
     return {
         "schema": "2.0",
         "config": {"wide_screen_mode": True},
