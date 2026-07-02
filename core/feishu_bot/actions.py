@@ -576,6 +576,14 @@ def _h_submit_cpfs_dataflow(action_val, open_id, chat_id, form_value):
         try:
             plan = orchestrator.plan_from_addresses(region, source, dest, open_id=open_id)
             job = orchestrator.create_job_record(plan, open_id=open_id)
+            # 幂等：飞书对"解析预览"回调也可能重投递/并发 → 会推多张一样的确认卡。
+            # 按 job_id（op/fs/dir/oss/当天 的 hash，两次解析同值）原子去重，只推一张。
+            try:
+                from utils.redis_client import get_redis
+                if not get_redis().set(f"cpfs:dataflow:confirmcard:{job['job_id']}", 1, nx=True, ex=30):
+                    return
+            except Exception:
+                pass
             _send_card(open_id, _cfg_cpfs_chat(), confirm_card(job))
         except (DataflowPathError, engine_nas.NasDataflowError) as e:
             _send_text(open_id, _cfg_cpfs_chat(), f"❌ {e}")

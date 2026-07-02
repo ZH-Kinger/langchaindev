@@ -281,9 +281,16 @@ def start_task(job: dict) -> dict:
             _save(job)
             engine_nas.wait_dataflow_running(
                 job["fs_id"], job["region"], job["data_flow_id"], open_id=job.get("created_by", ""))
+        # 智算版任务 Directory/DstDirectory 相对 DataFlow 的 FileSystemPath/SourceStoragePath。
+        # 临时流就绑定在 cpfs_dir↔oss_prefix 上，故任务目录相对绑定根 = "/"（填 cpfs_dir 会变
+        # 成 /cpfs_dir/cpfs_dir/ → 找不到 → Failed 0 文件）。显式选已有流时才用绝对子目录。
+        if job.get("dataflow_ephemeral"):
+            task_dir, task_dst = "/", "/"
+        else:
+            task_dir, task_dst = job.get("directory", ""), job.get("dst_directory", "")
         task_id = engine_nas.submit_task(
             fs_id=job["fs_id"], data_flow_id=job["data_flow_id"], action=job["action"],
-            directory=job.get("directory", ""), dst_directory=job.get("dst_directory", ""),
+            directory=task_dir, dst_directory=task_dst,
             region=job["region"], open_id=job.get("created_by", ""),
         )
         job["task_id"] = task_id
