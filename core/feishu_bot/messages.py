@@ -488,7 +488,7 @@ def _process_message(message_id: str, chat_id: str, user_text: str, open_id: str
     # ③ 跨云迁移录入意图（纯关键词、无路径）→ 弹录入卡让用户填地址
     if _is_sink_preheat_entry_intent(user_text):
         from core.cpfs_dataflow.cards import entry_card
-        messaging._feishu_reply_card(message_id, entry_card(open_id=open_id))
+        messaging._feishu_reply_card(message_id, entry_card())
         return
 
     if _is_volcano_account_query_entry_intent(user_text):

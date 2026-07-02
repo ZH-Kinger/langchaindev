@@ -246,19 +246,6 @@ def list_filesystems(region: str, *, open_id: str = "") -> list[str]:
     return ids
 
 
-def filesystem_names(region: str, *, open_id: str = "") -> dict:
-    """{fs_id: 名称} —— 名称取 DescribeFileSystems 的 Description（阿里云控制台里的“文件系统名称”）。
-    仅含 CPFS/CPFS 智算版；空名回退为空串。用于下拉展示，帮用户分辨同区多个 CPFS。"""
-    client = _client(open_id, region)
-    body = _call(client, "DescribeFileSystems", {"RegionId": region, "PageSize": 100, "PageNumber": 1})
-    names: dict = {}
-    for d in _dicts_with(body, "FileSystemId"):
-        fid = _get(d, "FileSystemId")
-        if fid and (str(fid).startswith("cpfs") or str(fid).startswith("bmcpfs")):
-            names[fid] = _get(d, "Description", "FileSystemName", default="") or ""
-    return names
-
-
 def resolve_dataflow(fs_id: str, region: str = "", *, oss_bucket: str = "",
                      fs_path: str = "", open_id: str = "") -> dict:
     """选定要用的 DataFlow。优先 CPFS_DATAFLOW_MAP 显式覆盖，否则按 OSS bucket /

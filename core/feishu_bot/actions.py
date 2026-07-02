@@ -562,35 +562,19 @@ def _cfg_cpfs_chat() -> str:
 def _h_submit_cpfs_dataflow(action_val, open_id, chat_id, form_value):
     """读取 地区 + 源/目的地址 → 后台建 DataFlow + 计划，推确认卡。方向按地址类型自动判断。"""
     fv = form_value or {}
-    cpfs_sel = (fv.get("cpfs") or "").strip()        # 新版：选 CPFS（value 编码 region+fs_id）
-    operation = (fv.get("operation") or "").strip()
-    cpfs_dir = (fv.get("cpfs_dir") or "").strip()
-    oss_addr = (fv.get("oss") or "").strip()
-    region = (fv.get("region") or "").strip()        # 旧版回退：地区 + 源/目的地址
+    region = (fv.get("region") or "").strip()
     source = (fv.get("source") or "").strip()
     dest = (fv.get("dest") or "").strip()
-
-    use_select = bool(cpfs_sel)
-    if use_select:
-        if not (operation and cpfs_dir and oss_addr):
-            return {"toast": {"type": "error", "content": "请选操作/CPFS，并填 CPFS 目录和 OSS 地址"}}
-    elif not (region and source and dest):
+    if not (region and source and dest):
         return {"toast": {"type": "error", "content": "请选地区并填写源、目的地址"}}
 
     def _do_prepare() -> None:
         from core.dsw_scheduler import _send_card, _send_text
-        from core.cpfs_dataflow import orchestrator, engine_nas, discovery
+        from core.cpfs_dataflow import orchestrator, engine_nas
         from core.cpfs_dataflow.cards import confirm_card
         from core.cpfs_dataflow.orchestrator import DataflowPathError
         try:
-            if use_select:
-                sel = discovery.decode_selection(cpfs_sel)
-                if not sel.get("fs_id"):
-                    raise DataflowPathError("CPFS 选择无效，请重新选择")
-                plan = orchestrator.make_plan(operation, cpfs_dir, oss_addr,
-                                              fs_id=sel["fs_id"], region=sel.get("region", ""))
-            else:
-                plan = orchestrator.plan_from_addresses(region, source, dest, open_id=open_id)
+            plan = orchestrator.plan_from_addresses(region, source, dest, open_id=open_id)
             job = orchestrator.create_job_record(plan, open_id=open_id)
             # 幂等：飞书对"解析预览"回调也可能重投递/并发 → 会推多张一样的确认卡。
             # 按 job_id（op/fs/dir/oss/当天 的 hash，两次解析同值）原子去重，只推一张。

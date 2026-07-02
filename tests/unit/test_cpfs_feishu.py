@@ -37,33 +37,22 @@ def test_mfu_report_intent_keywords():
     assert not messages._is_mfu_report_intent("申请一张 A100 算力")
 
 
-def test_entry_card_cpfs_select(monkeypatch):
-    """有 CPFS 可枚举 → 新版：选 操作 + 选 CPFS + 填 目录/OSS。"""
+def test_entry_card_addresses(monkeypatch):
     from core.cpfs_dataflow import discovery
-    monkeypatch.setattr(discovery, "cpfs_select_options", lambda *a, **k: [
-        {"text": {"tag": "plain_text", "content": "ap-southeast-1 · cpfs_sg (bmcpfs-07001)"},
-         "value": '{"region": "ap-southeast-1", "fs_id": "bmcpfs-07001"}'}])
+    monkeypatch.setattr(discovery, "regions", lambda *a, **k: ["cn-hangzhou", "cn-beijing"])
     ec = cards.entry_card()
     assert ec["schema"] == "2.0"
     form = ec["body"]["elements"][1]
     names = {e.get("name") for e in form["elements"]}
-    assert {"operation", "cpfs", "cpfs_dir", "oss"} <= names
+    assert {"region", "source", "dest"} <= names
     assert _find_action(ec) == "submit_cpfs_dataflow"
-    # 飞书 select_static 不支持 label 属性（否则整卡 200621 渲染失败）
-    for e in form["elements"]:
-        if e.get("tag") == "select_static":
-            assert "label" not in e, f"select_static 不能带 label: {e.get('name')}"
 
 
-def test_entry_card_fallback_free_text(monkeypatch):
-    """枚举不到 CPFS → 回退纯文本地址（含地区）。"""
+def test_entry_card_region_fallback_input(monkeypatch):
     from core.cpfs_dataflow import discovery
-    monkeypatch.setattr(discovery, "cpfs_select_options", lambda *a, **k: [])
-    monkeypatch.setattr(discovery, "regions", lambda *a, **k: [])
+    monkeypatch.setattr(discovery, "regions", lambda *a, **k: [])   # 无发现→地区改输入框
     ec = cards.entry_card()
     form = ec["body"]["elements"][1]
-    names = {e.get("name") for e in form["elements"]}
-    assert {"region", "source", "dest"} <= names
     region_elem = next(e for e in form["elements"] if e.get("name") == "region")
     assert region_elem["tag"] == "input"
 
@@ -96,25 +85,6 @@ def test_submit_handler_accepts(monkeypatch):
         {}, "ou_1", "chat",
         {"region": "cn-hangzhou", "source": "/cpfs/cwr/o/", "dest": "oss://bk/e/"})
     assert out["toast"]["type"] == "success"
-
-
-def test_submit_handler_select_path(monkeypatch):
-    """新版：选 CPFS（value 编码 region+fs_id）+ 操作 + 目录 + OSS → 走 make_plan。"""
-    import core.dsw_scheduler as sch
-    sent = []
-    monkeypatch.setattr(sch, "_send_card", lambda oid, cid, card: sent.append(card), raising=False)
-    monkeypatch.setattr(sch, "_send_text", lambda *a, **k: sent.append(a), raising=False)
-    out = actions._h_submit_cpfs_dataflow(
-        {}, "ou_1", "chat",
-        {"operation": "sink", "cpfs": '{"region": "cn-hangzhou", "fs_id": "bmcpfs-x"}',
-         "cpfs_dir": "/wzh/", "oss": "oss://wuji-data-tran/test/"})
-    assert out["toast"]["type"] == "success"
-
-
-def test_submit_handler_select_missing_fields():
-    out = actions._h_submit_cpfs_dataflow(
-        {}, "ou_1", "chat", {"cpfs": '{"region": "cn-hangzhou", "fs_id": "bmcpfs-x"}'})
-    assert out["toast"]["type"] == "error"
 
 
 def test_confirm_handler_missing_job():
