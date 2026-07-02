@@ -743,6 +743,23 @@ def _process_action(action_name: str, action_val: dict, open_id: str, chat_id: s
     return handler(action_val, open_id, chat_id, form_value)
 
 
+def card_action_is_duplicate(action_name, open_id, msg_id, form_value, action_val) -> bool:
+    """飞书对同一次卡片操作会双投递（老式回调 URL + 事件订阅 card.action.trigger），且各
+    通道可能重试。按 (动作+操作人+消息+表单+值) 内容哈希原子去重（SET NX 15s），同一次操作
+    只放行一次 → 推送式 handler 不再推多张卡、建流不再重复。Redis 不可用则不去重（降级）。"""
+    try:
+        import hashlib
+        from utils.redis_client import get_redis
+        blob = json.dumps(
+            {"a": action_name or "", "o": open_id or "", "m": msg_id or "",
+             "f": form_value or {}, "v": action_val or {}},
+            sort_keys=True, ensure_ascii=False)
+        key = "feishu:card_dedup:" + hashlib.md5(blob.encode("utf-8")).hexdigest()
+        return not get_redis().set(key, 1, nx=True, ex=15)
+    except Exception:
+        return False
+
+
 def _handle_card_trigger_sync(data: dict) -> dict:
     """处理经事件订阅路径到达的 card.action.trigger（schema 2.0 结构）。"""
     event      = data.get("event", {})
@@ -751,8 +768,8 @@ def _handle_card_trigger_sync(data: dict) -> dict:
     form_value = action_obj.get("form_value") or {}
     open_id    = event.get("operator", {}).get("operator_id", {}).get("open_id", "")
     chat_id    = event.get("context", {}).get("open_chat_id", "") or settings.FEISHU_CHAT_ID
+    msg_id     = event.get("context", {}).get("open_message_id", "")
     action_name = action_val.get("action", "") if isinstance(action_val, dict) else ""
-    logger.info("[card_trigger] action=%r form_value_keys=%s", action_name, list(form_value.keys()))
     if not action_name and form_value:
         # 兼容旧 AK 表单（ak_id/ak_secret）和新 RAM 绑定表单（ram_user_name/user_name）
         if any(k in form_value for k in ("login_name", "user_name", "q")):
@@ -761,4 +778,6 @@ def _handle_card_trigger_sync(data: dict) -> dict:
             action_name = "submit_ak_register"
         else:
             action_name = "submit_gpu_request"
+    if card_action_is_duplicate(action_name, open_id, msg_id, form_value, action_val):
+        return {}
     return _process_action(action_name, action_val, open_id, chat_id, form_value=form_value)

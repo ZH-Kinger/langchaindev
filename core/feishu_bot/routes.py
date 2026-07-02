@@ -157,6 +157,11 @@ def feishu_card_action():
             action_name = "submit_gpu_request"
     logger.info("[card_action] action=%r open_id=%r", action_name, open_id)
 
+    # 与 2.0 分支共用同一把去重锁：飞书同一次操作双投递（老式回调 + 事件订阅），只放行一次
+    msg_id = data.get("open_message_id", "")
+    if actions.card_action_is_duplicate(action_name, open_id, msg_id, form_value, action_val):
+        return jsonify({})
+
     return jsonify(actions._process_action(action_name, action_val, open_id, chat_id, form_value=form_value))
 
 

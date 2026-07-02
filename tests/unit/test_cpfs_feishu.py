@@ -158,6 +158,17 @@ def test_query_progress_by_id_empty_is_noop(monkeypatch):
     assert actions._h_query_progress_by_id({}, "ou_me", "oc_x", {}) == {}
 
 
+def test_card_action_dedup_collapses_double_delivery():
+    """飞书双投递（同一操作两条）→ 首条放行、后续判重，全局只处理一次。"""
+    from core.feishu_bot import actions
+    args = ("query_progress_by_id", "ou_me", "om_1", {"job_id": "cpfs-abc"}, {"action": "query_progress_by_id"})
+    assert actions.card_action_is_duplicate(*args) is False   # 第一条：放行
+    assert actions.card_action_is_duplicate(*args) is True    # 第二条（重复投递）：判重
+    # 不同表单（另一个任务）不误伤
+    other = ("query_progress_by_id", "ou_me", "om_2", {"job_id": "cpfs-xyz"}, {"action": "query_progress_by_id"})
+    assert actions.card_action_is_duplicate(*other) is False
+
+
 def test_progress_query_by_cpfs_id(monkeypatch):
     from core.feishu_bot import messaging as mg
     job = orchestrator.create_job_record(
