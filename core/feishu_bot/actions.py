@@ -599,6 +599,18 @@ def _h_confirm_cpfs_dataflow(action_val, open_id, chat_id, form_value):
     if job["stage"] not in (orchestrator.STAGE_NEW, orchestrator.STAGE_FAILED):
         return {"toast": {"type": "info", "content": f"任务已在 {job['stage']}，无需重复"}}
 
+    # 幂等：飞书卡片回调至少投递一次（会重发/并发），原子抢锁，抢不到即重复投递 → 直接返回，
+    # 否则两个并发回调都会通过上面的 stage 守卫、各建一个临时 DataFlow + 任务。
+    try:
+        from utils.redis_client import get_redis
+        if not get_redis().set(f"cpfs:dataflow:launch:{job_id}", 1, nx=True, ex=30):
+            return {"toast": {"type": "info", "content": "任务已下发，请勿重复点击"}}
+    except Exception:
+        pass  # Redis 不可用时降级：至少同步置 RUNNING 兜住非并发的重复投递
+    # 同步置 RUNNING 落盘，堵住"线程异步改 stage 之前又来一次回调"的窗口
+    job["stage"] = orchestrator.STAGE_RUNNING
+    orchestrator._save(job)
+
     def _do_run() -> None:
         from core.dsw_scheduler import _send_card, _send_text
         from core.cpfs_dataflow.cards import result_card, progress_card
