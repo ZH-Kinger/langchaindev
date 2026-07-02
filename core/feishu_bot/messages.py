@@ -171,59 +171,12 @@ def _is_progress_query_text(text: str) -> bool:
     return bool(_PROGRESS_QUERY_RE.search(text or ""))
 
 
-def _list_user_tasks(open_id: str, limit: int = 8) -> list[dict]:
-    """扫描该用户名下最近的 CPFS / 迁移任务（按更新时间倒序）。"""
-    from utils.redis_client import get_redis
-    r = get_redis()
-    out: list[dict] = []
-    try:
-        for prefix, kind in (("cpfs:dataflow:job:", "cpfs"), ("transfer:job:", "transfer")):
-            for key in r.scan_iter(match=prefix + "*", count=300):
-                raw = r.get(key)
-                if not raw:
-                    continue
-                try:
-                    job = json.loads(raw)
-                except Exception:
-                    continue
-                if open_id and job.get("created_by") and job.get("created_by") != open_id:
-                    continue
-                label = job.get("operation_label") or job.get("direction") or kind
-                out.append({
-                    "job_id": job.get("job_id", ""), "kind": kind, "label": label,
-                    "stage": job.get("stage", "-"),
-                    "ts": job.get("updated_ts") or job.get("created_ts") or 0,
-                })
-    except Exception:
-        logger.warning("[progress] scan user tasks failed", exc_info=True)
-    out = [t for t in out if t["job_id"]]
-    out.sort(key=lambda t: t["ts"], reverse=True)
-    return out[:limit]
-
-
-def _recent_tasks_card(tasks: list[dict]) -> dict:
-    from tools.feishu.cards import card, div, buttons, btn, hr
-    elems = [div("点任务下的「🔄 查询这条」看最新进度：")]
-    for t in tasks:
-        act = "query_cpfs_progress" if t["kind"] == "cpfs" else "query_transfer_progress"
-        elems.append(hr())
-        elems.append(div(f"`{t['job_id']}` · {t['label']} · **{t['stage']}**"))
-        elems.append(buttons(btn("\U0001f504 查询这条", {"action": act, "job_id": t["job_id"]})))
-    return card("\U0001f4cb 你的最近任务", elems, color="blue")
-
-
 def _handle_progress_query(message_id: str, text: str, open_id: str = "") -> None:
-    """按任务ID直接查进度（cpfs-→CPFS 预热/沉降；tr-→跨云迁移）。无ID→列最近任务卡。"""
+    """按任务ID直接查进度（cpfs-→CPFS 预热/沉降；tr-→跨云迁移）。无ID→弹输入卡让用户填 ID。"""
     m = _JOB_ID_RE.search(text or "")
     if not m:
-        tasks = _list_user_tasks(open_id)
-        if tasks:
-            messaging._feishu_reply_card(message_id, _recent_tasks_card(tasks))
-        else:
-            messaging._feishu_reply(
-                message_id,
-                "没查到你名下的任务。可带任务ID查:「查询进度 cpfs-xxxxxx / tr-xxxxxx」,"
-                "或直接点任务卡片上的「🔄 查询进度」按钮。")
+        from core.cpfs_dataflow.cards import query_input_card
+        messaging._feishu_reply_card(message_id, query_input_card())
         return
     jid = m.group(1)
     try:

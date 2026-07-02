@@ -57,6 +57,27 @@ def entry_card(region_options=None):
     }
 
 
+def query_input_card():
+    """查询进度：弹一张带输入框的表单卡，让用户填任务 ID（cpfs-/tr-）再查。"""
+    form_elems = [
+        {"tag": "input", "name": "job_id", "label": _pt("任务 ID"), "required": True,
+         "placeholder": _pt("如 cpfs-xxxxxx 或 tr-xxxxxx")},
+        {"tag": "button", "text": _pt("\U0001f504 查询"), "type": "primary",
+         "form_action_type": "submit", "name": "submit",
+         "behaviors": [{"type": "callback", "value": {"action": "query_progress_by_id"}}]},
+    ]
+    return {
+        "schema": "2.0",
+        "config": {"wide_screen_mode": True},
+        "header": {"title": _pt("\U0001f504 查询任务进度"), "template": "blue"},
+        "body": {"elements": [
+            {"tag": "markdown",
+             "content": "填入**任务 ID** 查询进度（发起任务时的确认卡 / 进度卡上都带了 ID）。"},
+            {"tag": "form", "name": "query_progress", "elements": form_elems},
+        ]},
+    }
+
+
 def confirm_card(job: dict):
     info_md = (
         f"**任务ID**：`{job['job_id']}`\n"

@@ -122,25 +122,30 @@ def test_progress_query_text_intent():
     assert not messages._is_progress_query_text("帮我建个实例")
 
 
-def test_progress_query_no_id_gives_hint(monkeypatch):
-    from core.feishu_bot import messaging as mg
-    cap = []
-    monkeypatch.setattr(mg, "_feishu_reply", lambda mid, text: cap.append(text))
-    messages._handle_progress_query("m1", "查询进度")
-    assert cap and ("任务ID" in cap[0] or "按钮" in cap[0])   # 提示带ID/点按钮，不落 LLM
-
-
-def test_progress_query_no_id_lists_recent_tasks(monkeypatch):
+def test_progress_query_no_id_pops_input_card(monkeypatch):
+    """不带 ID → 弹带输入框的查询卡（不再列出全部任务）。"""
     import json as _j
     from core.feishu_bot import messaging as mg
-    job = orchestrator.create_job_record(
-        orchestrator.make_plan("sink", "/cwr/recent/", "oss://bk/r/", fs_id="bmcpfs-x", region="cn-hangzhou"),
-        open_id="ou_me")
     sent = []
     monkeypatch.setattr(mg, "_feishu_reply_card", lambda mid, card: sent.append(card))
     monkeypatch.setattr(mg, "_feishu_reply", lambda mid, text: sent.append({"text": text}))
     messages._handle_progress_query("m1", "查询进度", "ou_me")
-    assert sent and job["job_id"] in _j.dumps(sent[0], ensure_ascii=False)   # 卡片列出了该任务
+    assert sent
+    dumped = _j.dumps(sent[0], ensure_ascii=False)
+    # 是一张带 job_id 输入框 + query_progress_by_id 提交动作的表单卡
+    assert "query_progress_by_id" in dumped and "job_id" in dumped
+
+
+def test_query_progress_by_id_routes_to_cpfs(monkeypatch):
+    """输入卡提交 cpfs- id → 分发到 CPFS 查询，返回该任务卡。"""
+    import json as _j
+    from core.feishu_bot import actions
+    job = orchestrator.create_job_record(
+        orchestrator.make_plan("sink", "/cwr/q/", "oss://bk/q/", fs_id="bmcpfs-x", region="cn-hangzhou"))
+    job["stage"] = orchestrator.STAGE_RUNNING
+    orchestrator._save(job)
+    resp = actions._h_query_progress_by_id({}, "ou_me", "", {"job_id": job["job_id"]})
+    assert job["job_id"] in _j.dumps(resp, ensure_ascii=False)
 
 
 def test_progress_query_by_cpfs_id(monkeypatch):

@@ -665,6 +665,19 @@ def _h_retry_cpfs_dataflow(action_val, open_id, chat_id, form_value):
     return _h_confirm_cpfs_dataflow({"job_id": job_id}, open_id, chat_id, form_value)
 
 
+def _h_query_progress_by_id(action_val, open_id, chat_id, form_value):
+    """查询进度输入卡提交：读 form_value.job_id，按前缀分发到 CPFS / 迁移 查询。"""
+    jid = ((form_value or {}).get("job_id") or "").strip()
+    if not jid:
+        return {"toast": {"type": "error", "content": "请填任务 ID"}}
+    low = jid.lower()
+    if low.startswith("cpfs-"):
+        return _h_query_cpfs_progress({"job_id": jid}, open_id, chat_id, form_value)
+    if low.startswith("tr-"):
+        return _h_query_transfer_progress({"job_id": jid}, open_id, chat_id, form_value)
+    return {"toast": {"type": "error", "content": "任务 ID 需以 cpfs- 或 tr- 开头"}}
+
+
 _ACTION_HANDLERS = {
     "mfu_region":         _h_mfu_region,
     "submit_ak_register": _h_submit_ak_register,
@@ -688,6 +701,7 @@ _ACTION_HANDLERS = {
     "confirm_cpfs_dataflow": _h_confirm_cpfs_dataflow,
     "query_cpfs_progress":   _h_query_cpfs_progress,
     "retry_cpfs_dataflow":   _h_retry_cpfs_dataflow,
+    "query_progress_by_id":  _h_query_progress_by_id,
 }
 
 
