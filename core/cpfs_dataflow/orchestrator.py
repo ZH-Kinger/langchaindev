@@ -167,6 +167,14 @@ def _region_fs(region: str, open_id: str = "") -> str:
     fss = engine_nas.list_filesystems(region, open_id=open_id)
     if not fss:
         raise DataflowPathError(f"地区 {region} 下没有 CPFS 文件系统")
+    if len(fss) > 1:
+        # 多个 CPFS 时不能盲选第一个（可能选错 fs → 路径对不上/操作错文件系统）。
+        # 让用户用 cpfs://<fs-id>/<目录>/ 明确指定是哪一个。
+        lst = "、".join(fss)
+        raise DataflowPathError(
+            f"地区 {region} 下有多个 CPFS 文件系统（{lst}），无法自动判断用哪个。\n"
+            f"请把源/目的的 CPFS 地址写成 `cpfs://<fs-id>/<目录>/` 指定，例如 "
+            f"`cpfs://{fss[0]}/wzh/`。")
     return fss[0]
 
 

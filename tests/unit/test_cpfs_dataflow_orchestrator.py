@@ -104,6 +104,20 @@ def test_plan_from_addresses_needs_region(monkeypatch):
         orch.plan_from_addresses("", "/cpfs/x/", "oss://b/")
 
 
+def test_plan_from_addresses_multi_fs_requires_explicit(monkeypatch):
+    """地区有多个 CPFS 且路径没写 cpfs://<fs>/ → 报错要求明确指定，不盲选。"""
+    monkeypatch.setattr(engine_nas, "list_filesystems", lambda region, **k: ["bmcpfs-a", "bmcpfs-b"])
+    with pytest.raises(orch.DataflowPathError):
+        orch.plan_from_addresses("cn-hangzhou", "/cpfs/x/", "oss://b/p/")
+
+
+def test_plan_from_addresses_multi_fs_explicit_ok(monkeypatch):
+    """多 CPFS 时，显式 cpfs://<fs>/ 直接用该 fs，不触发歧义报错。"""
+    monkeypatch.setattr(engine_nas, "list_filesystems", lambda region, **k: ["bmcpfs-a", "bmcpfs-b"])
+    plan = orch.plan_from_addresses("cn-hangzhou", "cpfs://bmcpfs-b/x/", "oss://b/p/")
+    assert plan.fs_id == "bmcpfs-b"
+
+
 def test_make_plan_bad_operation():
     with pytest.raises(orch.DataflowPathError):
         orch.make_plan("evict", "cpfs://bmcpfs-x/d/")
