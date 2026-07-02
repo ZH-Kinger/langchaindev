@@ -669,7 +669,9 @@ def _h_query_progress_by_id(action_val, open_id, chat_id, form_value):
     """查询进度输入卡提交：读 form_value.job_id，按前缀分发到 CPFS / 迁移 查询。"""
     jid = ((form_value or {}).get("job_id") or "").strip()
     if not jid:
-        return {"toast": {"type": "error", "content": "请填任务 ID"}}
+        # 飞书对同一次提交会双投递：老式回调不带 form_value（job_id 空），
+        # 真正带值的是 schema 2.0 那条。空投递静默 no-op，避免误弹"请填任务 ID"。
+        return {}
     low = jid.lower()
     if low.startswith("cpfs-"):
         return _h_query_cpfs_progress({"job_id": jid}, open_id, chat_id, form_value)
@@ -723,6 +725,7 @@ def _handle_card_trigger_sync(data: dict) -> dict:
     open_id    = event.get("operator", {}).get("operator_id", {}).get("open_id", "")
     chat_id    = event.get("context", {}).get("open_chat_id", "") or settings.FEISHU_CHAT_ID
     action_name = action_val.get("action", "") if isinstance(action_val, dict) else ""
+    logger.info("[card_trigger] action=%r form_value_keys=%s", action_name, list(form_value.keys()))
     if not action_name and form_value:
         # 兼容旧 AK 表单（ak_id/ak_secret）和新 RAM 绑定表单（ram_user_name/user_name）
         if any(k in form_value for k in ("login_name", "user_name", "q")):
