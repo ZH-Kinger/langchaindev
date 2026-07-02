@@ -28,6 +28,15 @@ def test_sink_preheat_intent_keywords():
     assert not messages._is_sink_preheat_entry_intent("查一下 GPU 利用率")
 
 
+def test_mfu_report_intent_keywords():
+    assert messages._is_mfu_report_intent("算力日报")
+    assert messages._is_mfu_report_intent("看看算力效率")
+    assert messages._is_mfu_report_intent("MFU")
+    assert messages._is_mfu_report_intent("集群算力")
+    # 普通 GPU 申请不误命中（只含"算力"不含日报/效率等词）
+    assert not messages._is_mfu_report_intent("申请一张 A100 算力")
+
+
 def test_entry_card_addresses(monkeypatch):
     from core.cpfs_dataflow import discovery
     monkeypatch.setattr(discovery, "regions", lambda *a, **k: ["cn-hangzhou", "cn-beijing"])

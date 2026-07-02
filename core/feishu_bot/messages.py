@@ -111,6 +111,14 @@ def _is_sink_preheat_entry_intent(text: str) -> bool:
     return any(word.replace(" ", "").lower() in compact for word in _SINK_PREHEAT_ENTRY_WORDS)
 
 
+# 算力（MFU）日报：点菜单按钮发这些词 / 直接打字 → 回算力效率卡（不必等每日早报）
+_MFU_REPORT_RE = re.compile(r"(算力日报|算力效率|算力报告|集群算力|算力监控|mfu)", re.IGNORECASE)
+
+
+def _is_mfu_report_intent(text: str) -> bool:
+    return bool(_MFU_REPORT_RE.search(text or ""))
+
+
 def _is_transfer_entry_intent(text: str) -> bool:
     """命中录入关键词且没带路径（带路径走 _is_transfer_intent 直接解析）。"""
     if _extract_transfer_paths(text)[0]:
@@ -465,6 +473,16 @@ def _process_message(message_id: str, chat_id: str, user_text: str, open_id: str
     # ②.5 进度查询（拦在 Agent 之前，避免 LLM 劫持 + 吃旧会话历史）
     if _is_progress_query_text(user_text):
         _handle_progress_query(message_id, user_text, open_id)
+        return
+
+    # ②.6 算力（MFU）日报：点按钮/发关键词���时看（拦在 GPU 意图之前，"算力"是 GPU 资源词会被抢）
+    if _is_mfu_report_intent(user_text):
+        from tools.aliyun.cluster_mfu import mfu_card_for_callback
+        card = mfu_card_for_callback(view="summary")   # 只读缓存秒回；陈旧则后台刷新
+        if card is None:                               # 缓存全无 → 已触发后台采集
+            messaging._feishu_reply(message_id, "📊 算力数据采集中（约1分钟），请稍后再发一次「算力日报」。")
+        else:
+            messaging._feishu_reply_card(message_id, card)
         return
 
     # ③ 跨云迁移录入意图（纯关键词、无路径）→ 弹录入卡让用户填地址
