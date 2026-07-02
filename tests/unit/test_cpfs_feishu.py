@@ -49,6 +49,10 @@ def test_entry_card_cpfs_select(monkeypatch):
     names = {e.get("name") for e in form["elements"]}
     assert {"operation", "cpfs", "cpfs_dir", "oss"} <= names
     assert _find_action(ec) == "submit_cpfs_dataflow"
+    # 飞书 select_static 不支持 label 属性（否则整卡 200621 渲染失败）
+    for e in form["elements"]:
+        if e.get("tag") == "select_static":
+            assert "label" not in e, f"select_static 不能带 label: {e.get('name')}"
 
 
 def test_entry_card_fallback_free_text(monkeypatch):

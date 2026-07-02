@@ -40,9 +40,10 @@ def entry_card(region_options=None, open_id: str = ""):
                  " → 解析预览 → 确认下发时才建 DataFlow + 任务（用完自动删）。\n"
                  "> CPFS 与 OSS 须同地区。OSS 请填该地区的桶（镜像仓库 cri 开头勿填）。")
         form_elems = [
-            {"tag": "select_static", "name": "operation", "label": _pt("操作"), "required": True,
-             "placeholder": _pt("预热 / 沉降"), "options": _op_options()},
-            {"tag": "select_static", "name": "cpfs", "label": _pt("CPFS 文件系统"), "required": True,
+            # 注意：select_static 不支持 label 属性（飞书 200621），用 placeholder 说明即可；input 才有 label
+            {"tag": "select_static", "name": "operation", "required": True,
+             "placeholder": _pt("选择操作：预热 / 沉降"), "options": _op_options()},
+            {"tag": "select_static", "name": "cpfs", "required": True,
              "placeholder": _pt("选择 CPFS（地区 · 名称 · fs-id）"), "options": cpfs_opts},
             {"tag": "input", "name": "cpfs_dir", "label": _pt("CPFS 目录"), "required": True,
              "placeholder": _pt("如 /wzh/ 或 /cwr/label/")},
