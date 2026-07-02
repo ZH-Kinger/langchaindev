@@ -137,15 +137,25 @@ def test_progress_query_no_id_pops_input_card(monkeypatch):
 
 
 def test_query_progress_by_id_routes_to_cpfs(monkeypatch):
-    """输入卡提交 cpfs- id → 分发到 CPFS 查询，返回该任务卡。"""
+    """输入卡提交 cpfs- id → 推送该任务卡（不原地替换，避开 2.0↔1.0 schema 冲突）+ 回 toast。"""
     import json as _j
     from core.feishu_bot import actions
     job = orchestrator.create_job_record(
         orchestrator.make_plan("sink", "/cwr/q/", "oss://bk/q/", fs_id="bmcpfs-x", region="cn-hangzhou"))
     job["stage"] = orchestrator.STAGE_RUNNING
     orchestrator._save(job)
-    resp = actions._h_query_progress_by_id({}, "ou_me", "", {"job_id": job["job_id"]})
-    assert job["job_id"] in _j.dumps(resp, ensure_ascii=False)
+    pushed = []
+    monkeypatch.setattr("core.dsw_scheduler._send_card", lambda oid, cid, card: pushed.append(card))
+    resp = actions._h_query_progress_by_id({}, "ou_me", "oc_x", {"job_id": job["job_id"]})
+    # 推了一张带该任务的卡，且 toast 带阶段
+    assert pushed and job["job_id"] in _j.dumps(pushed[0], ensure_ascii=False)
+    assert "RUNNING" in _j.dumps(resp, ensure_ascii=False)
+
+
+def test_query_progress_by_id_empty_is_noop(monkeypatch):
+    """空 job_id（老式双投递）→ 静默 no-op，不误报。"""
+    from core.feishu_bot import actions
+    assert actions._h_query_progress_by_id({}, "ou_me", "oc_x", {}) == {}
 
 
 def test_progress_query_by_cpfs_id(monkeypatch):

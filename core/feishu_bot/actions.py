@@ -666,17 +666,38 @@ def _h_retry_cpfs_dataflow(action_val, open_id, chat_id, form_value):
 
 
 def _h_query_progress_by_id(action_val, open_id, chat_id, form_value):
-    """查询进度输入卡提交：读 form_value.job_id，按前缀分发到 CPFS / 迁移 查询。"""
+    """查询进度输入卡提交：读 form_value.job_id，按前缀分发。
+
+    输入卡是 schema 2.0，而进度/结果卡是老式 1.0；用 1.0 卡原地替换 2.0 卡会被飞书拒
+    （错误 200830）。故这里改为**推送一张新卡** + 回 toast，不做原地替换。
+    """
     jid = ((form_value or {}).get("job_id") or "").strip()
     if not jid:
         # 飞书对同一次提交会双投递：老式回调不带 form_value（job_id 空），
         # 真正带值的是 schema 2.0 那条。空投递静默 no-op，避免误弹"请填任务 ID"。
         return {}
+    from core.dsw_scheduler import _send_card
     low = jid.lower()
     if low.startswith("cpfs-"):
-        return _h_query_cpfs_progress({"job_id": jid}, open_id, chat_id, form_value)
+        from core.cpfs_dataflow import orchestrator as o
+        from core.cpfs_dataflow.cards import progress_card, result_card
+        job = o.get_job(jid)
+        if not job:
+            return {"toast": {"type": "error", "content": f"未找到任务 {jid}（可能已过期）"}}
+        c = (result_card(job) if job["stage"] in (o.STAGE_DONE, o.STAGE_FAILED)
+             else progress_card(job))
+        _send_card(open_id, chat_id or _cfg_cpfs_chat(), c)
+        return {"toast": {"type": "success", "content": f"{jid}：{job['stage']}"}}
     if low.startswith("tr-"):
-        return _h_query_transfer_progress({"job_id": jid}, open_id, chat_id, form_value)
+        from core.transfer import orchestrator as o
+        from core.transfer.cards import progress_card, result_card
+        job = o.get_job(jid)
+        if not job:
+            return {"toast": {"type": "error", "content": f"未找到任务 {jid}（可能已过期）"}}
+        c = (result_card(job) if job["stage"] in (o.STAGE_DONE, o.STAGE_FAILED)
+             else progress_card(job))
+        _send_card(open_id, chat_id or _cfg_chat(), c)
+        return {"toast": {"type": "success", "content": f"{jid}：{job['stage']}"}}
     return {"toast": {"type": "error", "content": "任务 ID 需以 cpfs- 或 tr- 开头"}}
 
 
