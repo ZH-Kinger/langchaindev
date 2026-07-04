@@ -274,28 +274,57 @@ def create_job_record(plan: DataflowPlan, *, open_id: str = "") -> dict:
     return job
 
 
+def _relative_dir(full: str, base: str) -> str:
+    """把 full 目录表示成相对 base 的目录（都以 / 开头结尾）。base 是 full 的祖先时截掉前缀，
+    否则原样返回。用于智算版任务 Directory/DstDirectory（相对 DataFlow 的绑定路径）。"""
+    full = engine_nas.normalize_dir(full)
+    base = engine_nas.normalize_dir(base)
+    if base == "/" or not base:
+        return full
+    if full == base:
+        return "/"
+    if full.startswith(base):
+        return engine_nas.normalize_dir(full[len(base):])
+    return full
+
+
 def start_task(job: dict) -> dict:
-    """（需要则临时建 DataFlow）+ 提交任务，置 RUNNING。失败置 FAILED。"""
+    """选定 DataFlow（优先复用能覆盖该目录的已有流，否则临时建）+ 提交任务，置 RUNNING。失败置 FAILED。"""
     try:
         if not job.get("data_flow_id") or job.get("dataflow_deleted"):
-            # 用完即删的临时 DataFlow：建 → 等 Running → 标记 ephemeral（重试时也会重建）
-            job["data_flow_id"] = engine_nas.create_dataflow(
-                job["fs_id"], job["region"],
-                oss_bucket=job.get("oss_bucket", ""), oss_path=job.get("oss_prefix", "") or "/",
-                fs_path=job.get("cpfs_dir", ""), open_id=job.get("created_by", ""),
-            )
-            job["dataflow_ephemeral"] = True
+            # ① 先找能覆盖该 CPFS 目录的**已有** DataFlow（按最长祖先前缀）。有就复用——不建、不删，
+            #    避免与已有绑定冲突（CreateDataFlow 报 InvalidStatus.DataFlowConflicted 403）。
+            flow = None
+            try:
+                flow = engine_nas.resolve_dataflow(
+                    job["fs_id"], job["region"],
+                    oss_bucket=job.get("oss_bucket", ""), fs_path=job.get("cpfs_dir", ""),
+                    open_id=job.get("created_by", ""))
+            except engine_nas.NasDataflowError:
+                flow = None
+            if flow and flow.get("data_flow_id"):
+                job["data_flow_id"] = flow["data_flow_id"]
+                job["dataflow_ephemeral"] = False
+                job["df_fs_path"] = flow.get("fs_path") or "/"
+                job["df_oss_path"] = flow.get("source_storage_path") or "/"
+            else:
+                # ② 没有可复用的 → 临时建（用完即删），绑定就在 cpfs_dir↔oss_prefix 上
+                job["data_flow_id"] = engine_nas.create_dataflow(
+                    job["fs_id"], job["region"],
+                    oss_bucket=job.get("oss_bucket", ""), oss_path=job.get("oss_prefix", "") or "/",
+                    fs_path=job.get("cpfs_dir", ""), open_id=job.get("created_by", ""),
+                )
+                job["dataflow_ephemeral"] = True
+                job["df_fs_path"] = job.get("cpfs_dir", "")
+                job["df_oss_path"] = job.get("oss_prefix", "") or "/"
             job["dataflow_deleted"] = False
             _save(job)
             engine_nas.wait_dataflow_running(
                 job["fs_id"], job["region"], job["data_flow_id"], open_id=job.get("created_by", ""))
         # 智算版任务 Directory/DstDirectory 相对 DataFlow 的 FileSystemPath/SourceStoragePath。
-        # 临时流就绑定在 cpfs_dir↔oss_prefix 上，故任务目录相对绑定根 = "/"（填 cpfs_dir 会变
-        # 成 /cpfs_dir/cpfs_dir/ → 找不到 → Failed 0 文件）。显式选已有流时才用绝对子目录。
-        if job.get("dataflow_ephemeral"):
-            task_dir, task_dst = "/", "/"
-        else:
-            task_dir, task_dst = job.get("directory", ""), job.get("dst_directory", "")
+        # 统一用相对路径：临时流绑在 cpfs_dir↔oss_prefix → 相对根 "/"；复用的祖先流 → 相对其绑定的子目录。
+        task_dir = _relative_dir(job.get("cpfs_dir", ""), job.get("df_fs_path", "/"))
+        task_dst = _relative_dir(job.get("oss_prefix", ""), job.get("df_oss_path", "/"))
         task_id = engine_nas.submit_task(
             fs_id=job["fs_id"], data_flow_id=job["data_flow_id"], action=job["action"],
             directory=task_dir, dst_directory=task_dst,

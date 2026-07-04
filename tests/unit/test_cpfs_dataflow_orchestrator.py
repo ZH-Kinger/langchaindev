@@ -5,6 +5,11 @@ from core.cpfs_dataflow import orchestrator as orch
 from core.cpfs_dataflow import engine_nas
 
 
+def _no_existing_flow(*a, **k):
+    """mock：该 fs 下没有可复用的已有 DataFlow → start_task 走临时建流分支。"""
+    raise engine_nas.NasDataflowError("no existing dataflow")
+
+
 def test_make_plan_sink_orientation():
     plan = orch.make_plan("sink", "cpfs://bmcpfs-x/outputs/", "oss://bk/exports/")
     assert plan.operation == "sink" and plan.action == "Export"
@@ -66,6 +71,7 @@ def test_start_task_creates_ephemeral_dataflow(monkeypatch):
     monkeypatch.setattr(engine_nas, "list_filesystems", lambda region, **k: ["bmcpfs-a"])
     plan = orch.plan_from_addresses("cn-hangzhou", "/cpfs/cwr/o/", "oss://bk/e/")
     job = orch.create_job_record(plan)
+    monkeypatch.setattr(engine_nas, "resolve_dataflow", _no_existing_flow)
     monkeypatch.setattr(engine_nas, "create_dataflow", lambda *a, **k: "df-tmp")
     monkeypatch.setattr(engine_nas, "wait_dataflow_running", lambda *a, **k: None)
     monkeypatch.setattr(engine_nas, "submit_task", lambda **k: "task-1")
@@ -75,11 +81,35 @@ def test_start_task_creates_ephemeral_dataflow(monkeypatch):
     assert job["task_id"] == "task-1"
 
 
+def test_start_task_reuses_existing_ancestor_dataflow(monkeypatch):
+    """已有 DataFlow 覆盖该目录（祖先绑定）→ 复用、不建不删，任务用相对子目录。"""
+    monkeypatch.setattr(engine_nas, "list_filesystems", lambda region, **k: ["bmcpfs-a"])
+    plan = orch.make_plan("sink", "/wangyuran/lightwheel/", "oss://wuji-data-tran/lightwheel/",
+                          fs_id="bmcpfs-a", region="cn-hangzhou")
+    job = orch.create_job_record(plan)
+    monkeypatch.setattr(engine_nas, "resolve_dataflow", lambda *a, **k: {
+        "data_flow_id": "df-existing", "fs_path": "/wangyuran/",
+        "source_storage": "oss://wuji-data-tran", "source_storage_path": "/"})
+    monkeypatch.setattr(engine_nas, "wait_dataflow_running", lambda *a, **k: None)
+    called = {}
+    monkeypatch.setattr(engine_nas, "create_dataflow",
+                        lambda *a, **k: called.setdefault("create", True) or "df-should-not")
+    monkeypatch.setattr(engine_nas, "submit_task",
+                        lambda **k: called.update(dir=k.get("directory"), dst=k.get("dst_directory")) or "task-1")
+    job = orch.start_task(job)
+    assert job["stage"] == orch.STAGE_RUNNING
+    assert job["data_flow_id"] == "df-existing" and job["dataflow_ephemeral"] is False
+    assert "create" not in called                         # 没建新流
+    assert called["dir"] == "/lightwheel/"                 # 相对 /wangyuran/
+    assert called["dst"] == "/lightwheel/"                 # 相对 OSS 根 /
+
+
 def test_run_to_completion_deletes_ephemeral_dataflow(monkeypatch):
     monkeypatch.setattr(engine_nas, "list_filesystems", lambda region, **k: ["bmcpfs-a"])
     plan = orch.plan_from_addresses("cn-hangzhou", "/cpfs/cwr/o/", "oss://bk/e/")
     job = orch.create_job_record(plan)
     deleted = {}
+    monkeypatch.setattr(engine_nas, "resolve_dataflow", _no_existing_flow)
     monkeypatch.setattr(engine_nas, "create_dataflow", lambda *a, **k: "df-tmp")
     monkeypatch.setattr(engine_nas, "wait_dataflow_running", lambda *a, **k: None)
     monkeypatch.setattr(engine_nas, "submit_task", lambda **k: "task-1")
@@ -134,6 +164,7 @@ def test_create_job_record_idempotent(monkeypatch):
 def test_start_task_sets_running(monkeypatch):
     plan = orch.make_plan("sink", "cpfs://bmcpfs-x/o/", "oss://bk/e/")
     job = orch.create_job_record(plan)
+    monkeypatch.setattr(engine_nas, "resolve_dataflow", _no_existing_flow)
     monkeypatch.setattr(engine_nas, "create_dataflow", lambda *a, **k: "df-1")
     monkeypatch.setattr(engine_nas, "wait_dataflow_running", lambda *a, **k: None)
     monkeypatch.setattr(engine_nas, "submit_task", lambda **k: "task-1")
@@ -147,6 +178,7 @@ def test_start_task_failure(monkeypatch):
     job = orch.create_job_record(plan)
     def boom(*a, **k):
         raise engine_nas.NasDataflowError("create failed")
+    monkeypatch.setattr(engine_nas, "resolve_dataflow", _no_existing_flow)
     monkeypatch.setattr(engine_nas, "create_dataflow", boom)
     job = orch.start_task(job)
     assert job["stage"] == orch.STAGE_FAILED and "create failed" in job["error"]
@@ -176,6 +208,7 @@ def test_poll_once_failed(monkeypatch):
 def test_run_to_completion(monkeypatch):
     plan = orch.make_plan("sink", "cpfs://bmcpfs-x/o/", "oss://bk/e/")
     job = orch.create_job_record(plan)
+    monkeypatch.setattr(engine_nas, "resolve_dataflow", _no_existing_flow)
     monkeypatch.setattr(engine_nas, "create_dataflow", lambda *a, **k: "df")
     monkeypatch.setattr(engine_nas, "wait_dataflow_running", lambda *a, **k: None)
     monkeypatch.setattr(engine_nas, "submit_task", lambda **k: "task-1")
