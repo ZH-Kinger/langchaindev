@@ -28,6 +28,11 @@ class Config:
     ALIYUN_RAM_LOGIN_DOMAIN   = os.environ.get("ALIYUN_RAM_LOGIN_DOMAIN", "")
     RAM_QUERY_API_TOKEN       = os.environ.get("RAM_QUERY_API_TOKEN", "")
 
+    # GPU 卡分布实时页面（/gpu/distribution）：地区×卡型 + 每用户在算卡数
+    GPU_DIST_ENABLED          = os.environ.get("GPU_DIST_ENABLED", "true").lower() == "true"
+    # 页面公网基址（如 http://115.191.2.86:8088），供飞书发链接用；留空则只回摘要卡不带链接按钮。
+    GPU_DIST_BASE_URL         = os.environ.get("GPU_DIST_BASE_URL", "")
+
     # 飞书企业自建应用
     FEISHU_APP_ID             = os.environ.get("FEISHU_APP_ID", "")
     FEISHU_APP_SECRET         = os.environ.get("FEISHU_APP_SECRET", "")

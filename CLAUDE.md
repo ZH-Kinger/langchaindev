@@ -213,6 +213,7 @@ Single client, `decode_responses=True`. Failures degrade silently. Key namespace
 - `transfer:job:{job_id}` — 30-day TTL, cross-cloud transfer state machine record (stage/engine/bytes/error).
 - `cpfs:dataflow:job:{job_id}` — 30-day TTL, CPFS 预热/沉降 task state (operation/fs/dataflow/task_id/progress).
 - `cpfs:dataflow:map` — `CPFS_MAP_TTL_SECONDS` (6h) TTL, discovered CPFS↔OSS DataFlow binding options for the Feishu selector.
+- `gpu:dist:snapshot` — 24h TTL, GPU 卡分布快照(地区×卡型 + 每用户在算卡数)，90s 陈旧后台单飞刷新；实时 HTML 页面 `/gpu/distribution` 高频读它。数据源 `tools/aliyun/gpu_distribution.py`（DLC `count by(jobUserId,regionId)` + quota `NODE_GPU_ACCELERATOR_TOTAL/REQUEST`，jobUserId→姓名走 RAM ListUsers）；飞书意图 `_is_gpu_dist_intent`（卡分布/谁在用卡…）回摘要卡+链接；路由 `routes.py:/gpu/distribution` token 门禁。
 - `vepfs:dataflow:job:{job_id}` — 30-day TTL, 火山 vePFS 预热/沉降 task state (operation/fs/sub_path/tos/task_id/progress).
 
 ### Vector Store & RAG (`core/vector_store.py`)

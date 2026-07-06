@@ -205,6 +205,24 @@ def api_ram_user():
     except RamQueryError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500
 
+@app.route("/gpu/distribution", methods=["GET"])
+def gpu_distribution_page():
+    """GPU 卡分布实时页面（自动刷新 HTML）。token 门禁（复用 RAM_QUERY_API_TOKEN）。"""
+    if not getattr(settings, "GPU_DIST_ENABLED", True):
+        return "gpu distribution disabled", 404
+    if not _ram_api_authorized():
+        return "unauthorized", 403
+    from tools.aliyun.gpu_distribution import get_distribution, build_html
+    try:
+        refresh = request.args.get("refresh") == "1"
+        g = get_distribution(refresh=refresh)
+        token = request.args.get("token", "") or request.headers.get("X-API-Token", "")
+        return build_html(g, token=token), 200, {"Content-Type": "text/html; charset=utf-8"}
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[gpu_distribution] render failed: %s", exc, exc_info=True)
+        return f"error: {exc}", 500
+
+
 @app.route("/health", methods=["GET"])
 def health():
     """深度健康检查：探测各依赖服务连通性。"""

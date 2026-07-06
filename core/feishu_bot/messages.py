@@ -124,6 +124,16 @@ def _is_mfu_report_intent(text: str) -> bool:
     return bool(_MFU_REPORT_RE.search(text or ""))
 
 
+# GPU 卡分布：地区×卡型 + 每用户在算卡数（拦在 GPU 申请意图之前，"卡"是 GPU 资源词会被抢）
+_GPU_DIST_RE = re.compile(
+    r"(卡分布|显卡分布|gpu分布|卡用量|用卡情况|卡统计|卡占用|卡的分布|谁在用卡|用了多少卡|卡使用情况)",
+    re.IGNORECASE)
+
+
+def _is_gpu_dist_intent(text: str) -> bool:
+    return bool(_GPU_DIST_RE.search(text or ""))
+
+
 # 桶间迁移（同云一次性搬运）：发这些词 → 弹桶间迁移卡（排在跨云 transfer 意图之前）
 _BUCKET_TRANSFER_ENTRY_WORDS = (
     "桶间迁移", "桶间搬运", "同云迁移", "同区迁移", "桶迁移", "bucket迁移",
@@ -523,6 +533,20 @@ def _process_message(message_id: str, chat_id: str, user_text: str, open_id: str
                     messaging._feishu_reply(message_id, "❌ 算力日报采集失败，请稍后重试。")
 
             threading.Thread(target=_build_and_push, daemon=True).start()
+        return
+
+    # ②.7 GPU 卡分布（地区×卡型 + 每用户在算卡数）：回摘要卡 + 实时页面链接（拦在 GPU 申请意图之前）
+    if _is_gpu_dist_intent(user_text):
+        def _reply_dist():
+            try:
+                from tools.aliyun.gpu_distribution import get_distribution, summary_card, dist_url
+                g = get_distribution()
+                messaging._feishu_reply_card(message_id, summary_card(g, dist_url()))
+            except Exception:
+                logger.error("[GPUDIST] 回复卡分布失败", exc_info=True)
+                messaging._feishu_reply(message_id, "❌ 卡分布查询失败，请稍后重试。")
+
+        threading.Thread(target=_reply_dist, daemon=True).start()
         return
 
     # ③ 跨云迁移录入意图（纯关键词、无路径）→ 弹录入卡让用户填地址
