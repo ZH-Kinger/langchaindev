@@ -69,7 +69,7 @@ def test_build_html_top10_and_collapse():
     # 交互一律 addEventListener，绝无内联 onclick（飞书 webview 会静默屏蔽内联处理器）
     assert "onclick=" not in html
     assert "addEventListener" in html
-    assert "UI v4" in html
+    assert "UI v5" in html
     assert 'id="btn-refresh"' in html       # 刷新按钮用 id 绑定
 
 
@@ -83,11 +83,11 @@ def test_gather_timeseries(monkeypatch):
     def fake_rs(expr, *a, **k):
         if expr.startswith("count("):                # 在算(合并 SM>thr)——须在 SM_UTIL 之前判
             return {1000.0: 16.0, 1600.0: 16.0}
-        if "DUTY_CYCLE" in expr:
+        if "DUTTY_UTIL" in expr:                     # per-region GPU 算力利用率(资源组 DutyCycle)
             return {1000.0: 70.0, 1600.0: 72.0}
         if "TENSORTFLOPS_USED" in expr:              # per-region Tensor 算力(TFLOPS 求和)
             return {1000.0: 900.0, 1600.0: 950.0}
-        if "SM_UTIL" in expr:                        # per-region 算力利用率(SM 繁忙%)
+        if "SM_UTIL" in expr:                        # per-region SM 利用率(SM 繁忙%)
             return {1000.0: 40.0, 1600.0: 42.0}
         if "PIP_TENSOR_ACTIVE" in expr:              # per-region Tensor 管线活跃%
             return {1000.0: 1.8, 1600.0: 1.9}
@@ -101,14 +101,16 @@ def test_gather_timeseries(monkeypatch):
 
     monkeypatch.setattr(cluster_mfu, "_range_series", fake_rs)
     ts = G._gather_timeseries(hours=24)
-    assert ts["labels"] and len(ts["gpu_util"]) == len(ts["labels"])
-    assert ts["gpu_util"][0] == 70.0
+    assert ts["labels"]
+    # 头版 GPU 算力利用率 = 资源组 DutyCycle，每地区一条
+    assert len(ts["duty_region"]) == 2 and all("H20" in k for k in ts["duty_region"])
+    assert abs(list(ts["duty_region"].values())[0][0] - 70.0) < 0.1
     assert ts["mem_util"][0] == 5.0              # 显存使用率(合并)
     # 卡数三线：已分配/在算/空闲(=总-已分配)
     assert ts["cards"]["allocated"][0] == 20 and ts["cards"]["active"][0] == 16
     assert ts["cards"]["idle"][0] == 44          # 64 - 20
-    # 每地区一条：SM 算力利用率 / Tensor 管线活跃 / Tensor 算力(TFLOPS)
-    assert len(ts["sm_region"]) == 2 and all("H20" in k for k in ts["sm_region"])
+    # 每地区一条：SM 利用率 / Tensor 管线活跃 / Tensor 算力(TFLOPS)
+    assert len(ts["sm_region"]) == 2
     assert abs(list(ts["sm_region"].values())[0][0] - 40.0) < 0.1
     assert len(ts["tensor_region"]) == 2
     assert abs(list(ts["tensor_region"].values())[0][0] - 1.8) < 0.1
@@ -122,7 +124,8 @@ def test_build_html_with_charts():
          "regions": [{"region_name": "北京", "gpu_name": "H20", "total": 64, "used": 20, "free": 44, "rate": 31.2}],
          "users": [{"name": "张三", "total": 20, "by_type": {"H20": 20}, "by_region": {}}],
          "total_cards": 64, "used_cards": 20, "active_cards": 20, "user_count": 1}
-    series = {"labels": ["10:00", "10:10"], "gpu_util": [70, 72], "mem_util": [5, 6],
+    series = {"labels": ["10:00", "10:10"], "mem_util": [5, 6],
+              "duty_region": {"北京·H20": [70, 72]},
               "sm_region": {"北京·H20": [40, 42]}, "tensor_region": {"北京·H20": [1.8, 1.9]},
               "tflops_region": {"北京·H20": [900, 950]},
               "cards": {"allocated": [20, 22], "active": [16, 16], "idle": [44, 42]},
@@ -133,7 +136,8 @@ def test_build_html_with_charts():
     assert "chart.js" in html.lower()          # Chart.js CDN
     assert '已分配 / 在算 / 空闲' in html        # 卡数三线
     assert 'class="rg' in html and "3天" in html and "24h" in html   # 时间范围选择器
-    assert "算力利用率（SM 繁忙%，按地区）" in html   # 头版换成 SM_UTIL 算力利用率
+    assert "GPU 算力利用率 DutyCycle" in html   # 头版=资源组 DutyCycle(阿里云同口径)
+    assert "SM 利用率" in html                   # SM 降为次要指标
     assert "MFU 计算器" not in html and 'id="m_p"' not in html  # 计算器已移除
     assert "SECRET" not in html                # token 不入正文
     # 时间范围按钮改 data-h + addEventListener（无内联 onclick）
