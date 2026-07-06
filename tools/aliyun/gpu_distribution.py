@@ -345,11 +345,6 @@ def build_html(g: dict, series: dict = None, token: str = "", refresh_secs: int 
         body = "".join(urow(i, u) for i, u in enumerate(rest, 11))
         rest_html = (f'<details><summary>展开其余 {len(rest)} 人</summary>'
                      f'<table class="tbl"><tbody>{body}</tbody></table></details>')
-    # 手动刷新：读地址栏 token，请求 refresh=1 强制重采，再刷新当前页（不把 token 写进正文）
-    refresh_js = ("const u=new URL(location.href);u.searchParams.set('refresh','1');"
-                  "this.textContent='⏳ 采集中…';fetch(u).then(()=>location.reload())"
-                  ".catch(()=>location.reload())")
-
     # 趋势图（渐进增强：Chart.js CDN；数据内嵌，token 不入正文）
     charts_html = ""
     chart_js = ""
@@ -358,8 +353,7 @@ def build_html(g: dict, series: dict = None, token: str = "", refresh_secs: int 
         rbtns = []
         for h, lbl in ((1, "1h"), (6, "6h"), (12, "12h"), (24, "24h"), (72, "3天")):
             on = " on" if h == cur_h else ""
-            rbtns.append(f'<button class="rg{on}" onclick="const u=new URL(location.href);'
-                         f"u.searchParams.set('hours','{h}');location.href=u\">{lbl}</button>")
+            rbtns.append(f'<button type="button" class="rg{on}" data-h="{h}">{lbl}</button>')
         range_html = '<div class="ranges">' + "".join(rbtns) + "</div>"
         charts_html = (
             f'<div class="hd" style="margin-top:20px"><h2 style="margin:0">趋势</h2>{range_html}</div>'
@@ -408,7 +402,7 @@ def build_html(g: dict, series: dict = None, token: str = "", refresh_secs: int 
         '<label>吞吐 tokens/s<input id="m_t" type="number" placeholder="如 12000"></label>'
         f'<label>GPU 卡数<input id="m_n" type="number" value="{g.get("active_cards", 0)}"></label>'
         '<label>单卡峰值 TFLOPS<input id="m_k" type="number" value="148"></label>'
-        '<button class="refresh" onclick="calcMfu()">算 MFU</button>'
+        '<button type="button" class="refresh" id="btn-calc-mfu">算 MFU</button>'
         '<div id="m_out" class="mout">填 P / tokens·s 后点「算 MFU」</div>'
         '</div>'
         '<div class="sub">单卡峰值(BF16稠密)：H20 148 · H100/H200 989 · H100(FP8) 1979 · A100 312 · H800 989</div>')
@@ -431,6 +425,34 @@ def build_html(g: dict, series: dict = None, token: str = "", refresh_secs: int 
     reload_js = ('<script>(function t(){setTimeout(function(){'
                  'var a=document.activeElement;if(a&&a.tagName==="INPUT"){t();return;}'
                  f'location.reload();}},{refresh_secs * 1000});}})();</script>')
+
+    # 按钮事件绑定（addEventListener，不用内联 onclick——飞书 webview/CSP 会静默屏蔽内联处理器）。
+    # 纯 ES5：var + function。放在 body 末尾，DOM 已解析；仍包一层 DOMContentLoaded 保险。
+    # token 从地址栏 location.href 取，绝不写进正文。
+    bind_js = (
+        '<script>(function(){'
+        'function init(){'
+        'function bind(el,fn){if(el){el.addEventListener("click",fn);}}'
+        # 时间范围按钮：遍历 .rg，读 data-h，设置 hours 后跳转
+        'var rgs=document.querySelectorAll(".rg");'
+        'for(var i=0;i<rgs.length;i++){(function(btn){bind(btn,function(){'
+        'var h=btn.getAttribute("data-h");if(!h){return;}'
+        'var u=new URL(location.href);u.searchParams.set("hours",h);'
+        'location.assign(u.toString());});})(rgs[i]);}'
+        # 立即刷新按钮：加 refresh=1 强制重采，fetch 完成后 reload
+        'var rf=document.getElementById("btn-refresh");'
+        'bind(rf,function(){'
+        'var u=new URL(location.href);u.searchParams.set("refresh","1");'
+        'rf.textContent="⏳ 采集中…";'
+        'fetch(u.toString()).then(function(){location.reload();})'
+        '.catch(function(){location.reload();});});'
+        # 算 MFU 按钮
+        'var cm=document.getElementById("btn-calc-mfu");'
+        'bind(cm,function(){if(typeof calcMfu==="function"){calcMfu();}});'
+        '}'
+        'if(document.readyState==="loading"){'
+        'document.addEventListener("DOMContentLoaded",init);}else{init();}'
+        '})();</script>')
 
     return f"""<!doctype html><html lang="zh"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -473,8 +495,8 @@ details{{margin-top:8px}} summary{{cursor:pointer;color:#3370ff;font-size:13px;p
 </style></head><body>
 <div class="card">
 <div class="hd"><h1>🧮 GPU 卡分布（实时）</h1>
-<button class="refresh" onclick="{refresh_js}">🔄 立即刷新</button></div>
-<div class="sub">数据时间 {e(_fmt_ts(g.get("gathered_at")))} · 每 {refresh_secs}s 自动刷新 · <b>UI v2</b></div>
+<button type="button" class="refresh" id="btn-refresh">🔄 立即刷新</button></div>
+<div class="sub">数据时间 {e(_fmt_ts(g.get("gathered_at")))} · 每 {refresh_secs}s 自动刷新 · <b>UI v3</b></div>
 <div class="kpi"><div>总卡数<br><b>{g.get("total_cards",0)}</b></div>
 <div>已分配<br><b>{g.get("used_cards",0)}</b></div>
 <div>在算<br><b>{g.get("active_cards",0)}</b></div>
@@ -491,7 +513,7 @@ details{{margin-top:8px}} summary{{cursor:pointer;color:#3370ff;font-size:13px;p
 {rest_html}
 {calc_html}
 <div class="sub" style="margin-top:18px">数据每 15 秒后台更新；点「🔄 立即刷新」强制重采。张量核利用率是硬件实测(≈HFU上界)；真 MFU 请用上方计算器填 P/吞吐。</div>
-</div>{chart_js}{calc_js}{reload_js}</body></html>"""
+</div>{chart_js}{calc_js}{bind_js}{reload_js}</body></html>"""
 
 
 def dist_url() -> str:

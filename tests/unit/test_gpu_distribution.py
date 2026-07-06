@@ -66,6 +66,12 @@ def test_build_html_top10_and_collapse():
     assert "立即刷新" in html               # 手动刷新按钮
     assert "共 15 人" in html               # 标题按实际人数
     assert "justify-content:center" in html  # 居中
+    # 交互一律 addEventListener，绝无内联 onclick（飞书 webview 会静默屏蔽内联处理器）
+    assert "onclick=" not in html
+    assert "addEventListener" in html
+    assert "UI v3" in html
+    assert 'id="btn-refresh"' in html       # 刷新按钮用 id 绑定
+    assert 'id="btn-calc-mfu"' in html      # 算 MFU 按钮用 id 绑定
 
 
 def test_gather_timeseries(monkeypatch):
@@ -119,6 +125,11 @@ def test_build_html_with_charts():
     assert "MFU 计算器" in html and 'id="m_p"' in html and "function calcMfu" in html  # 真MFU计算器
     assert "张量核利用率" in html               # 原"MFU"图已诚实改名
     assert "SECRET" not in html                # token 不入正文
+    # 时间范围按钮改 data-h + addEventListener（无内联 onclick）
+    assert "onclick=" not in html
+    assert "addEventListener" in html
+    for h in ("1", "6", "12", "24", "72"):
+        assert f'data-h="{h}"' in html         # 5 个范围按钮各带 data-h
     # 无 series 时不渲染图表（渐进：仍出表格）
     html2 = G.build_html(g, None, token="SECRET")
     assert 'id="c_mfu"' not in html2 and "北京" in html2
