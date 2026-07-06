@@ -59,7 +59,7 @@ def test_build_html_top10_and_collapse():
          "users": users, "total_cards": 64, "used_cards": 20,
          "active_cards": sum(u["total"] for u in users), "user_count": 15}
     html = G.build_html(g, token="TK")
-    assert 'http-equiv="refresh"' in html
+    assert "location.reload()" in html          # 定时刷新（非 meta，防外链超时卡死）
     assert "展开其余 5 人" in html          # 15 - 10
     assert "北京" in html and "u0" in html
     assert "TK" not in html                 # token 绝不写进页面正文

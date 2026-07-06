@@ -370,9 +370,11 @@ def build_html(g: dict, series: dict = None, token: str = "", refresh_secs: int 
             '<div class="chart"><div class="ct">卡数：已分配 / 在算 / 空闲</div><div class="cv"><canvas id="c_cards"></canvas></div></div>'
             '</div>')
         ts_json = json.dumps(series, ensure_ascii=False)
-        chart_js = ('<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>'
-                    '<script>const TS=__TS__;'
-                    'if(window.Chart&&TS.labels&&TS.labels.length){'
+        # Chart.js 异步加载：不阻塞整页（jsdelivr 国内常超时会拖死页面）。
+        # npmmirror(国内)优先，jsdelivr 兜底；都失败则图表留空、页面照常可交互。
+        chart_js = ('<script>const TS=__TS__;'
+                    'function _renderCharts(){'
+                    'if(!(window.Chart&&TS.labels&&TS.labels.length))return;'
                     "const PAL=['#3370ff','#00b42a','#ff7d00','#7c5cff','#f53f3f'];"
                     'const base=(ds,max)=>({type:"line",data:{labels:TS.labels,datasets:ds},'
                     'options:{responsive:true,maintainAspectRatio:false,animation:false,'
@@ -389,7 +391,14 @@ def build_html(g: dict, series: dict = None, token: str = "", refresh_secs: int 
                     'mk("c_cards",[{label:"已分配",data:C.allocated,borderColor:"#ff7d00",borderWidth:2,tension:.3},'
                     '{label:"在算",data:C.active,borderColor:"#00b42a",borderWidth:2,tension:.3},'
                     '{label:"空闲",data:C.idle,borderColor:"#86909c",borderWidth:2,borderDash:[4,3],tension:.3}]);'
-                    '}</script>').replace("__TS__", ts_json)
+                    '}'
+                    '(function(){var U=['
+                    '"https://registry.npmmirror.com/chart.js/4.4.1/files/dist/chart.umd.js",'
+                    '"https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"];'
+                    'function L(i){if(i>=U.length)return;var s=document.createElement("script");'
+                    's.src=U[i];s.onload=_renderCharts;s.onerror=function(){L(i+1)};'
+                    'document.head.appendChild(s);}L(0);})();'
+                    '</script>').replace("__TS__", ts_json)
 
     # MFU 计算器（真·6D 口径，纯前端；卡数默认当前在算数；输入 localStorage 持久化，抗自动刷新）
     calc_html = (
@@ -417,9 +426,14 @@ def build_html(g: dict, series: dict = None, token: str = "", refresh_secs: int 
                'if(s){["m_p","m_t","m_n","m_k"].forEach(function(id,i){if(s[i])document.getElementById(id).value=s[i]});calcMfu();}}catch(e){}'
                '</script>')
 
+    # 定时刷新（替代 meta http-equiv=refresh：外链脚本超时也不会把整页卡进重载死循环）；
+    # 用户正在输入框里打字时跳过这一轮，避免刷掉计算器里没算的输入。
+    reload_js = ('<script>(function t(){setTimeout(function(){'
+                 'var a=document.activeElement;if(a&&a.tagName==="INPUT"){t();return;}'
+                 f'location.reload();}},{refresh_secs * 1000});}})();</script>')
+
     return f"""<!doctype html><html lang="zh"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="{refresh_secs}">
 <title>GPU 卡分布</title>
 <style>
 :root{{color-scheme:light dark}}
@@ -477,7 +491,7 @@ details{{margin-top:8px}} summary{{cursor:pointer;color:#3370ff;font-size:13px;p
 {rest_html}
 {calc_html}
 <div class="sub" style="margin-top:18px">数据每 15 秒后台更新；点「🔄 立即刷新」强制重采。张量核利用率是硬件实测(≈HFU上界)；真 MFU 请用上方计算器填 P/吞吐。</div>
-</div>{chart_js}{calc_js}</body></html>"""
+</div>{chart_js}{calc_js}{reload_js}</body></html>"""
 
 
 def dist_url() -> str:
