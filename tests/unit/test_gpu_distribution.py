@@ -68,6 +68,50 @@ def test_build_html_top10_and_collapse():
     assert "justify-content:center" in html  # 居中
 
 
+def test_gather_timeseries(monkeypatch):
+    from tools.aliyun import gpu_distribution as G
+    from tools.aliyun import cluster_mfu
+    monkeypatch.setattr(cluster_mfu, "_grouped",
+                        lambda q, k: {("cn-beijing", "GU8T"): 64.0, ("cn-hangzhou", "GU8T"): 256.0})
+    monkeypatch.setattr(cluster_mfu, "_peak_for", lambda t: 148.0)
+
+    def fake_rs(expr, *a, **k):
+        if "DUTY_CYCLE" in expr:
+            return {1000.0: 70.0, 1600.0: 72.0}
+        if "TENSORTFLOPS_USED" in expr:          # per-region MFU
+            return {1000.0: 30.0, 1600.0: 31.0}
+        if expr.startswith("count("):            # 集群在算卡数
+            return {1000.0: 100.0, 1600.0: 110.0}
+        if "avg(" in expr and "PIP_TENSOR_ACTIVE" in expr:
+            return {1000.0: 1.8, 1600.0: 1.9}
+        return {}
+
+    monkeypatch.setattr(cluster_mfu, "_range_series", fake_rs)
+    ts = G._gather_timeseries(hours=6, step="600s")
+    assert ts["labels"] and len(ts["gpu_util"]) == len(ts["labels"])
+    assert ts["active"][-1] == 110 and ts["gpu_util"][0] == 70.0
+    # 每地区一条 MFU 线（北京/杭州 都 H20）
+    assert len(ts["mfu"]) == 2 and all("H20" in k for k in ts["mfu"])
+
+
+def test_build_html_with_charts():
+    from tools.aliyun import gpu_distribution as G
+    g = {"gathered_at": 1700000000,
+         "regions": [{"region_name": "北京", "gpu_name": "H20", "total": 64, "used": 20, "free": 44, "rate": 31.2}],
+         "users": [{"name": "张三", "total": 20, "by_type": {"H20": 20}, "by_region": {}}],
+         "total_cards": 64, "used_cards": 20, "active_cards": 20, "user_count": 1}
+    series = {"labels": ["10:00", "10:10"], "gpu_util": [70, 72], "tensor": [1.8, 1.9],
+              "active": [100, 110], "mfu": {"北京·H20": [30, 31]}, "hours": 6}
+    html = G.build_html(g, series, token="SECRET")
+    assert 'id="c_mfu"' in html and 'id="c_util"' in html and 'id="c_active"' in html
+    assert "chart.js" in html.lower()          # Chart.js CDN
+    assert "近 6 小时趋势" in html
+    assert "SECRET" not in html                # token 不入正文
+    # 无 series 时不渲染图表（渐进：仍出表格）
+    html2 = G.build_html(g, None, token="SECRET")
+    assert 'id="c_mfu"' not in html2 and "北京" in html2
+
+
 def test_dist_url_and_summary_card(monkeypatch):
     from tools.aliyun import gpu_distribution as G
     from config.settings import settings

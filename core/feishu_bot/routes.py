@@ -225,12 +225,17 @@ def gpu_distribution_page():
         return "gpu distribution disabled", 404
     if not _gpu_dist_authorized():
         return "unauthorized", 403
-    from tools.aliyun.gpu_distribution import get_distribution, build_html
+    from tools.aliyun.gpu_distribution import get_distribution, get_timeseries, build_html
     try:
         refresh = request.args.get("refresh") == "1"
         g = get_distribution(refresh=refresh)
+        try:
+            series = get_timeseries(refresh=refresh)
+        except Exception:
+            logger.warning("[gpu_distribution] timeseries failed (charts skipped)", exc_info=True)
+            series = {}
         token = request.args.get("token", "") or request.headers.get("X-API-Token", "")
-        return build_html(g, token=token), 200, {"Content-Type": "text/html; charset=utf-8"}
+        return build_html(g, series, token=token), 200, {"Content-Type": "text/html; charset=utf-8"}
     except Exception as exc:  # noqa: BLE001
         logger.error("[gpu_distribution] render failed: %s", exc, exc_info=True)
         return f"error: {exc}", 500
