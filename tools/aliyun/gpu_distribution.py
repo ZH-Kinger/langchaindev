@@ -32,6 +32,24 @@ _Q_TOTAL = "sum by (regionId,nodeGpuType)(AliyunPaiquota_NODE_GPU_ACCELERATOR_TO
 _Q_REQ = "sum by (regionId,nodeGpuType)(AliyunPaiquota_NODE_GPU_ACCELERATOR_REQUEST)"
 _Q_USER = "count by (jobUserId,regionId)(AliyunPaidlc_CARD_GPU_PIP_TENSOR_ACTIVE)"
 
+# 卡级利用率指标：合并 DLC(训练任务) + DSW(Notebook 实例)，覆盖全部在算卡。
+# 每条 series = 一张卡；`or` 把两个指标族的卡并到一起再聚合 = 全集群真·总量。
+_M_SM = "(AliyunPaidlc_CARD_GPU_SM_UTIL or AliyunPaidsw_CARD_GPU_SM_UTIL)"
+_M_TENSOR = "(AliyunPaidlc_CARD_GPU_PIP_TENSOR_ACTIVE or AliyunPaidsw_CARD_GPU_PIP_TENSOR_ACTIVE)"
+_M_TFLOPS = "(AliyunPaidlc_CARD_GPU_TENSORTFLOPS_USED or AliyunPaidsw_CARD_GPU_TENSORTFLOPS_USED)"
+_M_DUTY = "AliyunPaidlc_CARD_GPU_DUTY_CYCLE"   # DSW 无 DUTY_CYCLE 指标
+# 显存使用率：CARD 级 ACCELERATOR_MEMORY_UTIL 无数据，改用 POD(DLC)+INSTANCE(DSW) 的 USED/TOTAL 求和。
+_M_MEM = ("(sum(AliyunPaidlc_POD_GPU_MEMORY_USED)+sum(AliyunPaidsw_INSTANCE_GPU_MEMORY_USED))"
+          "/(sum(AliyunPaidlc_POD_GPU_MEMORY_TOTAL)+sum(AliyunPaidsw_INSTANCE_GPU_MEMORY_TOTAL))*100")
+
+
+def _rsel(base_or_expr: str, rid: str) -> str:
+    """把 `(A or B)` 形式的合并指标按 regionId 过滤：`(A{regionId="X"} or B{regionId="X"})`。"""
+    inner = base_or_expr.strip("()")
+    parts = [p.strip() for p in inner.split(" or ")]
+    filtered = " or ".join(f'{p}{{regionId="{rid}"}}' for p in parts)
+    return f"({filtered})"
+
 
 def _region_name(r):
     from tools.aliyun.cluster_mfu import _region_name as rn
@@ -137,9 +155,13 @@ def _gather() -> dict:
 
     users_list = sorted(users.values(), key=lambda x: -x["total"])
     from tools.aliyun.cluster_mfu import _scalar
-    # 在算卡(DLC CARD)实时均值：SM_UTIL=算力利用率(SM 繁忙%)，DUTY_CYCLE=GPU 忙碌占比
-    sm_util = round(_scalar("avg(AliyunPaidlc_CARD_GPU_SM_UTIL)"), 1)
-    duty = round(_scalar("avg(AliyunPaidlc_CARD_GPU_DUTY_CYCLE)"), 1)
+    # 全集群在算卡(DLC+DSW 合并)实时均值/总量：
+    sm_util = round(_scalar(f"avg({_M_SM})"), 1)          # SM 算力利用率(%)
+    duty = round(_scalar(f"avg({_M_DUTY})"), 1)           # GPU 忙碌 DutyCycle(%)，仅 DLC
+    tensor_act = round(_scalar(f"avg({_M_TENSOR})"), 2)   # Tensor 管线活跃(%)
+    tflops = round(_scalar(f"sum({_M_TFLOPS})"), 0)       # Tensor 每秒算力合计(TFLOPS)
+    mem_util = round(_scalar(_M_MEM), 1)                  # 显存使用率(%)
+    running = int(_scalar(f"count({_M_SM})"))             # 合并在算卡数(有利用率读数的卡)
     return {
         "gathered_at": time.time(),
         "regions": regions,
@@ -150,6 +172,10 @@ def _gather() -> dict:
         "user_count": len(users_list),
         "sm_util": sm_util,
         "duty": duty,
+        "tensor_act": tensor_act,
+        "tflops": tflops,
+        "mem_util": mem_util,
+        "running_cards": running,
     }
 
 
@@ -236,25 +262,28 @@ def _gather_timeseries(hours: int = 24) -> dict:
     for (rid, gt) in _grouped(_Q_TOTAL, ("regionId", "nodeGpuType")):
         rt.setdefault(rid, gt)
 
-    duty = _ikey(_range_series("avg(AliyunPaidlc_CARD_GPU_DUTY_CYCLE)", start, end, step))
-    active = _ikey(_range_series(f"count(AliyunPaidlc_CARD_GPU_PIP_TENSOR_ACTIVE > {thr})", start, end, step))
+    duty = _ikey(_range_series(f"avg({_M_DUTY})", start, end, step))
+    active = _ikey(_range_series(f"count({_M_SM} > {thr})", start, end, step))
     alloc = _ikey(_range_series("sum(AliyunPaiquota_NODE_GPU_ACCELERATOR_REQUEST)", start, end, step))
     total = _ikey(_range_series("sum(AliyunPaiquota_NODE_GPU_ACCELERATOR_TOTAL)", start, end, step))
+    mem = _ikey(_range_series(_M_MEM, start, end, step))
 
-    sm_r, tensor_r = {}, {}
+    sm_r, tensor_r, tflops_r = {}, {}, {}
     for rid, gt in rt.items():
         nm = f"{_region_name(rid)}·{_gpu_name(gt)}"
-        # SM_UTIL：SM 繁忙时间占比（%），直接就是算力利用率，无需除峰值
-        s = _ikey(_range_series(f'avg(AliyunPaidlc_CARD_GPU_SM_UTIL{{regionId="{rid}"}})', start, end, step))
+        # 合并 DLC+DSW：SM 算力利用率(%) / Tensor 管线活跃(%) / Tensor 算力合计(TFLOPS)
+        s = _ikey(_range_series(f"avg({_rsel(_M_SM, rid)})", start, end, step))
         if s:
             sm_r[nm] = s
-        # 张量核活跃占比（matmul 强度）
-        t = _ikey(_range_series(f'avg(AliyunPaidlc_CARD_GPU_PIP_TENSOR_ACTIVE{{regionId="{rid}"}})', start, end, step))
+        t = _ikey(_range_series(f"avg({_rsel(_M_TENSOR, rid)})", start, end, step))
         if t:
             tensor_r[nm] = t
+        f = _ikey(_range_series(f"sum({_rsel(_M_TFLOPS, rid)})", start, end, step))
+        if f:
+            tflops_r[nm] = f
 
-    keys = set(duty) | set(active) | set(alloc) | set(total)
-    for d in list(sm_r.values()) + list(tensor_r.values()):
+    keys = set(duty) | set(active) | set(alloc) | set(total) | set(mem)
+    for d in list(sm_r.values()) + list(tensor_r.values()) + list(tflops_r.values()):
         keys |= set(d)
     grid = sorted(keys)
     bj = timezone(timedelta(hours=8))
@@ -269,8 +298,10 @@ def _gather_timeseries(hours: int = 24) -> dict:
     return {
         "labels": labels,
         "gpu_util": arr(duty),
+        "mem_util": arr(mem),
         "sm_region": {n: arr(s) for n, s in sm_r.items()},
         "tensor_region": {n: arr(s, 2) for n, s in tensor_r.items()},
+        "tflops_region": {n: arr(s, 0) for n, s in tflops_r.items()},
         "cards": {"allocated": arr(alloc, 0), "active": arr(active, 0), "idle": idle},
         "hours": hours,
         "gathered_at": time.time(),
@@ -330,6 +361,12 @@ def _pct(v):
     return f"{v:.0f}%" if isinstance(v, (int, float)) else "—"
 
 
+def _tflops(v):
+    if not isinstance(v, (int, float)):
+        return "—"
+    return f"{v/1000:.2f}P" if v >= 1000 else f"{v:.0f}T"
+
+
 def build_html(g: dict, series: dict = None, token: str = "", refresh_secs: int = 15) -> str:
     """自动刷新的实时卡分布页面（居中）：近6h 趋势折线图(MFU/GPU利用率/Tensor活跃/在算卡数)
     + 地区×卡型表 + 用户表(前10+折叠) + 手动刷新按钮。
@@ -372,11 +409,13 @@ def build_html(g: dict, series: dict = None, token: str = "", refresh_secs: int 
             rbtns.append(f'<button type="button" class="rg{on}" data-h="{h}">{lbl}</button>')
         range_html = '<div class="ranges">' + "".join(rbtns) + "</div>"
         charts_html = (
-            f'<div class="hd" style="margin-top:20px"><h2 style="margin:0">趋势</h2>{range_html}</div>'
+            f'<div class="hd" style="margin-top:20px"><h2 style="margin:0">趋势（DLC+DSW 合并）</h2>{range_html}</div>'
             '<div class="charts">'
             '<div class="chart"><div class="ct">算力利用率（SM 繁忙%，按地区）</div><div class="cv"><canvas id="c_sm"></canvas></div></div>'
             '<div class="chart"><div class="ct">GPU 忙碌占比 DutyCycle（%，集群）</div><div class="cv"><canvas id="c_util"></canvas></div></div>'
-            '<div class="chart"><div class="ct">张量核活跃（matmul%，按地区，低=非矩阵乘负载）</div><div class="cv"><canvas id="c_tensor"></canvas></div></div>'
+            '<div class="chart"><div class="ct">Tensor 管线利用率（%，按地区，低=非矩阵乘负载）</div><div class="cv"><canvas id="c_tensor"></canvas></div></div>'
+            '<div class="chart"><div class="ct">Tensor 算力（TFLOPS/s，按地区求和）</div><div class="cv"><canvas id="c_tflops"></canvas></div></div>'
+            '<div class="chart"><div class="ct">显存使用率（%，集群）</div><div class="cv"><canvas id="c_mem"></canvas></div></div>'
             '<div class="chart"><div class="ct">卡数：已分配 / 在算 / 空闲</div><div class="cv"><canvas id="c_cards"></canvas></div></div>'
             '</div>')
         ts_json = json.dumps(series, ensure_ascii=False)
@@ -399,6 +438,9 @@ def build_html(g: dict, series: dict = None, token: str = "", refresh_secs: int 
                     'mk("c_util",[{label:"DutyCycle",data:TS.gpu_util,borderColor:"#3370ff",borderWidth:2,'
                     'tension:.3,fill:true,backgroundColor:"rgba(51,112,255,.08)"}],100);'
                     'mk("c_tensor",multi(TS.tensor_region),null);'
+                    'mk("c_tflops",multi(TS.tflops_region),null);'
+                    'mk("c_mem",[{label:"显存使用率",data:TS.mem_util,borderColor:"#f53f3f",borderWidth:2,'
+                    'tension:.3,fill:true,backgroundColor:"rgba(245,63,63,.08)"}],100);'
                     'mk("c_cards",[{label:"已分配",data:C.allocated,borderColor:"#ff7d00",borderWidth:2,tension:.3},'
                     '{label:"在算",data:C.active,borderColor:"#00b42a",borderWidth:2,tension:.3},'
                     '{label:"空闲",data:C.idle,borderColor:"#86909c",borderWidth:2,borderDash:[4,3],tension:.3}]);'
@@ -479,13 +521,16 @@ details{{margin-top:8px}} summary{{cursor:pointer;color:#3370ff;font-size:13px;p
 <div class="card">
 <div class="hd"><h1>🧮 GPU 卡分布（实时）</h1>
 <button type="button" class="refresh" id="btn-refresh">🔄 立即刷新</button></div>
-<div class="sub">数据时间 {e(_fmt_ts(g.get("gathered_at")))} · 每 {refresh_secs}s 自动刷新 · <b>UI v3</b></div>
+<div class="sub">数据时间 {e(_fmt_ts(g.get("gathered_at")))} · 每 {refresh_secs}s 自动刷新 · <b>UI v4</b></div>
 <div class="kpi"><div>总卡数<br><b>{g.get("total_cards",0)}</b></div>
 <div>已分配<br><b>{g.get("used_cards",0)}</b></div>
 <div>在算<br><b>{g.get("active_cards",0)}</b></div>
 <div>在用人数<br><b>{n}</b></div>
 <div>算力利用率 SM<br><b>{_pct(g.get("sm_util"))}</b></div>
-<div>GPU 忙碌 Duty<br><b>{_pct(g.get("duty"))}</b></div></div>
+<div>GPU 忙碌 Duty<br><b>{_pct(g.get("duty"))}</b></div>
+<div>Tensor 管线<br><b>{_pct(g.get("tensor_act"))}</b></div>
+<div>Tensor 算力<br><b>{_tflops(g.get("tflops"))}</b></div>
+<div>显存使用率<br><b>{_pct(g.get("mem_util"))}</b></div></div>
 
 {charts_html}
 <h2>各地区 · 卡型（已用/总）</h2>
@@ -496,7 +541,7 @@ details{{margin-top:8px}} summary{{cursor:pointer;color:#3370ff;font-size:13px;p
 <table class="tbl"><thead><tr><th>#</th><th>用户</th><th>卡数</th><th>卡型</th></tr></thead>
 <tbody>{top_html or '<tr><td colspan=4>当前无在算任务</td></tr>'}</tbody></table>
 {rest_html}
-<div class="sub" style="margin-top:18px">数据每 15 秒后台更新；点「🔄 立即刷新」强制重采。「算力利用率」=SM 繁忙时间占比(SM_UTIL，业界通用 GPU 利用率)；张量核活跃低是因负载非矩阵乘(机器人/RL/eval)，非数据源问题。</div>
+<div class="sub" style="margin-top:18px">利用率指标 = DLC(训练任务)+DSW(Notebook) 合并全集群。数据每 15 秒后台更新；点「🔄 立即刷新」强制重采。「算力利用率」=SM 繁忙时间占比(SM_UTIL，业界通用 GPU 利用率)；张量核活跃低是因负载非矩阵乘(机器人/RL/eval)，非数据源问题。</div>
 </div>{chart_js}{bind_js}{reload_js}</body></html>"""
 
 
