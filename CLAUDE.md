@@ -157,7 +157,7 @@ Migrates object-storage data across clouds from a single user-given path. The ch
 - **Three entry points share the core** (like oss_perm): Feishu card (intent in `messages._is_transfer_intent`: 迁移动作词 + `tos://`/`oss://` path → `_handle_transfer_intent` sends `cards.confirm_card`); Agent tool `manage_transfer` (`plan`/`apply`/`status`); CLI `python -m core.transfer.cli plan|apply|status` (dry-run default, `--force` past threshold).
 - **Bot flow**: confirm form-card (`confirm_transfer`, `form_value{overwrite, job_id}`) → `actions._h_confirm_transfer` (>threshold requires `ADMIN_FEISHU_OPEN_ID`) launches background `run_to_completion`, pushes progress/result cards to `TRANSFER_CHAT_ID or FEISHU_CHAT_ID`. Failure card has a `retry_transfer` button (`_h_retry_transfer` resets stage→NEW).
 - **Config**: `TRANSFER_ENABLED`, `MGW_ENDPOINT`/`MGW_REGION`/`MGW_USER_ID`, `TRANSFER_OSS_ROLE` (RAM role for OSS dest), `TRANSFER_MODE_DEFAULT`/`TRANSFER_OVERWRITE_DEFAULT`, `TRANSFER_APPROVAL_TB`, `TRANSFER_BUCKET_MAP`. **Before go-live, fill real `wuji_il` values**: TOS domain/bucket, OSS rolename/bucket/region, transfer/overwrite modes, and the bucket map.
-- **Phase 3 SINKING is wired for 阿里 CPFS** via `core/cpfs_dataflow.engine_nas` (NAS DataFlow Export): `run_to_completion` runs `start_sinking`→`poll_sink_once` (CPFS→OSS sink_target) before `start_cross`. `vepfs→tos` sink (火山) still unimplemented (`start_sinking` fails with a clear message).
+- **Phase 3 SINKING is wired for 阿里 CPFS** via `core/cpfs_dataflow.engine_nas` (NAS DataFlow Export): `run_to_completion` runs `start_sinking`→`poll_sink_once` (CPFS→OSS sink_target) before `start_cross`. Standalone 火山 vePFS↔TOS 预热/沉降 now exists as `core/vepfs_dataflow/` (see below); wiring it into transfer Phase-3 `start_sinking` for `vepfs→tos` full-chain is a remaining follow-up.
 
 ### Bucket Transfer — 同云桶间迁移 (`core/bucket_transfer/`)
 
@@ -184,6 +184,20 @@ Aliyun NAS DataFlow (product `NAS`, version `2017-06-26`, RPC): **预热**(`Task
 - **Config**: `CPFS_DATAFLOW_ENABLED`, `CPFS_REGION`, `CPFS_FILE_SYSTEM_ID` (single default), `CPFS_FILE_SYSTEM_IDS` (multi-fs discovery list), `CPFS_MAP_TTL_SECONDS`, `CPFS_MOUNT_PREFIX`, `CPFS_CONFLICT_POLICY_DEFAULT`, `CPFS_DATAFLOW_MAP` (JSON override: `oss://<bucket>` or FileSystemPath → DataFlowId), `CPFS_APPROVAL_GB`, `CPFS_CHAT_ID`.
 - **Prereq for the map**: the bot AK needs `nas:DescribeDataFlows` (default master AK is RAMReadOnly+STS — may need granting); fill `CPFS_FILE_SYSTEM_IDS` with the real fs/region list. CPFS 智算版(`bmcpfs-`) 全量枚举(DescribeFileSystems)未实现,故按配置 fs 清单逐个 DescribeDataFlows。
 
+### vePFS/TOS DataFlow — 火山数据预热 / 沉降 (`core/vepfs_dataflow/`)
+
+火山「文件存储 vePFS」数据流动 (service `vepfs`, version `2022-01-01`): **预热**(`TaskAction=Import`, TOS→vePFS) and **沉降**(`TaskAction=Export`, vePFS→TOS). 阿里 `core/cpfs_dataflow/` 的火山镜像。
+
+- **SDK, no new dep**: uses `volcenginesdkvepfs.VEPFSApi` — a subpackage of the already-installed `volcengine-python-sdk` (same monolith as `volcenginesdkdms` used by `core/transfer/engine_tos.py`). `engine_vepfs._api(region)` mirrors `engine_tos._api`: `Configuration(ak/sk/region)`+`ApiClient`+`VEPFSApi`, 静态 AK 复用 `TOS_ACCESS_KEY/SECRET` (火山无 STS). region 须与 vePFS 文件系统区域一致.
+- **Key diff vs 阿里**: 火山**没有** `CreateDataFlow` 持久绑定对象 → `submit_task` (CreateDataFlowTask) 直接带 TOS 桶/前缀 + vePFS `SubPath`/`FilesetId`，方向只由 `TaskAction` 决定、**不反转源/目的字段**。**省掉阿里那层 `resolve_dataflow`/临建临删 DataFlow 的全部逻辑**。双向都能指定路径（不像跨云 DMS 只到桶级）。
+- **engine_vepfs.py**: `submit_task`→`CreateDataFlowTask` 返回 `data_flow_task_id`；`query_task`→`DescribeDataFlowTasks` 取 `status`/`total_size`/`exec_size`/`exec_count`/`failed_count`（容错 getattr）；`is_done`/`is_failed` 按子串归类 status（SDK 里 status 是自由 str，终态串真机反查确认）。字段：`data_storage`(TOS 桶, 默认 `tos://<bucket>`)/`data_storage_path`/`sub_path`/`fileset_id`/`same_name_file_policy`(Skip/KeepLatest/OverWrite)/`data_type`(MetaAndData)。
+- **orchestrator.py**: state machine `NEW→RUNNING→DONE|FAILED`, Redis `vepfs:dataflow:job:{job_id}` (30-day TTL), idempotent `job_id=hash(op, fs, sub_path, tos, 当天)`, `run_to_completion` background-polls. `make_plan(op, vepfs_addr, tos)` + `plan_from_addresses(region, source, dest)` (方向由源/目的地址类型自动判断：源 vePFS→沉降 / 源 TOS→预热). 无 DataFlow create/resolve/cleanup。
+- **统一录入卡**：阿里 CPFS 与火山 vePFS **共用同一张「数据预热/沉降」录入卡**（`core/cpfs_dataflow/cards.py::entry_card`，含 `cloud` 下拉 阿里/火山 + 地区 + 源/目的 + 同名策略）。飞书意图 `messages._is_sink_preheat_entry_intent`（已并入 `vepfs沉降`/`火山预热`/`tos沉降` 等词）→ 这张卡。提交动作统一 `submit_cpfs_dataflow`；`actions._h_submit_cpfs_dataflow` 读 `form_value.cloud`，**火山 → 委派 `_h_submit_vepfs_dataflow`**（走本模块 orchestrator + confirm/progress/result 卡，action `confirm_vepfs_dataflow`/`query_vepfs_progress`/`retry_vepfs_dataflow`），否则走 CPFS。
+- **另两入口**：Agent tool `manage_vepfs_dataflow` (`preheat`/`sink`/`status`, TOOL_GROUP `vepfs`); CLI `python -m core.vepfs_dataflow.cli preheat|sink|status` (dry-run 默认, `--apply` 执行). 按 ID 查进度支持 `vepfs-` 前缀 (与 `cpfs-`/`tr-` 并列).
+- **Config**: `VEPFS_DATAFLOW_ENABLED`, `VEPFS_REGION` (vePFS 与 TOS 必须同地域), `VEPFS_FILE_SYSTEM_ID` (默认 fs), `VEPFS_FILE_SYSTEM_IDS` (多 fs, 后续下拉发现), `VEPFS_CONFLICT_POLICY_DEFAULT` (Skip), `VEPFS_CHAT_ID`; 凭证复用 `TOS_ACCESS_KEY/SECRET`.
+- **前置条件（控制台一次性）**: vePFS 与 TOS 同地域; 开通 **vePFS→TOS 服务访问授权**; `ConfigDataFlowBandwidth` 带宽>0; vePFS 已建 Fileset/目标目录. 调用 AK 需 `vepfs:CreateDataFlowTask`/`DescribeDataFlowTasks` 等.
+- **待真机验证 (dry-run 反查, 同当初反查 DMS `StorageVendorTOS`)**: ① `DataStorage` 桶串格式 (`tos://bucket` vs 裸名); ② task `status` 终态枚举串; ③ `vepfs:*` IAM 动作精确名; ④ 智算版是否必须 `FilesetId`.
+
 ### Redis Usage (`utils/redis_client.py`)
 
 Single client, `decode_responses=True`. Failures degrade silently. Key namespaces in use:
@@ -199,6 +213,7 @@ Single client, `decode_responses=True`. Failures degrade silently. Key namespace
 - `transfer:job:{job_id}` — 30-day TTL, cross-cloud transfer state machine record (stage/engine/bytes/error).
 - `cpfs:dataflow:job:{job_id}` — 30-day TTL, CPFS 预热/沉降 task state (operation/fs/dataflow/task_id/progress).
 - `cpfs:dataflow:map` — `CPFS_MAP_TTL_SECONDS` (6h) TTL, discovered CPFS↔OSS DataFlow binding options for the Feishu selector.
+- `vepfs:dataflow:job:{job_id}` — 30-day TTL, 火山 vePFS 预热/沉降 task state (operation/fs/sub_path/tos/task_id/progress).
 
 ### Vector Store & RAG (`core/vector_store.py`)
 

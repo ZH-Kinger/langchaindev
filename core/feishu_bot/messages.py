@@ -100,28 +100,20 @@ _TRANSFER_ENTRY_WORDS = (
     "迁移卡片", "填写迁移", "填迁移", "发起传输",
 )
 
+# 数据预热/沉降统一入口：阿里 CPFS↔OSS + 火山 vePFS↔TOS 共用一张录入卡（卡内选云平台）。
 _SINK_PREHEAT_ENTRY_WORDS = (
     "数据沉降/预热", "数据沉降", "数据预热", "沉降/预热", "沉降预热",
     "cepfs沉降", "cpfs沉降", "cpfs预热", "文件沉降", "数据加载",
-)
-
-
-def _is_sink_preheat_entry_intent(text: str) -> bool:
-    compact = re.sub(r"\s+", "", text or "").lower()
-    return any(word.replace(" ", "").lower() in compact for word in _SINK_PREHEAT_ENTRY_WORDS)
-
-
-# 火山 vePFS↔TOS 数据流动：排在 CPFS 意图之前，避免"沉降/预热"被 CPFS 抢走
-_VEPFS_DATAFLOW_ENTRY_WORDS = (
+    # 火山 vePFS↔TOS 关键词也进入同一张卡（用户在卡里选火山）
     "vepfs预热", "vepfs沉降", "vepfs数据流动", "vepfs数据沉降", "vepfs数据预热",
     "火山预热", "火山沉降", "火山数据沉降", "火山数据预热", "火山vepfs",
     "tos预热", "tos沉降",
 )
 
 
-def _is_vepfs_dataflow_entry_intent(text: str) -> bool:
+def _is_sink_preheat_entry_intent(text: str) -> bool:
     compact = re.sub(r"\s+", "", text or "").lower()
-    return any(word.replace(" ", "").lower() in compact for word in _VEPFS_DATAFLOW_ENTRY_WORDS)
+    return any(word.replace(" ", "").lower() in compact for word in _SINK_PREHEAT_ENTRY_WORDS)
 
 
 # 算力（MFU）日报：点菜单按钮发这些词 / 直接打字 → 回算力效率卡（不必等每日早报）
@@ -213,7 +205,17 @@ def _handle_progress_query(message_id: str, text: str, open_id: str = "") -> Non
         return
     jid = m.group(1)
     try:
-        if jid.lower().startswith("cpfs-"):
+        if jid.lower().startswith("vepfs-"):
+            from core.vepfs_dataflow import orchestrator as o
+            job = o.get_job(jid)
+            if not job:
+                messaging._feishu_reply(message_id, f"未找到任务 `{jid}`（可能已过期）。")
+                return
+            msg = (f"任务 `{jid}`：**{job['stage']}** {job.get('operation_label','')}\n"
+                   f"进度 {job.get('files_done',0)}/{job.get('files_total',0)} 文件，"
+                   f"{o.fmt_size(job.get('bytes_done',0))}"
+                   + (f"\n错误：{job['error']}" if job.get('error') else ""))
+        elif jid.lower().startswith("cpfs-"):
             from core.cpfs_dataflow import orchestrator as o
             job = o.get_job(jid)
             if not job:
@@ -517,12 +519,7 @@ def _process_message(message_id: str, chat_id: str, user_text: str, open_id: str
         messaging._feishu_reply_card(message_id, entry_card())
         return
 
-    # 火山 vePFS↔TOS 数据流动（排在 CPFS 之前，"vepfs沉降"等由此接管）
-    if _is_vepfs_dataflow_entry_intent(user_text):
-        from core.vepfs_dataflow.cards import entry_card
-        messaging._feishu_reply_card(message_id, entry_card())
-        return
-
+    # 数据预热/沉降统一入口（阿里 CPFS↔OSS + 火山 vePFS↔TOS，卡内选云平台）
     if _is_sink_preheat_entry_intent(user_text):
         from core.cpfs_dataflow.cards import entry_card
         messaging._feishu_reply_card(message_id, entry_card())

@@ -560,8 +560,14 @@ def _cfg_cpfs_chat() -> str:
 
 
 def _h_submit_cpfs_dataflow(action_val, open_id, chat_id, form_value):
-    """读取 地区 + 源/目的地址 → 后台建 DataFlow + 计划，推确认卡。方向按地址类型自动判断。"""
+    """读取 云平台 + 地区 + 源/目的地址 → 后台解析计划，推确认卡。方向按地址类型自动判断。
+
+    统一录入卡：云平台=火山 → 走 vePFS↔TOS 流程；否则（默认阿里）走 CPFS↔OSS 流程。
+    """
     fv = form_value or {}
+    cloud = (fv.get("cloud") or "").strip().lower()
+    if cloud in ("volcano", "火山", "vepfs", "tos"):
+        return _h_submit_vepfs_dataflow(action_val, open_id, chat_id, form_value)
     region = (fv.get("region") or "").strip()
     source = (fv.get("source") or "").strip()
     dest = (fv.get("dest") or "").strip()
@@ -665,6 +671,112 @@ def _h_retry_cpfs_dataflow(action_val, open_id, chat_id, form_value):
     return _h_confirm_cpfs_dataflow({"job_id": job_id}, open_id, chat_id, form_value)
 
 
+# 火山 vePFS 预热/沉降：录入 / 确认 / 查询 / 重试（镜像 CPFS，走 core.vepfs_dataflow）
+
+def _cfg_vepfs_chat() -> str:
+    return settings.VEPFS_CHAT_ID or settings.FEISHU_CHAT_ID
+
+
+def _h_submit_vepfs_dataflow(action_val, open_id, chat_id, form_value):
+    """读取 地区 + 源/目的地址 + 同名策略 → 后台解析计划，推确认卡。方向按地址类型自动判断。"""
+    fv = form_value or {}
+    region = (fv.get("region") or "").strip()
+    source = (fv.get("source") or "").strip()
+    dest = (fv.get("dest") or "").strip()
+    same_name = (fv.get("same_name") or "").strip()
+    if not (region and source and dest):
+        return {"toast": {"type": "error", "content": "请选地区并填写源、目的地址"}}
+
+    def _do_prepare() -> None:
+        from core.dsw_scheduler import _send_card, _send_text
+        from core.vepfs_dataflow import orchestrator, engine_vepfs
+        from core.vepfs_dataflow.cards import confirm_card
+        from core.vepfs_dataflow.orchestrator import DataflowPathError
+        try:
+            plan = orchestrator.plan_from_addresses(region, source, dest, same_name=same_name)
+            job = orchestrator.create_job_record(plan, open_id=open_id)
+            try:
+                from utils.redis_client import get_redis
+                if not get_redis().set(f"vepfs:dataflow:confirmcard:{job['job_id']}", 1, nx=True, ex=30):
+                    return
+            except Exception:
+                pass
+            _send_card(open_id, _cfg_vepfs_chat(), confirm_card(job))
+        except (DataflowPathError, engine_vepfs.VepfsDataflowError) as e:
+            _send_text(open_id, _cfg_vepfs_chat(), f"❌ {e}")
+        except Exception as e:
+            logger.error("[VEPFS] prepare failed", exc_info=True)
+            _send_text(open_id, _cfg_vepfs_chat(), f"❌ 请求处理失败：{e}")
+
+    threading.Thread(target=_do_prepare, daemon=True).start()
+    return {"toast": {"type": "success", "content": "正在解析，稍候推送确认卡"}}
+
+
+def _h_confirm_vepfs_dataflow(action_val, open_id, chat_id, form_value):
+    """后台启动预热/沉降任务，完成后推结果卡。"""
+    job_id = action_val.get("job_id", "") if isinstance(action_val, dict) else ""
+    if not job_id:
+        return {"toast": {"type": "error", "content": "缺少任务 ID"}}
+    from core.vepfs_dataflow import orchestrator
+    job = orchestrator.get_job(job_id)
+    if not job:
+        return {"toast": {"type": "error", "content": "任务不存在或已过期"}}
+    if job["stage"] not in (orchestrator.STAGE_NEW, orchestrator.STAGE_FAILED):
+        return {"toast": {"type": "info", "content": f"任务已在 {job['stage']}，无需重复"}}
+
+    try:
+        from utils.redis_client import get_redis
+        if not get_redis().set(f"vepfs:dataflow:launch:{job_id}", 1, nx=True, ex=30):
+            return {"toast": {"type": "info", "content": "任务已下发，请勿重复点击"}}
+    except Exception:
+        pass
+    job["stage"] = orchestrator.STAGE_RUNNING
+    orchestrator._save(job)
+
+    def _do_run() -> None:
+        from core.dsw_scheduler import _send_card, _send_text
+        from core.vepfs_dataflow.cards import result_card, progress_card
+        try:
+            def _on_update(j):
+                if j["stage"] in (orchestrator.STAGE_DONE, orchestrator.STAGE_FAILED):
+                    _send_card("", _cfg_vepfs_chat(), result_card(j))
+                else:
+                    _send_card("", _cfg_vepfs_chat(), progress_card(j))
+            orchestrator.run_to_completion(job, on_update=_on_update)
+        except Exception as e:
+            logger.error("[VEPFS] execute failed job=%s", job_id, exc_info=True)
+            _send_text("", _cfg_vepfs_chat(), f"❌ 任务 {job_id} 失败：{e}")
+
+    threading.Thread(target=_do_run, daemon=True).start()
+    from core.vepfs_dataflow.cards import progress_card
+    return {"toast": {"type": "success", "content": f"已下发，任务 {job_id}；可点“查询进度”"},
+            "card": {"type": "raw", "data": progress_card(job)}}
+
+
+def _h_query_vepfs_progress(action_val, open_id, chat_id, form_value):
+    job_id = action_val.get("job_id", "") if isinstance(action_val, dict) else ""
+    from core.vepfs_dataflow import orchestrator
+    from core.vepfs_dataflow.cards import progress_card, result_card
+    job = orchestrator.get_job(job_id) if job_id else None
+    if not job:
+        return {"toast": {"type": "error", "content": "任务不存在或已过期"}}
+    card = (result_card(job) if job["stage"] in (orchestrator.STAGE_DONE, orchestrator.STAGE_FAILED)
+            else progress_card(job))
+    return {"toast": {"type": "success", "content": f"当前阶段：{job['stage']}"},
+            "card": {"type": "raw", "data": card}}
+
+
+def _h_retry_vepfs_dataflow(action_val, open_id, chat_id, form_value):
+    job_id = action_val.get("job_id", "") if isinstance(action_val, dict) else ""
+    from core.vepfs_dataflow import orchestrator
+    job = orchestrator.get_job(job_id) if job_id else None
+    if not job:
+        return {"toast": {"type": "error", "content": "任务不存在或已过期"}}
+    job["stage"] = orchestrator.STAGE_NEW
+    job["error"] = ""
+    return _h_confirm_vepfs_dataflow({"job_id": job_id}, open_id, chat_id, form_value)
+
+
 def _h_query_progress_by_id(action_val, open_id, chat_id, form_value):
     """查询进度输入卡提交：读 form_value.job_id，按前缀分发。
 
@@ -684,6 +796,16 @@ def _h_query_progress_by_id(action_val, open_id, chat_id, form_value):
         pass
     from core.dsw_scheduler import _send_card
     low = jid.lower()
+    if low.startswith("vepfs-"):
+        from core.vepfs_dataflow import orchestrator as o
+        from core.vepfs_dataflow.cards import progress_card, result_card
+        job = o.get_job(jid)
+        if not job:
+            return {"toast": {"type": "error", "content": f"未找到任务 {jid}（可能已过期）"}}
+        c = (result_card(job) if job["stage"] in (o.STAGE_DONE, o.STAGE_FAILED)
+             else progress_card(job))
+        _send_card(open_id, chat_id or _cfg_vepfs_chat(), c)
+        return {"toast": {"type": "success", "content": f"{jid}：{job['stage']}"}}
     if low.startswith("cpfs-"):
         from core.cpfs_dataflow import orchestrator as o
         from core.cpfs_dataflow.cards import progress_card, result_card
@@ -704,7 +826,7 @@ def _h_query_progress_by_id(action_val, open_id, chat_id, form_value):
              else progress_card(job))
         _send_card(open_id, chat_id or _cfg_chat(), c)
         return {"toast": {"type": "success", "content": f"{jid}：{job['stage']}"}}
-    return {"toast": {"type": "error", "content": "任务 ID 需以 cpfs- 或 tr- 开头"}}
+    return {"toast": {"type": "error", "content": "任务 ID 需以 vepfs- / cpfs- / tr- 开头"}}
 
 
 # ── 桶间迁移（同云一次性搬运）──────────────────────────────────────────────────
@@ -832,6 +954,10 @@ _ACTION_HANDLERS = {
     "confirm_cpfs_dataflow": _h_confirm_cpfs_dataflow,
     "query_cpfs_progress":   _h_query_cpfs_progress,
     "retry_cpfs_dataflow":   _h_retry_cpfs_dataflow,
+    "submit_vepfs_dataflow":  _h_submit_vepfs_dataflow,
+    "confirm_vepfs_dataflow": _h_confirm_vepfs_dataflow,
+    "query_vepfs_progress":   _h_query_vepfs_progress,
+    "retry_vepfs_dataflow":   _h_retry_vepfs_dataflow,
     "query_progress_by_id":  _h_query_progress_by_id,
     "submit_bucket_transfer":  _h_submit_bucket_transfer,
     "confirm_bucket_transfer": _h_confirm_bucket_transfer,

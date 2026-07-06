@@ -234,6 +234,18 @@ class Config:
     CPFS_APPROVAL_GB        = float(os.environ.get("CPFS_APPROVAL_GB", "500"))
     CPFS_CHAT_ID            = os.environ.get("CPFS_CHAT_ID", "")              # 留空回退 FEISHU_CHAT_ID
 
+    # 火山 vePFS↔TOS 数据预热(Import TOS→vePFS) + 沉降(Export vePFS→TOS)：火山 vePFS 数据流动 OpenAPI
+    # （volcenginesdkvepfs，service vepfs，2022-01-01）。只建任务 + 轮询，无 CreateDataFlow 绑定。
+    # 凭证复用静态 TOS_ACCESS_KEY/SECRET（火山无 STS）。前置：账号已开 vePFS→TOS 服务授权 + 带宽>0。
+    VEPFS_DATAFLOW_ENABLED  = os.environ.get("VEPFS_DATAFLOW_ENABLED", "false").lower() == "true"
+    VEPFS_REGION            = os.environ.get("VEPFS_REGION", "cn-beijing")    # vePFS 与 TOS 必须同地域
+    VEPFS_FILE_SYSTEM_ID    = os.environ.get("VEPFS_FILE_SYSTEM_ID", "")      # 默认文件系统（可在 vepfs:// 路径显式给）
+    # 多地域多文件系统：逗号分隔 'fs_id@region'，region 缺省取 VEPFS_REGION（供后续下拉发现用）。
+    VEPFS_FILE_SYSTEM_IDS   = os.environ.get("VEPFS_FILE_SYSTEM_IDS", "")
+    # 同名冲突策略：Skip（默认，永不覆盖）/ KeepLatest / OverWrite
+    VEPFS_CONFLICT_POLICY_DEFAULT = os.environ.get("VEPFS_CONFLICT_POLICY_DEFAULT", "Skip")
+    VEPFS_CHAT_ID           = os.environ.get("VEPFS_CHAT_ID", "")             # 留空回退 FEISHU_CHAT_ID
+
     # 容量巡检（OSS + TOS 目录大小定时盘点 → 飞书主动推送）
     # 默认关闭，opt-in；TARGETS 为 JSON 数组，每项 {vendor,bucket,prefix[,region]}
     CAPACITY_MONITOR_ENABLED = os.environ.get("CAPACITY_MONITOR_ENABLED", "false").lower() == "true"
@@ -292,6 +304,7 @@ class Config:
         ("TOS_ACCESS_KEY",         "火山 TOS 容量统计 / 巡检不可用"),
         ("MGW_USER_ID",            "跨云迁移(TOS→OSS)不可用：缺在线迁移服务 userid"),
         ("CPFS_FILE_SYSTEM_ID",    "CPFS 预热/沉降不可用：缺默认文件系统 ID（可在 cpfs:// 路径里显式给）"),
+        ("VEPFS_FILE_SYSTEM_ID",   "vePFS 预热/沉降不可用：缺默认文件系统 ID（可在 vepfs:// 路径里显式给）"),
     ]
 
     def validate(self) -> list[tuple[str, str]]:

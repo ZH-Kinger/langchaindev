@@ -13,6 +13,20 @@ def _op_options():
     ]
 
 
+def _cloud_options():
+    return [
+        {"text": _pt("阿里 CPFS ↔ OSS"), "value": "aliyun"},
+        {"text": _pt("火山 vePFS ↔ TOS"), "value": "volcano"},
+    ]
+
+
+def _same_name_options():
+    return [
+        {"text": _pt("跳过同名（默认，永不覆盖）"), "value": "skip"},
+        {"text": _pt("覆盖同名"), "value": "overwrite"},
+    ]
+
+
 def _region_options(open_id: str = ""):
     try:
         from core.cpfs_dataflow import discovery
@@ -32,16 +46,21 @@ def entry_card(region_options=None):
         {"tag": "input", "name": "region", "label": _pt("地区"), "required": True,
          "placeholder": _pt("如 cn-hangzhou")}
     )
-    intro = ("填**源地址**、**目的地址**并选地区 → 解析预览 → 确认下发时才建 DataFlow + 任务（用完自动删）。\n"
-             "• 源 CPFS → 目的 OSS = **沉降**；源 OSS → 目的 CPFS = **预热**\n"
-             "• CPFS：`/cpfs/<dir>/` 或 `cpfs://<fs-id>/<dir>/`；OSS：`oss://<bucket>/<prefix>/`\n"
-             "> CPFS 与 OSS 须同地区。镜像仓库（cri 开头）请勿填。")
+    intro = ("**数据预热 / 沉降**：先选云平台，再填源/目的地址与地区 → 解析预览 → 确认下发。\n"
+             "• 源=文件系统、目的=对象存储 → **沉降**；反之 → **预热**\n"
+             "• 阿里：CPFS `/cpfs/<dir>/` 或 `cpfs://<fs>/<dir>/` ↔ OSS `oss://<bucket>/<prefix>/`\n"
+             "• 火山：vePFS `vepfs://<fs>/<dir>/` ↔ TOS `tos://<bucket>/<prefix>/`\n"
+             "> 文件系统与对象存储须**同地区**。阿里镜像仓库（cri 开头）请勿填。")
     form_elems = [
+        {"tag": "select_static", "name": "cloud", "required": False,
+         "placeholder": _pt("选择云平台（默认阿里）"), "options": _cloud_options()},
         region_elem,
         {"tag": "input", "name": "source", "label": _pt("源地址"), "required": True,
-         "placeholder": _pt("如 /cpfs/cwr/label/ 或 oss://bk/prefix/")},
+         "placeholder": _pt("阿里 /cpfs/cwr/label/ 或 oss://bk/p/；火山 vepfs://fs/label/ 或 tos://bk/p/")},
         {"tag": "input", "name": "dest", "label": _pt("目的地址"), "required": True,
-         "placeholder": _pt("如 oss://wuji-bucket-hangzhou/wuji_il/ 或 /cpfs/cwr/label/")},
+         "placeholder": _pt("阿里 oss://bk/wuji_il/ 或 /cpfs/cwr/label/；火山 tos://bk/p/ 或 vepfs://fs/label/")},
+        {"tag": "select_static", "name": "same_name", "required": False,
+         "placeholder": _pt("同名策略（默认跳过；仅火山生效）"), "options": _same_name_options()},
         {"tag": "button", "text": _pt("➡️ 解析预览"), "type": "primary",
          "form_action_type": "submit", "name": "submit",
          "behaviors": [{"type": "callback", "value": {"action": "submit_cpfs_dataflow"}}]},

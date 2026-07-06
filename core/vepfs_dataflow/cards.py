@@ -6,42 +6,8 @@ def _pt(content):
     return {"tag": "plain_text", "content": content}
 
 
-def _same_name_options():
-    return [
-        {"text": _pt("跳过同名文件（默认，永不覆盖）"), "value": "Skip"},
-        {"text": _pt("保留最新（比最后修改时间）"), "value": "KeepLatest"},
-        {"text": _pt("覆盖同名文件"), "value": "OverWrite"},
-    ]
-
-
-def entry_card():
-    """填 源地址 + 目的地址 + 选地区 + 同名策略 → 后端建数据流动任务。方向由地址类型自动判断。"""
-    intro = ("填**源地址**、**目的地址**并选地区 → 解析预览 → 确认下发。\n"
-             "• 源 vePFS → 目的 TOS = **沉降**；源 TOS → 目的 vePFS = **预热**\n"
-             "• vePFS：`vepfs://<fs-id>/<dir>/`（或裸子目录 `/<dir>/`，用默认文件系统）；TOS：`tos://<bucket>/<prefix>/`\n"
-             "> vePFS 与 TOS 须**同地域**；账号需已开通 vePFS→TOS 服务授权 + 数据流动带宽>0。")
-    form_elems = [
-        {"tag": "input", "name": "region", "label": _pt("地区"), "required": True,
-         "placeholder": _pt("如 cn-beijing（vePFS 文件系统所在区域）")},
-        {"tag": "input", "name": "source", "label": _pt("源地址"), "required": True,
-         "placeholder": _pt("如 vepfs://vepfs-xxx/label/ 或 tos://bk/prefix/")},
-        {"tag": "input", "name": "dest", "label": _pt("目的地址"), "required": True,
-         "placeholder": _pt("如 tos://bk/prefix/ 或 vepfs://vepfs-xxx/label/")},
-        {"tag": "select_static", "name": "same_name", "required": False,
-         "placeholder": _pt("同名策略（默认跳过）"), "options": _same_name_options()},
-        {"tag": "button", "text": _pt("➡️ 解析预览"), "type": "primary",
-         "form_action_type": "submit", "name": "submit",
-         "behaviors": [{"type": "callback", "value": {"action": "submit_vepfs_dataflow"}}]},
-    ]
-    return {
-        "schema": "2.0",
-        "config": {"wide_screen_mode": True},
-        "header": {"title": _pt("\U0001f30b vePFS 数据预热 / 沉降"), "template": "orange"},
-        "body": {"elements": [
-            {"tag": "markdown", "content": intro},
-            {"tag": "form", "name": "vepfs_entry", "elements": form_elems},
-        ]},
-    }
+# 录入卡已并入统一的「数据预热/沉降」卡（core/cpfs_dataflow/cards.py::entry_card，卡内选云平台）；
+# 火山分支下发后由本模块的 confirm/progress/result 卡承接。
 
 
 def confirm_card(job: dict):
