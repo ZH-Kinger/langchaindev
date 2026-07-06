@@ -342,6 +342,21 @@ def start_task(job: dict) -> dict:
     return job
 
 
+_ERR_HINTS = {
+    "PathNotAccessible": "CPFS 目录不存在或不可访问；确认路径正确、区分大小写、且该目录确实有数据",
+    "NoSuchKey": "OSS 源前缀下没有对象",
+    "AccessDenied": "无权限访问，检查 RAM 角色 / OSS 桶授权",
+}
+
+
+def _friendly_error(err: str) -> str:
+    """给已知阿里错误码补一句中文说明，让失败卡可操作。未知码原样返回。"""
+    for code, hint in _ERR_HINTS.items():
+        if code in (err or ""):
+            return f"{err}（{hint}）"
+    return err or "任务失败"
+
+
 def poll_once(job: dict) -> dict:
     """轮询一次任务状态，更新阶段/进度。"""
     if job["stage"] != STAGE_RUNNING or not job.get("task_id"):
@@ -358,7 +373,7 @@ def poll_once(job: dict) -> dict:
     elif status in engine_nas._FAIL_STATES:
         job["stage"] = STAGE_FAILED
         job["finished_ts"] = time.time()
-        job["error"] = st.get("error", "") or f"任务{status}"
+        job["error"] = _friendly_error(st.get("error", "") or f"任务{status}")
     _save(job)
     return job
 

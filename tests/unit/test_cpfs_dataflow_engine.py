@@ -112,6 +112,19 @@ def test_query_task_parses_progress(monkeypatch):
     assert st["bytes_total"] == 1000
 
 
+def test_query_task_reads_errormsg_and_nested_progress(monkeypatch):
+    """真机字段：失败原因在 ErrorMsg，进度计数嵌在 ProgressStats 子对象里。"""
+    body = {"DataFlowTask": [{
+        "TaskId": "task-1", "Status": "Failed", "ErrorMsg": "PathNotAccessible",
+        "ProgressStats": {"FilesTotal": 7, "FilesDone": 3, "BytesTotal": 90, "BytesDone": 30},
+    }]}
+    monkeypatch.setattr(eng, "_call", lambda *a, **k: body)
+    monkeypatch.setattr(eng, "_client", lambda *a, **k: object())
+    st = eng.query_task("bmcpfs-x", "task-1", "cn-hangzhou")
+    assert st["error"] == "PathNotAccessible"        # 不再是空 → 不再回退成"任务Failed"
+    assert st["files_total"] == 7 and st["files_done"] == 3   # 从 ProgressStats 深搜到
+
+
 def test_create_dataflow_computing(monkeypatch):
     captured = {}
     monkeypatch.setattr(eng, "_call",

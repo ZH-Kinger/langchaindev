@@ -356,9 +356,16 @@ def query_task(fs_id: str, task_id: str, region: str = "", *, open_id: str = "")
         # 找不到具体任务时返回任一含 Status 的节点，避免误判失败
         cands = _dicts_with(body, "Status")
         task = cands[0] if cands else {}
+    def _deep(*keys):
+        """在 task 及其嵌套子对象里找（进度计数在 ProgressStats 子对象内，顶层取不到）。"""
+        for d in _iter_dicts(task):
+            for k in keys:
+                if k in d and d[k] not in (None, ""):
+                    return d[k]
+        return ""
     def _int(*keys):
         try:
-            return int(_get(task, *keys, default=0) or 0)
+            return int(_deep(*keys) or 0)
         except (TypeError, ValueError):
             return 0
     return {
@@ -367,7 +374,8 @@ def query_task(fs_id: str, task_id: str, region: str = "", *, open_id: str = "")
         "files_done": _int("FilesDone", "ActualFiles"),
         "bytes_total": _int("BytesTotal"),
         "bytes_done": _int("BytesDone", "ActualBytes"),
-        "error": _get(task, "ErrorMessage", "Message"),
+        # 阿里失败原因字段是 ErrorMsg（不是 ErrorMessage/Message）——之前读错字段导致全回退成"任务Failed"
+        "error": _get(task, "ErrorMsg", "ErrorMessage", "Message"),
     }
 
 
