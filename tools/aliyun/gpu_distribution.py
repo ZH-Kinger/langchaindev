@@ -9,7 +9,7 @@
 卡型精确性：每个 region 只有一种卡型（杭州/北京 H20、新加坡 H200），故"用户实例所在 region → 卡型"是精确的；
 若某 region 出现多卡型，退化为该 region 首个卡型（会在文档标注）。
 
-Redis 缓存 gpu:dist:snapshot（24h 存 / 90s 陈旧→后台单飞刷新），供实时 HTML 页面高频读取。
+Redis 缓存 gpu:dist:snapshot（24h 存 / 15s 陈旧→后台单飞刷新），供实时 HTML 页面高频读取。
 """
 import html as _html
 import json
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 _CACHE_KEY = "gpu:dist:snapshot"
 _CACHE_TTL = 24 * 3600
-_STALE = 90
+_STALE = 15
 _LOCK_KEY = "gpu:dist:refresh_lock"
 _LOCK_TTL = 180
 
@@ -202,19 +202,24 @@ def get_distribution(refresh: bool = False) -> dict:
 
 _TS_KEY = "gpu:dist:timeseries"
 _TS_TTL = 24 * 3600
-_TS_STALE = 90
+_TS_STALE = 15
 _TS_LOCK = "gpu:dist:ts_lock"
+
+ALLOWED_HOURS = (1, 6, 12, 24, 72)
+_STEP_BY_HOURS = {1: "60s", 6: "300s", 12: "600s", 24: "900s", 72: "3600s"}
 
 
 def _ikey(d):
     return {int(round(float(k))): v for k, v in d.items()}
 
 
-def _gather_timeseries(hours: int = 6, step: str = "600s") -> dict:
-    """近 hours 小时趋势：per-region MFU + 集群 GPU利用率/Tensor活跃/在算卡数。"""
+def _gather_timeseries(hours: int = 24) -> dict:
+    """近 hours 小时趋势：per-region MFU(张量核=avg(TENSORTFLOPS)/峰值) + 集群 GPU利用率/Tensor活跃
+    + 卡数(已分配/在算/空闲)。步长随范围自适应，保持 ~60-100 点。"""
     from datetime import datetime, timezone, timedelta
     from tools.aliyun.cluster_mfu import _range_series, _peak_for, _grouped
     thr = settings.GPU_ACTIVE_THRESHOLD_PCT
+    step = _STEP_BY_HOURS.get(hours, "900s")
     end = time.time()
     start = end - hours * 3600
     rt = {}
@@ -223,66 +228,71 @@ def _gather_timeseries(hours: int = 6, step: str = "600s") -> dict:
 
     duty = _ikey(_range_series("avg(AliyunPaidlc_CARD_GPU_DUTY_CYCLE)", start, end, step))
     tensor = _ikey(_range_series("avg(AliyunPaidlc_CARD_GPU_PIP_TENSOR_ACTIVE)", start, end, step))
-    count = _ikey(_range_series(f"count(AliyunPaidlc_CARD_GPU_PIP_TENSOR_ACTIVE > {thr})", start, end, step))
+    active = _ikey(_range_series(f"count(AliyunPaidlc_CARD_GPU_PIP_TENSOR_ACTIVE > {thr})", start, end, step))
+    alloc = _ikey(_range_series("sum(AliyunPaiquota_NODE_GPU_ACCELERATOR_REQUEST)", start, end, step))
+    total = _ikey(_range_series("sum(AliyunPaiquota_NODE_GPU_ACCELERATOR_TOTAL)", start, end, step))
 
     mfu_r = {}
     for rid, gt in rt.items():
         peak = _peak_for(gt)
-        expr = (f'sum(AliyunPaidlc_CARD_GPU_TENSORTFLOPS_USED{{regionId="{rid}"}}) '
-                f'/ count(AliyunPaidlc_CARD_GPU_PIP_TENSOR_ACTIVE{{regionId="{rid}"}} > {thr}) '
-                f'/ {peak} * 100')
+        # 张量核 MFU：每卡平均张量算力 / 单卡峰值（同一批卡、不会除0、空/满区都出线）
+        expr = f'avg(AliyunPaidlc_CARD_GPU_TENSORTFLOPS_USED{{regionId="{rid}"}}) / {peak} * 100'
         s = _ikey(_range_series(expr, start, end, step))
         if s:
             mfu_r[f"{_region_name(rid)}·{_gpu_name(gt)}"] = s
 
-    keys = set(duty) | set(tensor) | set(count)
+    keys = set(duty) | set(tensor) | set(active) | set(alloc) | set(total)
     for d in mfu_r.values():
         keys |= set(d)
     grid = sorted(keys)
     bj = timezone(timedelta(hours=8))
-    labels = [datetime.fromtimestamp(t, bj).strftime("%H:%M") for t in grid]
+    fmt = "%m-%d %H:%M" if hours >= 24 else "%H:%M"
+    labels = [datetime.fromtimestamp(t, bj).strftime(fmt) for t in grid]
 
     def arr(d, nd=1):
         return [round(d[t], nd) if t in d else None for t in grid]
+
+    idle = [round(total[t] - alloc[t]) if (t in total and t in alloc) else None for t in grid]
 
     return {
         "labels": labels,
         "gpu_util": arr(duty),
         "tensor": arr(tensor, 2),
-        "active": arr(count, 0),
+        "cards": {"allocated": arr(alloc, 0), "active": arr(active, 0), "idle": idle},
         "mfu": {name: arr(s, 2) for name, s in mfu_r.items()},
         "hours": hours,
         "gathered_at": time.time(),
     }
 
 
-def get_timeseries(refresh: bool = False) -> dict:
-    """取趋势快照。无缓存/强制→同步采集；陈旧→返回旧数据并后台单飞刷新。"""
+def get_timeseries(hours: int = 24, refresh: bool = False) -> dict:
+    """取趋势快照(按时间范围缓存)。无缓存/强制→同步采集；陈旧→返回旧数据并后台单飞刷新。"""
+    hours = hours if hours in ALLOWED_HOURS else 24
+    key = f"{_TS_KEY}:{hours}"
     try:
-        raw = get_redis().get(_TS_KEY)
+        raw = get_redis().get(key)
         g = json.loads(raw) if raw else None
     except Exception:
         g = None
     if g is None or refresh:
-        g = _gather_timeseries()
+        g = _gather_timeseries(hours)
         try:
-            get_redis().setex(_TS_KEY, _TS_TTL, json.dumps(g, ensure_ascii=False))
+            get_redis().setex(key, _TS_TTL, json.dumps(g, ensure_ascii=False))
         except Exception:
             pass
         return g
     if time.time() - g.get("gathered_at", 0) > _TS_STALE:
         r = get_redis()
         try:
-            if r.set(_TS_LOCK, 1, nx=True, ex=180):
+            if r.set(f"{_TS_LOCK}:{hours}", 1, nx=True, ex=180):
                 def _run():
                     try:
-                        gg = _gather_timeseries()
-                        r.setex(_TS_KEY, _TS_TTL, json.dumps(gg, ensure_ascii=False))
+                        r.setex(key, _TS_TTL, json.dumps(_gather_timeseries(hours), ensure_ascii=False))
                     except Exception:
                         logger.error("[GPUDIST] 趋势后台采集失败", exc_info=True)
                     finally:
                         try:
-                            r.delete(_TS_LOCK)
+                            r.delete(f"{_TS_LOCK}:{hours}")
                         except Exception:
                             pass
                 threading.Thread(target=_run, daemon=True).start()
@@ -304,7 +314,7 @@ def _by_type_str(u):
     return "、".join(f"{k}×{v}" for k, v in sorted(u["by_type"].items(), key=lambda x: -x[1]))
 
 
-def build_html(g: dict, series: dict = None, token: str = "", refresh_secs: int = 30) -> str:
+def build_html(g: dict, series: dict = None, token: str = "", refresh_secs: int = 15) -> str:
     """自动刷新的实时卡分布页面（居中）：近6h 趋势折线图(MFU/GPU利用率/Tensor活跃/在算卡数)
     + 地区×卡型表 + 用户表(前10+折叠) + 手动刷新按钮。
 
@@ -344,13 +354,20 @@ def build_html(g: dict, series: dict = None, token: str = "", refresh_secs: int 
     charts_html = ""
     chart_js = ""
     if series.get("labels"):
-        hours = series.get("hours", 6)
+        cur_h = series.get("hours", 24)
+        rbtns = []
+        for h, lbl in ((1, "1h"), (6, "6h"), (12, "12h"), (24, "24h"), (72, "3天")):
+            on = " on" if h == cur_h else ""
+            rbtns.append(f'<button class="rg{on}" onclick="const u=new URL(location.href);'
+                         f"u.searchParams.set('hours','{h}');location.href=u\">{lbl}</button>")
+        range_html = '<div class="ranges">' + "".join(rbtns) + "</div>"
         charts_html = (
-            f'<h2>近 {hours} 小时趋势</h2><div class="charts">'
-            '<div class="chart"><div class="ct">MFU（%，按地区）</div><div class="cv"><canvas id="c_mfu"></canvas></div></div>'
+            f'<div class="hd" style="margin-top:20px"><h2 style="margin:0">趋势</h2>{range_html}</div>'
+            '<div class="charts">'
+            '<div class="chart"><div class="ct">MFU（%，张量核·按地区）</div><div class="cv"><canvas id="c_mfu"></canvas></div></div>'
             '<div class="chart"><div class="ct">GPU 利用率 DutyCycle（%）</div><div class="cv"><canvas id="c_util"></canvas></div></div>'
             '<div class="chart"><div class="ct">Tensor Core 活跃度（%）</div><div class="cv"><canvas id="c_tensor"></canvas></div></div>'
-            '<div class="chart"><div class="ct">在算卡数</div><div class="cv"><canvas id="c_active"></canvas></div></div>'
+            '<div class="chart"><div class="ct">卡数：已分配 / 在算 / 空闲</div><div class="cv"><canvas id="c_cards"></canvas></div></div>'
             '</div>')
         ts_json = json.dumps(series, ensure_ascii=False)
         chart_js = ('<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>'
@@ -363,13 +380,15 @@ def build_html(g: dict, series: dict = None, token: str = "", refresh_secs: int 
                     'labels:{boxWidth:10,font:{size:11}}}},scales:{x:{ticks:{maxTicksLimit:8,font:{size:10}}},'
                     'y:{beginAtZero:true,suggestedMax:max}},spanGaps:true}});'
                     'const mk=(id,ds,max)=>{const el=document.getElementById(id);if(el)new Chart(el,base(ds,max));};'
+                    'const C=TS.cards||{};'
                     'mk("c_mfu",Object.entries(TS.mfu||{}).map((x,i)=>'
-                    '({label:x[0],data:x[1],borderColor:PAL[i%PAL.length],borderWidth:2,tension:.3})),100);'
+                    '({label:x[0],data:x[1],borderColor:PAL[i%PAL.length],borderWidth:2,tension:.3})),null);'
                     'mk("c_util",[{label:"GPU利用率",data:TS.gpu_util,borderColor:"#3370ff",borderWidth:2,'
                     'tension:.3,fill:true,backgroundColor:"rgba(51,112,255,.08)"}],100);'
                     'mk("c_tensor",[{label:"Tensor活跃",data:TS.tensor,borderColor:"#7c5cff",borderWidth:2,tension:.3}]);'
-                    'mk("c_active",[{label:"在算卡数",data:TS.active,borderColor:"#00b42a",borderWidth:2,'
-                    'tension:.3,fill:true,backgroundColor:"rgba(0,180,42,.08)"}]);'
+                    'mk("c_cards",[{label:"已分配",data:C.allocated,borderColor:"#ff7d00",borderWidth:2,tension:.3},'
+                    '{label:"在算",data:C.active,borderColor:"#00b42a",borderWidth:2,tension:.3},'
+                    '{label:"空闲",data:C.idle,borderColor:"#86909c",borderWidth:2,borderDash:[4,3],tension:.3}]);'
                     '}</script>').replace("__TS__", ts_json)
 
     return f"""<!doctype html><html lang="zh"><head>
@@ -403,6 +422,9 @@ details{{margin-top:8px}} summary{{cursor:pointer;color:#3370ff;font-size:13px;p
 .chart{{background:#fafbfc;border:1px solid #eef0f3;border-radius:8px;padding:10px 12px}}
 .chart .ct{{font-size:13px;color:#4e5969;margin-bottom:6px;font-weight:600}}
 .chart .cv{{height:180px;position:relative}}
+.ranges{{display:flex;gap:6px}}
+.rg{{background:#eef0f3;border:0;border-radius:6px;padding:5px 12px;font-size:12px;cursor:pointer;color:#4e5969}}
+.rg.on{{background:#3370ff;color:#fff}}
 </style></head><body>
 <div class="card">
 <div class="hd"><h1>🧮 GPU 卡分布（实时）</h1>
@@ -422,7 +444,7 @@ details{{margin-top:8px}} summary{{cursor:pointer;color:#3370ff;font-size:13px;p
 <table class="tbl"><thead><tr><th>#</th><th>用户</th><th>卡数</th><th>卡型</th></tr></thead>
 <tbody>{top_html or '<tr><td colspan=4>当前无在算任务</td></tr>'}</tbody></table>
 {rest_html}
-<div class="sub" style="margin-top:18px">数据每 90 秒后台更新；点「🔄 立即刷新」强制重采。</div>
+<div class="sub" style="margin-top:18px">数据每 15 秒后台更新；点「🔄 立即刷新」强制重采。</div>
 </div>{chart_js}</body></html>"""
 
 

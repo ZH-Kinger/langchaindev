@@ -228,9 +228,13 @@ def gpu_distribution_page():
     from tools.aliyun.gpu_distribution import get_distribution, get_timeseries, build_html
     try:
         refresh = request.args.get("refresh") == "1"
+        try:
+            hours = int(request.args.get("hours", "24"))
+        except (TypeError, ValueError):
+            hours = 24
         g = get_distribution(refresh=refresh)
         try:
-            series = get_timeseries(refresh=refresh)
+            series = get_timeseries(hours=hours, refresh=refresh)
         except Exception:
             logger.warning("[gpu_distribution] timeseries failed (charts skipped)", exc_info=True)
             series = {}
