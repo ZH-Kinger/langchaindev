@@ -506,10 +506,23 @@ def _process_message(message_id: str, chat_id: str, user_text: str, open_id: str
     if _is_mfu_report_intent(user_text):
         from tools.aliyun.cluster_mfu import mfu_card_for_callback
         card = mfu_card_for_callback(view="summary")   # 只读缓存秒回；陈旧则后台刷新
-        if card is None:                               # 缓存全无 → 已触发后台采集
-            messaging._feishu_reply(message_id, "📊 算力数据采集中（约1分钟），请稍后再发一次「算力日报」。")
-        else:
+        if card is not None:
             messaging._feishu_reply_card(message_id, card)
+        else:
+            # 缓存全无（早报没跑/Redis 重启）：先即时反馈，再后台采集(约1分钟)，完成后**自动把日报卡发给用户**，
+            # 不再要求"稍后再发一次"（消息路径不受卡片回调 3s 限制，可放心后台采集）。
+            messaging._feishu_reply(message_id, "📊 算力数据采集中（约1分钟），完成后自动发给你…")
+
+            def _build_and_push():
+                try:
+                    from tools.aliyun.cluster_mfu import build_mfu_card
+                    c = build_mfu_card(view="summary", refresh=True)
+                    messaging._feishu_reply_card(message_id, c)
+                except Exception:
+                    logger.error("[MFU] 后台采集日报失败", exc_info=True)
+                    messaging._feishu_reply(message_id, "❌ 算力日报采集失败，请稍后重试。")
+
+            threading.Thread(target=_build_and_push, daemon=True).start()
         return
 
     # ③ 跨云迁移录入意图（纯关键词、无路径）→ 弹录入卡让用户填地址
