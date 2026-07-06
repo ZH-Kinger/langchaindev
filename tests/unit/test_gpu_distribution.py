@@ -116,6 +116,8 @@ def test_build_html_with_charts():
     assert "chart.js" in html.lower()          # Chart.js CDN
     assert '已分配 / 在算 / 空闲' in html        # 卡数三线
     assert 'class="rg' in html and "3天" in html and "24h" in html   # 时间范围选择器
+    assert "MFU 计算器" in html and 'id="m_p"' in html and "function calcMfu" in html  # 真MFU计算器
+    assert "张量核利用率" in html               # 原"MFU"图已诚实改名
     assert "SECRET" not in html                # token 不入正文
     # 无 series 时不渲染图表（渐进：仍出表格）
     html2 = G.build_html(g, None, token="SECRET")
