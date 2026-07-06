@@ -168,7 +168,7 @@ Migrates object-storage data across clouds from a single user-given path. The ch
 - **火山落盘限制**：DMS 目的只到桶级，对象保持源 key 原样落入目的桶（同 OSS→TOS，见上）。
 - **三入口**：飞书发「桶间迁移」→ `cards.entry_card`（源/目的/同名策略）→ `_h_submit_bucket_transfer`→`confirm_card`→`_h_confirm_bucket_transfer` 后台 `run_to_completion` 推进度/结果（`query_bucket_transfer`/`retry_bucket_transfer` 按钮）。Redis `bkt:transfer:job:{id}`。
 - **Config**：`BUCKET_TRANSFER_ENABLED`、`BUCKET_TRANSFER_OSS_SRC_ROLE`（阿里源 OSS 读权限 role，留空回退 `TRANSFER_OSS_ROLE`）；复用 `MGW_USER_ID`/`TOS_ACCESS_KEY`。
-- **⚠️ 待真机验证**：火山 `engine_tos.SOURCE_VENDOR_TOS`（`StorageVendorTOS`）枚举串——上线前反查一个已有 TOS→TOS 任务或 dry-run 试建确认（同当初反查 OSS 金标准 task 552548）。
+- **真机验收通过**：阿里 OSS→OSS（179MB/30对象跨region）+ 火山 TOS→TOS（task 553276，`StorageVendorTOS` 枚举确认，秒级）。火山 DMS 无阿里那种分钟级 LAUNCHING 排队。
 
 ### CPFS/NAS DataFlow — 数据预热 / 沉降 (`core/cpfs_dataflow/`)
 

@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 OVERWRITE_POLICY = "None"
 SOURCE_TYPE      = "StorageTypeObject"
 SOURCE_VENDOR    = "StorageVendorOSS"     # 阿里 OSS 源的 vendor 枚举（真机确认）
-SOURCE_VENDOR_TOS = "StorageVendorTOS"    # 火山 TOS 源（桶间 TOS→TOS）；⚠️枚举串待真机反查/dry-run 确认
+SOURCE_VENDOR_TOS = "StorageVendorTOS"    # 火山 TOS 源（桶间 TOS→TOS），真机验证 task 553276
 STORAGE_CLASS    = "InheritSource"        # 保持原存储属性
 
 # 任务状态（真机实测全枚举）：
