@@ -164,11 +164,25 @@ def make_plan(operation: str, vepfs_addr: str = "", tos: str = "", *,
     )
 
 
+def _region_fs(region: str) -> str:
+    """某地区唯一的 vePFS 文件系统自动选中；多个时报错让用户用 vepfs://<fs>/ 指定（不盲选）。"""
+    fss = engine_vepfs.list_filesystems(region)
+    if not fss:
+        raise DataflowPathError(f"地区 {region} 下没有 vePFS 文件系统（或 AK 无 DescribeFileSystems 权限）。")
+    if len(fss) > 1:
+        lst = "、".join(f"{f['fs_id']}({f['name']})" for f in fss)
+        raise DataflowPathError(
+            f"地区 {region} 下有多个 vePFS 文件系统（{lst}），无法自动判断用哪个。\n"
+            f"请把 vePFS 地址写成 `vepfs://<fs-id>/<目录>/` 指定，例如 `vepfs://{fss[0]['fs_id']}/wzh/`。")
+    return fss[0]["fs_id"]
+
+
 def plan_from_addresses(region: str, source: str, dest: str, *, same_name: str = "") -> DataflowPlan:
     """按 源/目的地址 定方向、解析计划。
 
     源 vePFS、目的 TOS → 沉降(Export)；源 TOS、目的 vePFS → 预热(Import)。
-    地区由卡片给定（vePFS 文件系统所在区域）。
+    地区由卡片给定（vePFS 文件系统所在区域）。vePFS 地址给裸目录时：优先 VEPFS_FILE_SYSTEM_ID，
+    否则按地区自动解析该地区唯一 fs（多个则要求 vepfs://<fs>/ 显式指定）。
     """
     region = (region or settings.VEPFS_REGION or "").strip()
     if not region:
@@ -184,9 +198,7 @@ def plan_from_addresses(region: str, source: str, dest: str, *, same_name: str =
     if "://" in vepfs_addr:
         fs_id, sub_path = _parse_vepfs(vepfs_addr)
     else:
-        fs_id = settings.VEPFS_FILE_SYSTEM_ID
-        if not fs_id:
-            raise DataflowPathError("未配置 VEPFS_FILE_SYSTEM_ID，请用 vepfs://<fs-id>/<dir>/ 指定 vePFS 地址。")
+        fs_id = settings.VEPFS_FILE_SYSTEM_ID or _region_fs(region)
         sub_path = _norm_dir(vepfs_addr)
     tos_bucket, tos_prefix = _parse_tos(tos_addr)
     if not tos_bucket:

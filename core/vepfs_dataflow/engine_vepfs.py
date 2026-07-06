@@ -187,6 +187,29 @@ def query_task(task_id: str, fs_id: str, region: str) -> dict:
     }
 
 
+def list_filesystems(region: str) -> list[dict]:
+    """DescribeFileSystems 列出某 region 的 vePFS 文件系统 [{fs_id, region, name, status}]。
+
+    需 AK 有 `vepfs:DescribeFileSystems`。仅返回有 file_system_id 的项，附带名称/状态供消歧展示。
+    """
+    api, vepfs = _api(region)
+    try:
+        resp = api.describe_file_systems(vepfs.DescribeFileSystemsRequest(page_number=1, page_size=100))
+    except Exception as e:
+        raise VepfsDataflowError(f"DescribeFileSystems 调用失败：{_err(e)}")
+    out = []
+    for fs in (getattr(resp, "file_systems", None) or getattr(resp, "FileSystems", None) or []):
+        fid = getattr(fs, "file_system_id", "") or getattr(fs, "FileSystemId", "")
+        if fid:
+            out.append({
+                "fs_id": fid,
+                "region": getattr(fs, "region_id", "") or getattr(fs, "RegionId", "") or region,
+                "name": getattr(fs, "file_system_name", "") or getattr(fs, "FileSystemName", ""),
+                "status": getattr(fs, "status", "") or getattr(fs, "Status", ""),
+            })
+    return out
+
+
 def cancel_task(task_id: str, fs_id: str, region: str) -> None:
     api, vepfs = _api(region)
     try:

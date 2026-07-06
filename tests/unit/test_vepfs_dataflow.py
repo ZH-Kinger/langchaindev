@@ -32,6 +32,34 @@ def test_plan_from_addresses_both_tos_rejected():
         orch.plan_from_addresses("cn-beijing", "tos://a/x/", "tos://b/x/")
 
 
+def test_region_fs_multiple_requires_explicit(monkeypatch):
+    """地区多个 vePFS → 裸路径报错，提示用 vepfs://<fs>/ 指定。"""
+    monkeypatch.setattr(orch.settings, "VEPFS_FILE_SYSTEM_ID", "")
+    monkeypatch.setattr(engine_vepfs, "list_filesystems", lambda region: [
+        {"fs_id": "vepfs-1", "region": region, "name": "wuji-vepfs", "status": "Running"},
+        {"fs_id": "vepfs-2", "region": region, "name": "data-D", "status": "Running"}])
+    with pytest.raises(orch.DataflowPathError):
+        orch.plan_from_addresses("cn-shanghai", "/label/", "tos://bk/label/")
+
+
+def test_region_fs_single_auto(monkeypatch):
+    monkeypatch.setattr(orch.settings, "VEPFS_FILE_SYSTEM_ID", "")
+    monkeypatch.setattr(engine_vepfs, "list_filesystems", lambda region: [
+        {"fs_id": "vepfs-only", "region": region, "name": "x", "status": "Running"}])
+    p = orch.plan_from_addresses("cn-shanghai", "/label/", "tos://bk/label/")
+    assert p.fs_id == "vepfs-only" and p.operation == "sink"
+
+
+def test_default_fs_id_skips_discovery(monkeypatch):
+    """配了 VEPFS_FILE_SYSTEM_ID → 裸路径直接用它，不触发 discovery。"""
+    monkeypatch.setattr(orch.settings, "VEPFS_FILE_SYSTEM_ID", "vepfs-def")
+    def _boom(region):
+        raise AssertionError("不应调用 discovery")
+    monkeypatch.setattr(engine_vepfs, "list_filesystems", _boom)
+    p = orch.plan_from_addresses("cn-shanghai", "tos://bk/a/", "/label/")
+    assert p.fs_id == "vepfs-def" and p.operation == "preheat"
+
+
 def test_make_plan_bare_vepfs_needs_fs(monkeypatch):
     monkeypatch.setattr(orch.settings, "VEPFS_FILE_SYSTEM_ID", "")
     with pytest.raises(orch.DataflowPathError):
