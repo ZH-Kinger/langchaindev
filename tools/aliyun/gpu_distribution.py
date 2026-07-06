@@ -282,7 +282,8 @@ def dist_url() -> str:
     base = (settings.GPU_DIST_BASE_URL or "").rstrip("/")
     if not base:
         return ""
-    token = settings.RAM_QUERY_API_TOKEN or settings.FEISHU_VERIFICATION_TOKEN or ""
+    token = (getattr(settings, "GPU_DIST_TOKEN", "")
+             or settings.RAM_QUERY_API_TOKEN or settings.FEISHU_VERIFICATION_TOKEN or "")
     q = f"?token={token}" if token else ""
     return f"{base}/gpu/distribution{q}"
 

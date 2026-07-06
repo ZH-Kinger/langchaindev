@@ -32,6 +32,8 @@ class Config:
     GPU_DIST_ENABLED          = os.environ.get("GPU_DIST_ENABLED", "true").lower() == "true"
     # 页面公网基址（如 http://115.191.2.86:8088），供飞书发链接用；留空则只回摘要卡不带链接按钮。
     GPU_DIST_BASE_URL         = os.environ.get("GPU_DIST_BASE_URL", "")
+    # 页面专用访问 token（建议单独设一个随机串，避免链接里带 RAM/飞书校验 token）。留空则回退这两者。
+    GPU_DIST_TOKEN            = os.environ.get("GPU_DIST_TOKEN", "")
 
     # 飞书企业自建应用
     FEISHU_APP_ID             = os.environ.get("FEISHU_APP_ID", "")

@@ -205,12 +205,25 @@ def api_ram_user():
     except RamQueryError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500
 
+def _gpu_dist_authorized() -> bool:
+    """页面 token 门禁：优先 GPU_DIST_TOKEN，回退 RAM_QUERY_API_TOKEN / FEISHU_VERIFICATION_TOKEN。"""
+    expected = (getattr(settings, "GPU_DIST_TOKEN", "")
+                or getattr(settings, "RAM_QUERY_API_TOKEN", "")
+                or getattr(settings, "FEISHU_VERIFICATION_TOKEN", ""))
+    if not expected:
+        return False
+    auth = request.headers.get("Authorization", "")
+    bearer = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    supplied = request.headers.get("X-API-Token", "") or bearer or request.args.get("token", "")
+    return supplied == expected
+
+
 @app.route("/gpu/distribution", methods=["GET"])
 def gpu_distribution_page():
-    """GPU 卡分布实时页面（自动刷新 HTML）。token 门禁（复用 RAM_QUERY_API_TOKEN）。"""
+    """GPU 卡分布实时页面（自动刷新 HTML）。token 门禁（GPU_DIST_TOKEN 优先）。"""
     if not getattr(settings, "GPU_DIST_ENABLED", True):
         return "gpu distribution disabled", 404
-    if not _ram_api_authorized():
+    if not _gpu_dist_authorized():
         return "unauthorized", 403
     from tools.aliyun.gpu_distribution import get_distribution, build_html
     try:
