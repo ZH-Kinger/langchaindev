@@ -69,7 +69,7 @@ def test_build_html_top10_and_collapse():
     # 交互一律 addEventListener，绝无内联 onclick（飞书 webview 会静默屏蔽内联处理器）
     assert "onclick=" not in html
     assert "addEventListener" in html
-    assert "UI v7" in html
+    assert "UI v8" in html
     assert 'id="btn-refresh"' in html       # 刷新按钮用 id 绑定
 
 
@@ -87,6 +87,8 @@ def test_gather_timeseries(monkeypatch):
             return {1000.0: 70.0, 1600.0: 72.0}
         if "PIP_TENSOR_ACTIVE" in expr:              # per-region Tensor 管线活跃%
             return {1000.0: 1.8, 1600.0: 1.9}
+        if "POWER_USAGE" in expr:                    # per-region 功耗合计(kW)
+            return {1000.0: 12.0, 1600.0: 13.0}
         if "ACCELERATOR_REQUEST" in expr:            # 已分配
             return {1000.0: 20.0, 1600.0: 22.0}
         if "ACCELERATOR_TOTAL" in expr:              # 总
@@ -102,10 +104,12 @@ def test_gather_timeseries(monkeypatch):
     # 卡数三线：已分配/在算/空闲(=总-已分配)
     assert ts["cards"]["allocated"][0] == 20 and ts["cards"]["active"][0] == 16
     assert ts["cards"]["idle"][0] == 44          # 64 - 20
-    # 只剩 Tensor 管线活跃；SM / TFLOPS / 显存 均已移除
+    # Tensor 管线活跃 + 功耗(kW)；SM / TFLOPS / 显存 均已移除
     assert "sm_region" not in ts and "tflops_region" not in ts and "mem_util" not in ts
     assert len(ts["tensor_region"]) == 2
     assert abs(list(ts["tensor_region"].values())[0][0] - 1.8) < 0.1
+    assert len(ts["power_region"]) == 2
+    assert abs(list(ts["power_region"].values())[0][0] - 12.0) < 0.1
 
 
 def test_build_html_with_charts():
@@ -117,10 +121,11 @@ def test_build_html_with_charts():
     series = {"labels": ["10:00", "10:10"],
               "duty_region": {"北京·H20": [70, 72]},
               "tensor_region": {"北京·H20": [1.8, 1.9]},
+              "power_region": {"北京·H20": [12, 13]},
               "cards": {"allocated": [20, 22], "active": [16, 16], "idle": [44, 42]},
               "hours": 24}
     html = G.build_html(g, series, token="SECRET")
-    assert 'id="c_util"' in html and 'id="c_cards"' in html and 'id="c_tensor"' in html
+    assert all(x in html for x in ('id="c_util"', 'id="c_tensor"', 'id="c_power"', 'id="c_cards"'))
     # SM / TFLOPS / 显存 图均已删
     assert 'id="c_sm"' not in html and 'id="c_tflops"' not in html and 'id="c_mem"' not in html
     assert "chart.js" in html.lower()          # Chart.js CDN
