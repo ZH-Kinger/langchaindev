@@ -239,7 +239,13 @@ def gpu_distribution_page():
             logger.warning("[gpu_distribution] timeseries failed (charts skipped)", exc_info=True)
             series = {}
         token = request.args.get("token", "") or request.headers.get("X-API-Token", "")
-        return build_html(g, series, token=token), 200, {"Content-Type": "text/html; charset=utf-8"}
+        # 禁止缓存：页面每 15s 自更新，浏览器/飞书 webview 缓存旧页面会导致"按钮点不动"(旧 meta 刷新死循环)
+        return build_html(g, series, token=token), 200, {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        }
     except Exception as exc:  # noqa: BLE001
         logger.error("[gpu_distribution] render failed: %s", exc, exc_info=True)
         return f"error: {exc}", 500

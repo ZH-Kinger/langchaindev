@@ -474,7 +474,7 @@ details{{margin-top:8px}} summary{{cursor:pointer;color:#3370ff;font-size:13px;p
 <div class="card">
 <div class="hd"><h1>🧮 GPU 卡分布（实时）</h1>
 <button class="refresh" onclick="{refresh_js}">🔄 立即刷新</button></div>
-<div class="sub">数据时间 {e(_fmt_ts(g.get("gathered_at")))} · 每 {refresh_secs}s 自动刷新</div>
+<div class="sub">数据时间 {e(_fmt_ts(g.get("gathered_at")))} · 每 {refresh_secs}s 自动刷新 · <b>UI v2</b></div>
 <div class="kpi"><div>总卡数<br><b>{g.get("total_cards",0)}</b></div>
 <div>已分配<br><b>{g.get("used_cards",0)}</b></div>
 <div>在算<br><b>{g.get("active_cards",0)}</b></div>
