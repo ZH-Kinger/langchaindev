@@ -71,7 +71,6 @@ def test_build_html_top10_and_collapse():
     assert "addEventListener" in html
     assert "UI v3" in html
     assert 'id="btn-refresh"' in html       # 刷新按钮用 id 绑定
-    assert 'id="btn-calc-mfu"' in html      # 算 MFU 按钮用 id 绑定
 
 
 def test_gather_timeseries(monkeypatch):
@@ -126,8 +125,8 @@ def test_build_html_with_charts():
     assert "chart.js" in html.lower()          # Chart.js CDN
     assert '已分配 / 在算 / 空闲' in html        # 卡数三线
     assert 'class="rg' in html and "3天" in html and "24h" in html   # 时间范围选择器
-    assert "MFU 计算器" in html and 'id="m_p"' in html and "function calcMfu" in html  # 真MFU计算器
     assert "算力利用率（SM 繁忙%，按地区）" in html   # 头版换成 SM_UTIL 算力利用率
+    assert "MFU 计算器" not in html and 'id="m_p"' not in html  # 计算器已移除
     assert "SECRET" not in html                # token 不入正文
     # 时间范围按钮改 data-h + addEventListener（无内联 onclick）
     assert "onclick=" not in html

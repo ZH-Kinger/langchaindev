@@ -411,32 +411,6 @@ def build_html(g: dict, series: dict = None, token: str = "", refresh_secs: int 
                     'document.head.appendChild(s);}L(0);})();'
                     '</script>').replace("__TS__", ts_json)
 
-    # MFU 计算器（真·6D 口径，纯前端；卡数默认当前在算数；输入 localStorage 持久化，抗自动刷新）
-    calc_html = (
-        '<h2>MFU 计算器（真·6D：6·P·tok/s ÷ 卡数·峰值）</h2>'
-        '<div class="calc">'
-        '<label>模型参数量 P（B）<input id="m_p" type="number" step="0.1" placeholder="如 7"></label>'
-        '<label>吞吐 tokens/s<input id="m_t" type="number" placeholder="如 12000"></label>'
-        f'<label>GPU 卡数<input id="m_n" type="number" value="{g.get("active_cards", 0)}"></label>'
-        '<label>单卡峰值 TFLOPS<input id="m_k" type="number" value="148"></label>'
-        '<button type="button" class="refresh" id="btn-calc-mfu">算 MFU</button>'
-        '<div id="m_out" class="mout">填 P / tokens·s 后点「算 MFU」</div>'
-        '</div>'
-        '<div class="sub">单卡峰值(BF16稠密)：H20 148 · H100/H200 989 · H100(FP8) 1979 · A100 312 · H800 989</div>')
-    calc_js = ('<script>'
-               'function calcMfu(){'
-               'var G=function(id){return parseFloat(document.getElementById(id).value)},'
-               'o=document.getElementById("m_out");'
-               'var P=G("m_p")*1e9,T=G("m_t"),N=G("m_n"),K=G("m_k")*1e12;'
-               'if(!(P&&T&&N&&K)){o.textContent="请把 P / tokens·s / 卡数 / 峰值 都填上";return;}'
-               'var m=6*P*T/(N*K)*100;'
-               'o.innerHTML="MFU ≈ <b>"+m.toFixed(1)+"%</b>";'
-               'try{localStorage.setItem("mfu_calc",JSON.stringify(["m_p","m_t","m_n","m_k"].map(function(i){return document.getElementById(i).value})))}catch(e){}'
-               '}'
-               'try{var s=JSON.parse(localStorage.getItem("mfu_calc")||"null");'
-               'if(s){["m_p","m_t","m_n","m_k"].forEach(function(id,i){if(s[i])document.getElementById(id).value=s[i]});calcMfu();}}catch(e){}'
-               '</script>')
-
     # 定时刷新（替代 meta http-equiv=refresh：外链脚本超时也不会把整页卡进重载死循环）；
     # 用户正在输入框里打字时跳过这一轮，避免刷掉计算器里没算的输入。
     reload_js = ('<script>(function t(){setTimeout(function(){'
@@ -463,9 +437,6 @@ def build_html(g: dict, series: dict = None, token: str = "", refresh_secs: int 
         'rf.textContent="⏳ 采集中…";'
         'fetch(u.toString()).then(function(){location.reload();})'
         '.catch(function(){location.reload();});});'
-        # 算 MFU 按钮
-        'var cm=document.getElementById("btn-calc-mfu");'
-        'bind(cm,function(){if(typeof calcMfu==="function"){calcMfu();}});'
         '}'
         'if(document.readyState==="loading"){'
         'document.addEventListener("DOMContentLoaded",init);}else{init();}'
@@ -504,11 +475,6 @@ details{{margin-top:8px}} summary{{cursor:pointer;color:#3370ff;font-size:13px;p
 .ranges{{display:flex;gap:6px}}
 .rg{{background:#eef0f3;border:0;border-radius:6px;padding:5px 12px;font-size:12px;cursor:pointer;color:#4e5969}}
 .rg.on{{background:#3370ff;color:#fff}}
-.calc{{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;background:#fafbfc;
-  border:1px solid #eef0f3;border-radius:8px;padding:12px 14px}}
-.calc label{{display:flex;flex-direction:column;font-size:12px;color:#4e5969;gap:4px}}
-.calc input{{width:120px;padding:6px 8px;border:1px solid #dfe1e6;border-radius:6px;font-size:14px}}
-.mout{{font-size:15px;color:#1f2329;margin-left:4px}} .mout b{{color:#3370ff;font-size:18px}}
 </style></head><body>
 <div class="card">
 <div class="hd"><h1>🧮 GPU 卡分布（实时）</h1>
@@ -530,9 +496,8 @@ details{{margin-top:8px}} summary{{cursor:pointer;color:#3370ff;font-size:13px;p
 <table class="tbl"><thead><tr><th>#</th><th>用户</th><th>卡数</th><th>卡型</th></tr></thead>
 <tbody>{top_html or '<tr><td colspan=4>当前无在算任务</td></tr>'}</tbody></table>
 {rest_html}
-{calc_html}
-<div class="sub" style="margin-top:18px">数据每 15 秒后台更新；点「🔄 立即刷新」强制重采。「算力利用率」=SM 繁忙时间占比(SM_UTIL，业界通用 GPU 利用率)；张量核活跃低是因负载非矩阵乘(机器人/RL/eval)，非数据源问题。PAI 无分精度 FLOPS 指标，真 6D MFU 请用下方计算器填 P/吞吐。</div>
-</div>{chart_js}{calc_js}{bind_js}{reload_js}</body></html>"""
+<div class="sub" style="margin-top:18px">数据每 15 秒后台更新；点「🔄 立即刷新」强制重采。「算力利用率」=SM 繁忙时间占比(SM_UTIL，业界通用 GPU 利用率)；张量核活跃低是因负载非矩阵乘(机器人/RL/eval)，非数据源问题。</div>
+</div>{chart_js}{bind_js}{reload_js}</body></html>"""
 
 
 def dist_url() -> str:
