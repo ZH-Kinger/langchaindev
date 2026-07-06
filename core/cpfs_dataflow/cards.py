@@ -35,32 +35,62 @@ def _region_options(open_id: str = ""):
         return []
 
 
-def entry_card(region_options=None):
-    """填 源地址 + 目的地址 + 选地区 → 后端建 DataFlow + 迁移任务。方向由地址类型自动判断。"""
-    if region_options is None:
-        region_options = _region_options()
-    region_elem = (
-        {"tag": "select_static", "name": "region", "placeholder": _pt("选择地区"),
-         "options": region_options}
-        if region_options else
-        {"tag": "input", "name": "region", "label": _pt("地区"), "required": True,
-         "placeholder": _pt("如 cn-hangzhou")}
-    )
-    intro = ("**数据预热 / 沉降**：先选云平台，再填源/目的地址与地区 → 解析预览 → 确认下发。\n"
-             "• 源=文件系统、目的=对象存储 → **沉降**；反之 → **预热**\n"
-             "• 阿里：CPFS `/cpfs/<dir>/` 或 `cpfs://<fs>/<dir>/` ↔ OSS `oss://<bucket>/<prefix>/`\n"
-             "• 火山：vePFS `vepfs://<fs>/<dir>/` ↔ TOS `tos://<bucket>/<prefix>/`\n"
-             "> 文件系统与对象存储须**同地区**。阿里镜像仓库（cri 开头）请勿填。")
+def entry_card():
+    """数据预热/沉降统一入口：选云平台 → 弹对应向导卡（下拉选文件系统/桶）。"""
+    intro = ("**数据预热 / 沉降**：先选云平台，进入向导后**下拉选**文件系统与对象存储桶（地区自动带出）。\n"
+             "• 阿里：CPFS ↔ OSS　• 火山：vePFS ↔ TOS\n"
+             "> 文件系统与对象存储须**同地区**。")
+    return {
+        "schema": "2.0",
+        "config": {"wide_screen_mode": True},
+        "header": {"title": _pt("\U0001f504 数据预热 / 沉降"), "template": "blue"},
+        "body": {"elements": [
+            {"tag": "markdown", "content": intro},
+            {"tag": "button", "text": _pt("阿里 CPFS ↔ OSS"), "type": "primary",
+             "behaviors": [{"type": "callback", "value": {"action": "pick_cloud_aliyun"}}]},
+            {"tag": "button", "text": _pt("火山 vePFS ↔ TOS"), "type": "primary",
+             "behaviors": [{"type": "callback", "value": {"action": "pick_cloud_volcano"}}]},
+        ]},
+    }
+
+
+def _sel_or_input(name, options, label, placeholder):
+    """有 options → 下拉；否则回退成文本输入框（发现为空/失败时不至于卡死）。"""
+    if options:
+        return {"tag": "select_static", "name": name, "required": False,
+                "placeholder": _pt(placeholder),
+                "options": [{"text": _pt(o["text"]), "value": o["value"]} for o in options]}
+    return {"tag": "input", "name": name, "label": _pt(label), "required": True,
+            "placeholder": _pt(placeholder)}
+
+
+def _op_options_ali():
+    return [
+        {"text": _pt("沉降（CPFS→OSS 刷回）"), "value": "sink"},
+        {"text": _pt("预热（OSS→CPFS 加载）"), "value": "preheat"},
+    ]
+
+
+def guided_card(fs_options=None, bucket_options=None):
+    """阿里 CPFS↔OSS 向导卡：下拉选 CPFS 文件系统 + OSS 桶，填目录/前缀 → 解析预览。
+
+    发现为空时对应项回退文本框。提交动作 submit_cpfs_dataflow（handler 识别 fs/bucket 走向导分支）。
+    """
+    fs_options = fs_options or []
+    bucket_options = bucket_options or []
+    intro = ("**阿里 CPFS ↔ OSS**：选操作、CPFS 文件系统、OSS 桶（同地区），填目录/前缀 → 解析预览。\n"
+             "> OSS 桶下拉来自已发现的 CPFS↔OSS 绑定；下拉为空可点「🔄 刷新资源」或直接文本输入。")
     form_elems = [
-        {"tag": "select_static", "name": "cloud", "required": False,
-         "placeholder": _pt("选择云平台（默认阿里）"), "options": _cloud_options()},
-        region_elem,
-        {"tag": "input", "name": "source", "label": _pt("源地址"), "required": True,
-         "placeholder": _pt("阿里 /cpfs/cwr/label/ 或 oss://bk/p/；火山 vepfs://fs/label/ 或 tos://bk/p/")},
-        {"tag": "input", "name": "dest", "label": _pt("目的地址"), "required": True,
-         "placeholder": _pt("阿里 oss://bk/wuji_il/ 或 /cpfs/cwr/label/；火山 tos://bk/p/ 或 vepfs://fs/label/")},
+        {"tag": "select_static", "name": "operation", "required": False,
+         "placeholder": _pt("操作（默认沉降）"), "options": _op_options_ali()},
+        _sel_or_input("fs", fs_options, "CPFS 文件系统（cpfs-...@region）", "选择 CPFS 文件系统"),
+        {"tag": "input", "name": "sub_path", "label": _pt("CPFS 目录"), "required": True,
+         "placeholder": _pt("如 /cwr/label/")},
+        _sel_or_input("bucket", bucket_options, "OSS 桶（bucket@region）", "选择 OSS 桶"),
+        {"tag": "input", "name": "oss_prefix", "label": _pt("OSS 前缀"), "required": False,
+         "placeholder": _pt("如 wuji_il/（可空）")},
         {"tag": "select_static", "name": "same_name", "required": False,
-         "placeholder": _pt("同名策略（默认跳过；仅火山生效）"), "options": _same_name_options()},
+         "placeholder": _pt("同名策略（默认跳过）"), "options": _same_name_options()},
         {"tag": "button", "text": _pt("➡️ 解析预览"), "type": "primary",
          "form_action_type": "submit", "name": "submit",
          "behaviors": [{"type": "callback", "value": {"action": "submit_cpfs_dataflow"}}]},
@@ -68,10 +98,13 @@ def entry_card(region_options=None):
     return {
         "schema": "2.0",
         "config": {"wide_screen_mode": True},
-        "header": {"title": _pt("\U0001f504 CPFS 数据预热 / 沉降"), "template": "blue"},
+        "header": {"title": _pt("\U0001f504 阿里 CPFS↔OSS 向导"), "template": "blue"},
         "body": {"elements": [
             {"tag": "markdown", "content": intro},
-            {"tag": "form", "name": "cpfs_entry", "elements": form_elems},
+            {"tag": "form", "name": "cpfs_guided", "elements": form_elems},
+            {"tag": "hr"},
+            {"tag": "button", "text": _pt("🔄 刷新资源"), "type": "default",
+             "behaviors": [{"type": "callback", "value": {"action": "refresh_cpfs_options"}}]},
         ]},
     }
 
