@@ -62,7 +62,10 @@ def test_build_html_top10_and_collapse():
     assert 'http-equiv="refresh"' in html
     assert "展开其余 5 人" in html          # 15 - 10
     assert "北京" in html and "u0" in html
-    assert "token=TK" in html
+    assert "TK" not in html                 # token 绝不写进页面正文
+    assert "立即刷新" in html               # 手动刷新按钮
+    assert "共 15 人" in html               # 标题按实际人数
+    assert "justify-content:center" in html  # 居中
 
 
 def test_dist_url_and_summary_card(monkeypatch):

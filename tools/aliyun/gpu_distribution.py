@@ -212,11 +212,13 @@ def _by_type_str(u):
 
 
 def build_html(g: dict, token: str = "", refresh_secs: int = 30) -> str:
-    """自动刷新的实时卡分布页面。前10用户直接列，其余折叠在 <details> 里。"""
+    """自动刷新的实时卡分布页面（居中）。前10用户直接列，其余折叠。含手动刷新按钮。
+
+    注意：token 不写进页面正文（避免暴露）；手动刷新按钮用 JS 从地址栏取 token 发 refresh=1 请求。
+    """
     e = _html.escape
     regions = g.get("regions", [])
     users = g.get("users", [])
-    # 地区×卡型 表
     rrows = []
     for r in regions:
         pct = r["rate"]
@@ -224,56 +226,68 @@ def build_html(g: dict, token: str = "", refresh_secs: int = 30) -> str:
                f'<span>{r["used"]}/{r["total"]}（{pct:.0f}%）</span></div>')
         rrows.append(f'<tr><td>{e(r["region_name"])}</td><td class="t">{e(r["gpu_name"])}</td>'
                      f'<td>{bar}</td><td class="n">{r["free"]}</td></tr>')
-    # 用户表：前10 + 折叠
+
     def urow(i, u):
         return (f'<tr><td class="n">{i}</td><td>{e(u["name"])}</td>'
                 f'<td class="n b">{u["total"]}</td><td class="t">{e(_by_type_str(u))}</td></tr>')
-    top = users[:10]
-    rest = users[10:]
+
+    n = g.get("user_count", len(users))
+    top, rest = users[:10], users[10:]
     top_html = "".join(urow(i, u) for i, u in enumerate(top, 1))
     rest_html = ""
     if rest:
         body = "".join(urow(i, u) for i, u in enumerate(rest, 11))
         rest_html = (f'<details><summary>展开其余 {len(rest)} 人</summary>'
                      f'<table class="tbl"><tbody>{body}</tbody></table></details>')
-    tok = f"?token={e(token)}" if token else ""
+    # 手动刷新：读地址栏 token，请求 refresh=1 强制重采，再刷新当前页（不把 token 写进正文）
+    refresh_js = ("const u=new URL(location.href);u.searchParams.set('refresh','1');"
+                  "this.textContent='⏳ 采集中…';fetch(u).then(()=>location.reload())"
+                  ".catch(()=>location.reload())")
     return f"""<!doctype html><html lang="zh"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="{refresh_secs}">
 <title>GPU 卡分布</title>
 <style>
 :root{{color-scheme:light dark}}
-body{{font-family:-apple-system,'Segoe UI',Roboto,'PingFang SC',sans-serif;margin:0;padding:16px;background:#f6f7f9;color:#1f2329}}
-h1{{font-size:18px;margin:0 0 4px}} .sub{{color:#8a919f;font-size:12px;margin-bottom:16px}}
-h2{{font-size:15px;margin:20px 0 8px}}
-.card{{background:#fff;border-radius:10px;padding:14px 16px;box-shadow:0 1px 4px rgba(0,0,0,.06);max-width:820px}}
+*{{box-sizing:border-box}}
+body{{font-family:-apple-system,'Segoe UI',Roboto,'PingFang SC',sans-serif;margin:0;padding:24px 16px;
+  background:#f6f7f9;color:#1f2329;display:flex;justify-content:center;align-items:flex-start;min-height:100vh}}
+.card{{background:#fff;border-radius:12px;padding:20px 24px;box-shadow:0 2px 12px rgba(0,0,0,.08);
+  width:100%;max-width:960px}}
+.hd{{display:flex;align-items:center;justify-content:space-between;gap:12px}}
+h1{{font-size:19px;margin:0}} .sub{{color:#8a919f;font-size:12px;margin:4px 0 14px}}
+h2{{font-size:15px;margin:22px 0 8px}}
+button.refresh{{background:#3370ff;color:#fff;border:0;border-radius:7px;padding:8px 14px;font-size:13px;
+  cursor:pointer}} button.refresh:hover{{background:#245bdb}}
 table.tbl{{width:100%;border-collapse:collapse;font-size:14px}}
-.tbl th,.tbl td{{padding:7px 8px;border-bottom:1px solid #eef0f3;text-align:left}}
+.tbl th,.tbl td{{padding:8px 10px;border-bottom:1px solid #eef0f3;text-align:left}}
 .tbl th{{color:#8a919f;font-weight:600;font-size:12px}}
 td.n{{text-align:right;font-variant-numeric:tabular-nums}} td.b{{font-weight:700}} td.t{{color:#3370ff}}
-.bar{{position:relative;height:20px;background:#eef0f3;border-radius:5px;overflow:hidden;min-width:160px}}
+.bar{{position:relative;height:22px;background:#eef0f3;border-radius:5px;overflow:hidden;min-width:180px}}
 .bar .fill{{position:absolute;left:0;top:0;bottom:0;background:linear-gradient(90deg,#3370ff,#5b8cff)}}
-.bar span{{position:relative;z-index:1;font-size:12px;line-height:20px;padding-left:8px;color:#1f2329;mix-blend-mode:difference;filter:invert(1)}}
+.bar span{{position:relative;z-index:1;font-size:12px;line-height:22px;padding-left:8px;font-weight:600}}
 details{{margin-top:8px}} summary{{cursor:pointer;color:#3370ff;font-size:13px;padding:6px 0}}
-.kpi{{display:flex;gap:20px;margin:6px 0 2px}} .kpi div{{font-size:13px;color:#4e5969}} .kpi b{{font-size:18px;color:#1f2329}}
+.kpi{{display:flex;gap:28px;flex-wrap:wrap;margin:8px 0 2px}}
+.kpi div{{font-size:13px;color:#4e5969}} .kpi b{{font-size:20px;color:#1f2329}}
 </style></head><body>
 <div class="card">
-<h1>🧮 GPU 卡分布（实时）</h1>
+<div class="hd"><h1>🧮 GPU 卡分布（实时）</h1>
+<button class="refresh" onclick="{refresh_js}">🔄 立即刷新</button></div>
 <div class="sub">数据时间 {e(_fmt_ts(g.get("gathered_at")))} · 每 {refresh_secs}s 自动刷新</div>
 <div class="kpi"><div>总卡数<br><b>{g.get("total_cards",0)}</b></div>
 <div>已分配<br><b>{g.get("used_cards",0)}</b></div>
 <div>在算<br><b>{g.get("active_cards",0)}</b></div>
-<div>在用人数<br><b>{g.get("user_count",0)}</b></div></div>
+<div>在用人数<br><b>{n}</b></div></div>
 
 <h2>各地区 · 卡型（已用/总）</h2>
 <table class="tbl"><thead><tr><th>地区</th><th>卡型</th><th>已用/总</th><th>空闲</th></tr></thead>
 <tbody>{''.join(rrows) or '<tr><td colspan=4>无数据</td></tr>'}</tbody></table>
 
-<h2>用户卡用量（前 10）</h2>
+<h2>用户卡用量（在算 · 共 {n} 人）</h2>
 <table class="tbl"><thead><tr><th>#</th><th>用户</th><th>卡数</th><th>卡型</th></tr></thead>
-<tbody>{top_html or '<tr><td colspan=4>无在算任务</td></tr>'}</tbody></table>
+<tbody>{top_html or '<tr><td colspan=4>当前无在算任务</td></tr>'}</tbody></table>
 {rest_html}
-<div class="sub" style="margin-top:16px">刷新地址：/gpu/distribution{tok}</div>
+<div class="sub" style="margin-top:18px">数据每 90 秒后台更新；点「🔄 立即刷新」强制重采。</div>
 </div></body></html>"""
 
 
