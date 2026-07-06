@@ -266,9 +266,19 @@ def submit_cross_job(*, job_name: str,
                                 region=dest_region, role=settings.TRANSFER_OSS_ROLE,
                                 internal=dest_internal)
         verify_address(client, dest_addr)
-        create_job(client, name=job_name, src_address=src_addr, dest_address=dest_addr,
-                   transfer_mode=transfer_mode, overwrite_mode=overwrite_mode)
-        launch_job(client, job_name)
+        # 幂等：同源+目的地址已有任务（ImportJobRepeatedOnSameAddress 409）→ 复用，直接返回轮询即可，
+        # 不再重复建/启动（重试或与其它触发撞车时会命中）。
+        try:
+            create_job(client, name=job_name, src_address=src_addr, dest_address=dest_addr,
+                       transfer_mode=transfer_mode, overwrite_mode=overwrite_mode)
+            launch_job(client, job_name)
+        except Exception as ce:
+            msg = str(ce)
+            if any(k in msg for k in ("ImportJobRepeated", "Already has job", "already has job",
+                                      "JobExist", "AlreadyExist")):
+                logger.info("[MGW] 同源目的已有迁移任务，复用继续轮询 job=%s", job_name)
+                return job_name
+            raise
         logger.info("[MGW] 迁移任务已提交并启动 job=%s %s/%s → %s/%s",
                     job_name, src_bucket, src_prefix, dest_bucket, dest_prefix)
         return job_name

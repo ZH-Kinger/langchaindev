@@ -76,6 +76,23 @@ def test_tos_source_branch_uses_tos_vendor(monkeypatch):
     assert bac["region"] == "cn-shanghai"          # 不加 oss- 前缀
 
 
+def test_mgw_submit_idempotent_on_repeated_job(monkeypatch):
+    """同源+目的已有任务（ImportJobRepeated 409）→ 幂等返回 job_name，不抛错。"""
+    monkeypatch.setattr(engine_mgw, "get_mgw_client", lambda oid="": object())
+    monkeypatch.setattr(engine_mgw.settings, "MGW_USER_ID", "uid")
+    monkeypatch.setattr(engine_mgw.settings, "TRANSFER_OSS_ROLE", "role")
+    monkeypatch.setattr(engine_mgw, "create_oss_source_address", lambda *a, **k: None)
+    monkeypatch.setattr(engine_mgw, "verify_address", lambda *a, **k: True)
+    monkeypatch.setattr(engine_mgw, "create_oss_dest_address", lambda *a, **k: None)
+    def boom(*a, **k):
+        raise RuntimeError("ImportJobRepeatedOnSameAddress Already has job on the same srcAddress")
+    monkeypatch.setattr(engine_mgw, "create_job", boom)
+    ref = engine_mgw.submit_cross_job(
+        job_name="j1", src_bucket="a", src_prefix="p/", src_scheme="oss", src_region="cn-beijing",
+        dest_bucket="b", dest_prefix="p/", dest_region="cn-beijing")
+    assert ref == "j1"
+
+
 def test_tos_oss_source_branch_default(monkeypatch):
     cap = {}
     fake = _FakeDms(cap)
