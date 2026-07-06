@@ -84,15 +84,15 @@ def test_gather_timeseries(monkeypatch):
     def fake_rs(expr, *a, **k):
         if "DUTY_CYCLE" in expr:
             return {1000.0: 70.0, 1600.0: 72.0}
-        if "TENSORTFLOPS_USED" in expr:              # per-region MFU（/峰值*100 在 PromQL 里算，mock 直接给结果）
-            return {1000.0: 20.0, 1600.0: 20.0}
+        if "SM_UTIL" in expr:                        # per-region 算力利用率（SM 繁忙%）
+            return {1000.0: 40.0, 1600.0: 42.0}
         if "ACCELERATOR_REQUEST" in expr:            # 已分配
             return {1000.0: 20.0, 1600.0: 22.0}
         if "ACCELERATOR_TOTAL" in expr:              # 总
             return {1000.0: 64.0, 1600.0: 64.0}
         if expr.startswith("count("):                # 在算
             return {1000.0: 16.0, 1600.0: 16.0}
-        if "avg(" in expr and "PIP_TENSOR_ACTIVE" in expr:
+        if "avg(" in expr and "PIP_TENSOR_ACTIVE" in expr:  # per-region 张量核活跃%
             return {1000.0: 1.8, 1600.0: 1.9}
         return {}
 
@@ -103,9 +103,11 @@ def test_gather_timeseries(monkeypatch):
     # 卡数三线：已分配/在算/空闲(=总-已分配)
     assert ts["cards"]["allocated"][0] == 20 and ts["cards"]["active"][0] == 16
     assert ts["cards"]["idle"][0] == 44          # 64 - 20
-    # 每地区一条 MFU 线，值 = avg(张量TFLOPS)/峰值*100 = 29.6/148*100 = 20
-    assert len(ts["mfu"]) == 2 and all("H20" in k for k in ts["mfu"])
-    assert abs(list(ts["mfu"].values())[0][0] - 20.0) < 0.1
+    # 每地区一条 算力利用率(SM_UTIL) 线；每地区一条 张量核活跃 线
+    assert len(ts["sm_region"]) == 2 and all("H20" in k for k in ts["sm_region"])
+    assert abs(list(ts["sm_region"].values())[0][0] - 40.0) < 0.1
+    assert len(ts["tensor_region"]) == 2
+    assert abs(list(ts["tensor_region"].values())[0][0] - 1.8) < 0.1
 
 
 def test_build_html_with_charts():
@@ -114,16 +116,18 @@ def test_build_html_with_charts():
          "regions": [{"region_name": "北京", "gpu_name": "H20", "total": 64, "used": 20, "free": 44, "rate": 31.2}],
          "users": [{"name": "张三", "total": 20, "by_type": {"H20": 20}, "by_region": {}}],
          "total_cards": 64, "used_cards": 20, "active_cards": 20, "user_count": 1}
-    series = {"labels": ["10:00", "10:10"], "gpu_util": [70, 72], "tensor": [1.8, 1.9],
+    series = {"labels": ["10:00", "10:10"], "gpu_util": [70, 72],
+              "sm_region": {"北京·H20": [40, 42]}, "tensor_region": {"北京·H20": [1.8, 1.9]},
               "cards": {"allocated": [20, 22], "active": [16, 16], "idle": [44, 42]},
-              "mfu": {"北京·H20": [0.3, 0.3]}, "hours": 24}
+              "hours": 24}
     html = G.build_html(g, series, token="SECRET")
-    assert 'id="c_mfu"' in html and 'id="c_util"' in html and 'id="c_cards"' in html
+    assert 'id="c_sm"' in html and 'id="c_util"' in html and 'id="c_cards"' in html
+    assert 'id="c_tensor"' in html
     assert "chart.js" in html.lower()          # Chart.js CDN
     assert '已分配 / 在算 / 空闲' in html        # 卡数三线
     assert 'class="rg' in html and "3天" in html and "24h" in html   # 时间范围选择器
     assert "MFU 计算器" in html and 'id="m_p"' in html and "function calcMfu" in html  # 真MFU计算器
-    assert "张量核利用率" in html               # 原"MFU"图已诚实改名
+    assert "算力利用率（SM 繁忙%，按地区）" in html   # 头版换成 SM_UTIL 算力利用率
     assert "SECRET" not in html                # token 不入正文
     # 时间范围按钮改 data-h + addEventListener（无内联 onclick）
     assert "onclick=" not in html
@@ -132,7 +136,7 @@ def test_build_html_with_charts():
         assert f'data-h="{h}"' in html         # 5 个范围按钮各带 data-h
     # 无 series 时不渲染图表（渐进：仍出表格）
     html2 = G.build_html(g, None, token="SECRET")
-    assert 'id="c_mfu"' not in html2 and "北京" in html2
+    assert 'id="c_sm"' not in html2 and "北京" in html2
 
 
 def test_dist_url_and_summary_card(monkeypatch):
