@@ -168,18 +168,50 @@ def test_orch_submit_failure_sets_failed(monkeypatch):
 
 # ── 意图 + 卡片 ─────────────────────────────────────────────────────────────────
 
-def test_unified_entry_card_has_cloud_selector():
-    """统一「数据预热/沉降」卡含云平台(阿里/火山)下拉 + 源/目的/同名，submit=submit_cpfs_dataflow。"""
+def test_entry_card_cloud_picker():
+    """统一入口卡=两个云平台按钮（阿里/火山）。"""
     from core.cpfs_dataflow import cards
-    ec = cards.entry_card()
+    acts = set()
+    def _walk(o):
+        if isinstance(o, dict):
+            v = o.get("value")
+            if isinstance(v, dict) and v.get("action"):
+                acts.add(v["action"])
+            for x in o.values():
+                _walk(x)
+        elif isinstance(o, list):
+            for x in o:
+                _walk(x)
+    _walk(cards.entry_card())
+    assert {"pick_cloud_aliyun", "pick_cloud_volcano"} <= acts
+
+
+def test_vepfs_guided_card_dropdowns():
+    """火山向导卡：有 options → 下拉；提交 submit_vepfs_dataflow。"""
+    from core.vepfs_dataflow import cards
+    fs = [{"value": "vepfs-a@cn-shanghai", "text": "wuji（cn-shanghai）"}]
+    bk = [{"value": "bk@cn-shanghai", "text": "bk（cn-shanghai）"}]
+    ec = cards.guided_card(fs, bk)
     form = ec["body"]["elements"][1]["elements"]
     names = {e.get("name") for e in form}
-    assert {"cloud", "region", "source", "dest", "same_name"} <= names
-    cloud = next(e for e in form if e.get("name") == "cloud")
-    vals = {o["value"] for o in cloud["options"]}
-    assert vals == {"aliyun", "volcano"}
+    assert {"operation", "fs", "sub_path", "bucket", "tos_prefix", "same_name"} <= names
+    fs_el = next(e for e in form if e.get("name") == "fs")
+    assert fs_el["tag"] == "select_static"
     btn = [e for e in form if e.get("tag") == "button"][0]
-    assert btn["behaviors"][0]["value"]["action"] == "submit_cpfs_dataflow"
+    assert btn["behaviors"][0]["value"]["action"] == "submit_vepfs_dataflow"
+
+
+def test_vepfs_guided_plan_from_form(monkeypatch):
+    """向导 form_value（fs@region + bucket@region）→ 正确计划；跨地区报错。"""
+    from core.feishu_bot import actions
+    plan = actions._vepfs_guided_plan(
+        {"operation": "sink", "fs": "vepfs-a@cn-shanghai", "sub_path": "/label/",
+         "bucket": "bk@cn-shanghai", "tos_prefix": "arch/", "same_name": "skip"})
+    assert plan.fs_id == "vepfs-a" and plan.region == "cn-shanghai"
+    assert plan.operation == "sink" and plan.tos_bucket == "bk" and plan.tos_prefix == "arch/"
+    with pytest.raises(orch.DataflowPathError):
+        actions._vepfs_guided_plan({"fs": "vepfs-a@cn-shanghai", "bucket": "bk@cn-beijing",
+                                    "sub_path": "/x/"})
 
 
 def test_vepfs_keywords_open_unified_card():

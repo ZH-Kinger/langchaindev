@@ -559,20 +559,103 @@ def _cfg_cpfs_chat() -> str:
     return settings.CPFS_CHAT_ID or settings.FEISHU_CHAT_ID
 
 
-def _h_submit_cpfs_dataflow(action_val, open_id, chat_id, form_value):
-    """读取 云平台 + 地区 + 源/目的地址 → 后台解析计划，推确认卡。方向按地址类型自动判断。
+def _ali_dataflow_options(open_id: str = ""):
+    """阿里向导卡下拉项：CPFS 文件系统 + OSS 桶（来自 CPFS↔OSS 绑定发现）。失败/空则返回空列表→文本回退。"""
+    from core.cpfs_dataflow import discovery as d
+    fs_opts, bkt_opts, seen = [], [], set()
+    try:
+        for f in d.get_filesystems(open_id=open_id):
+            fid, region = f.get("fs_id"), f.get("region")
+            if fid:
+                fs_opts.append({"value": f"{fid}@{region}", "text": f"{fid}（{region}）"})
+    except Exception:
+        logger.warning("[CPFS] 发现 fs 失败", exc_info=True)
+    try:
+        for o in d.get_options(open_id=open_id):
+            b, region = o.get("oss_bucket"), o.get("region")
+            key = f"{b}@{region}"
+            if b and key not in seen:
+                seen.add(key)
+                bkt_opts.append({"value": key, "text": f"{b}（{region}）"})
+    except Exception:
+        logger.warning("[CPFS] 发现 OSS 桶失败", exc_info=True)
+    return fs_opts, bkt_opts
 
-    统一录入卡：云平台=火山 → 走 vePFS↔TOS 流程；否则（默认阿里）走 CPFS↔OSS 流程。
+
+def _cpfs_guided_plan(fv):
+    """向导卡（下拉 fs+桶）→ CPFS 计划。fs/bucket 值形如 `<id>@<region>`。"""
+    from core.cpfs_dataflow import orchestrator
+    op = (fv.get("operation") or "sink").strip()
+    fs_id, _, fs_region = (fv.get("fs") or "").strip().partition("@")
+    bucket, _, b_region = (fv.get("bucket") or "").strip().partition("@")
+    sub_path = (fv.get("sub_path") or "").strip()
+    prefix = (fv.get("oss_prefix") or "").strip()
+    region = fs_region or b_region or settings.CPFS_REGION
+    if not fs_id:
+        raise orchestrator.DataflowPathError("请选择 CPFS 文件系统")
+    if not bucket:
+        raise orchestrator.DataflowPathError("请选择 OSS 桶")
+    return orchestrator.make_plan(op, sub_path, f"oss://{bucket}/{prefix}", fs_id=fs_id, region=region)
+
+
+def _h_pick_cloud_aliyun(action_val, open_id, chat_id, form_value):
+    """入口卡点「阿里」→ 换成阿里 CPFS↔OSS 向导卡（下拉发现，失败回退文本）。"""
+    from core.cpfs_dataflow.cards import guided_card
+    fs_opts, bkt_opts = _ali_dataflow_options(open_id)
+    return {"card": {"type": "raw", "data": guided_card(fs_opts, bkt_opts)}}
+
+
+def _h_pick_cloud_volcano(action_val, open_id, chat_id, form_value):
+    """入口卡点「火山」→ 换成火山 vePFS↔TOS 向导卡（下拉发现）。"""
+    from core.vepfs_dataflow import discovery
+    from core.vepfs_dataflow.cards import guided_card
+    try:
+        fs_opts, bkt_opts = discovery.fs_options(), discovery.bucket_options()
+    except Exception:
+        logger.warning("[VEPFS] 发现失败", exc_info=True)
+        fs_opts, bkt_opts = [], []
+    return {"card": {"type": "raw", "data": guided_card(fs_opts, bkt_opts)}}
+
+
+def _h_refresh_cpfs_options(action_val, open_id, chat_id, form_value):
+    from core.cpfs_dataflow import discovery as d
+    from core.cpfs_dataflow.cards import guided_card
+    try:
+        d.refresh(open_id=open_id)
+    except Exception:
+        logger.warning("[CPFS] 刷新发现失败", exc_info=True)
+    fs_opts, bkt_opts = _ali_dataflow_options(open_id)
+    return {"toast": {"type": "success", "content": "已刷新资源"},
+            "card": {"type": "raw", "data": guided_card(fs_opts, bkt_opts)}}
+
+
+def _h_refresh_vepfs_options(action_val, open_id, chat_id, form_value):
+    from core.vepfs_dataflow import discovery
+    from core.vepfs_dataflow.cards import guided_card
+    try:
+        data = discovery.refresh()
+    except Exception:
+        logger.warning("[VEPFS] 刷新发现失败", exc_info=True)
+        data = {"fs": [], "buckets": []}
+    return {"toast": {"type": "success", "content": "已刷新资源"},
+            "card": {"type": "raw", "data": guided_card(data.get("fs"), data.get("buckets"))}}
+
+
+def _h_submit_cpfs_dataflow(action_val, open_id, chat_id, form_value):
+    """向导卡（下拉 fs+桶）或地址卡 → 后台解析计划，推确认卡。
+
+    云平台=火山 → 委派 vePFS 流程；否则走 CPFS↔OSS。
     """
     fv = form_value or {}
     cloud = (fv.get("cloud") or "").strip().lower()
     if cloud in ("volcano", "火山", "vepfs", "tos"):
         return _h_submit_vepfs_dataflow(action_val, open_id, chat_id, form_value)
+    guided = bool(fv.get("fs") or fv.get("bucket"))
     region = (fv.get("region") or "").strip()
     source = (fv.get("source") or "").strip()
     dest = (fv.get("dest") or "").strip()
-    if not (region and source and dest):
-        return {"toast": {"type": "error", "content": "请选地区并填写源、目的地址"}}
+    if not guided and not (region and source and dest):
+        return {"toast": {"type": "error", "content": "请选文件系统与 OSS 桶（或填源、目的地址）"}}
 
     def _do_prepare() -> None:
         from core.dsw_scheduler import _send_card, _send_text
@@ -580,7 +663,10 @@ def _h_submit_cpfs_dataflow(action_val, open_id, chat_id, form_value):
         from core.cpfs_dataflow.cards import confirm_card
         from core.cpfs_dataflow.orchestrator import DataflowPathError
         try:
-            plan = orchestrator.plan_from_addresses(region, source, dest, open_id=open_id)
+            if guided:
+                plan = _cpfs_guided_plan(fv)
+            else:
+                plan = orchestrator.plan_from_addresses(region, source, dest, open_id=open_id)
             job = orchestrator.create_job_record(plan, open_id=open_id)
             # 幂等：飞书对"解析预览"回调也可能重投递/并发 → 会推多张一样的确认卡。
             # 按 job_id（op/fs/dir/oss/当天 的 hash，两次解析同值）原子去重，只推一张。
@@ -677,15 +763,35 @@ def _cfg_vepfs_chat() -> str:
     return settings.VEPFS_CHAT_ID or settings.FEISHU_CHAT_ID
 
 
+def _vepfs_guided_plan(fv):
+    """向导卡（下拉 fs+桶）→ vePFS 计划。fs/bucket 值形如 `<id>@<region>`。"""
+    from core.vepfs_dataflow import orchestrator
+    op = (fv.get("operation") or "sink").strip()
+    fs_id, _, fs_region = (fv.get("fs") or "").strip().partition("@")
+    bucket, _, b_region = (fv.get("bucket") or "").strip().partition("@")
+    sub_path = (fv.get("sub_path") or "").strip()
+    prefix = (fv.get("tos_prefix") or "").strip()
+    region = fs_region or b_region or settings.VEPFS_REGION
+    if not fs_id:
+        raise orchestrator.DataflowPathError("请选择 vePFS 文件系统")
+    if not bucket:
+        raise orchestrator.DataflowPathError("请选择 TOS 桶")
+    if fs_region and b_region and fs_region != b_region:
+        raise orchestrator.DataflowPathError(f"vePFS（{fs_region}）与 TOS（{b_region}）须同地区")
+    return orchestrator.make_plan(op, sub_path, f"tos://{bucket}/{prefix}",
+                                  fs_id=fs_id, region=region, same_name=fv.get("same_name", ""))
+
+
 def _h_submit_vepfs_dataflow(action_val, open_id, chat_id, form_value):
-    """读取 地区 + 源/目的地址 + 同名策略 → 后台解析计划，推确认卡。方向按地址类型自动判断。"""
+    """向导卡（下拉 fs+桶）或地址卡 → 后台解析计划，推确认卡。"""
     fv = form_value or {}
+    guided = bool(fv.get("fs") or fv.get("bucket"))
     region = (fv.get("region") or "").strip()
     source = (fv.get("source") or "").strip()
     dest = (fv.get("dest") or "").strip()
     same_name = (fv.get("same_name") or "").strip()
-    if not (region and source and dest):
-        return {"toast": {"type": "error", "content": "请选地区并填写源、目的地址"}}
+    if not guided and not (region and source and dest):
+        return {"toast": {"type": "error", "content": "请选文件系统与 TOS 桶（或填源、目的地址）"}}
 
     def _do_prepare() -> None:
         from core.dsw_scheduler import _send_card, _send_text
@@ -693,7 +799,10 @@ def _h_submit_vepfs_dataflow(action_val, open_id, chat_id, form_value):
         from core.vepfs_dataflow.cards import confirm_card
         from core.vepfs_dataflow.orchestrator import DataflowPathError
         try:
-            plan = orchestrator.plan_from_addresses(region, source, dest, same_name=same_name)
+            if guided:
+                plan = _vepfs_guided_plan(fv)
+            else:
+                plan = orchestrator.plan_from_addresses(region, source, dest, same_name=same_name)
             job = orchestrator.create_job_record(plan, open_id=open_id)
             try:
                 from utils.redis_client import get_redis
@@ -950,6 +1059,10 @@ _ACTION_HANDLERS = {
     "confirm_transfer":   _h_confirm_transfer,
     "query_transfer_progress": _h_query_transfer_progress,
     "retry_transfer":     _h_retry_transfer,
+    "pick_cloud_aliyun":     _h_pick_cloud_aliyun,
+    "pick_cloud_volcano":    _h_pick_cloud_volcano,
+    "refresh_cpfs_options":  _h_refresh_cpfs_options,
+    "refresh_vepfs_options": _h_refresh_vepfs_options,
     "submit_cpfs_dataflow":  _h_submit_cpfs_dataflow,
     "confirm_cpfs_dataflow": _h_confirm_cpfs_dataflow,
     "query_cpfs_progress":   _h_query_cpfs_progress,
