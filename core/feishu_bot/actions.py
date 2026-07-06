@@ -707,6 +707,108 @@ def _h_query_progress_by_id(action_val, open_id, chat_id, form_value):
     return {"toast": {"type": "error", "content": "任务 ID 需以 cpfs- 或 tr- 开头"}}
 
 
+# ── 桶间迁移（同云一次性搬运）──────────────────────────────────────────────────
+
+def _cfg_bkt_chat() -> str:
+    return settings.TRANSFER_CHAT_ID or settings.FEISHU_CHAT_ID
+
+
+def _h_submit_bucket_transfer(action_val, open_id, chat_id, form_value):
+    """录入卡提交 → 后台解析计划、推确认卡。"""
+    fv = form_value or {}
+    source = (fv.get("source") or "").strip()
+    dest = (fv.get("dest") or "").strip()
+    same_name = (fv.get("same_name") or "").strip()
+    if not (source and dest):
+        return {"toast": {"type": "error", "content": "请填写源、目的地址"}}
+
+    def _do() -> None:
+        from core.dsw_scheduler import _send_card, _send_text
+        from core.bucket_transfer import orchestrator, paths
+        from core.bucket_transfer.cards import confirm_card
+        try:
+            plan = orchestrator.make_plan(source, dest)
+            job = orchestrator.create_job_record(plan, same_name=same_name, open_id=open_id)
+            try:
+                from utils.redis_client import get_redis
+                if not get_redis().set(f"bkt:confirmcard:{job['job_id']}", 1, nx=True, ex=30):
+                    return
+            except Exception:
+                pass
+            _send_card(open_id, _cfg_bkt_chat(), confirm_card(job))
+        except paths.PathError as e:
+            _send_text(open_id, _cfg_bkt_chat(), f"❌ {e}")
+        except Exception as e:
+            logger.error("[BKT] prepare failed", exc_info=True)
+            _send_text(open_id, _cfg_bkt_chat(), f"❌ 请求处理失败：{e}")
+
+    threading.Thread(target=_do, daemon=True).start()
+    return {"toast": {"type": "success", "content": "正在解析，稍候推送确认卡"}}
+
+
+def _h_confirm_bucket_transfer(action_val, open_id, chat_id, form_value):
+    """确认下发 → 后台跑迁移，推进度/结果卡。"""
+    job_id = action_val.get("job_id", "") if isinstance(action_val, dict) else ""
+    if not job_id:
+        return {"toast": {"type": "error", "content": "缺少任务 ID"}}
+    from core.bucket_transfer import orchestrator
+    job = orchestrator.get_job(job_id)
+    if not job:
+        return {"toast": {"type": "error", "content": "任务不存在或已过期"}}
+    if job["stage"] not in (orchestrator.STAGE_NEW, orchestrator.STAGE_FAILED):
+        return {"toast": {"type": "info", "content": f"任务已在 {job['stage']}，无需重复"}}
+    try:
+        from utils.redis_client import get_redis
+        if not get_redis().set(f"bkt:launch:{job_id}", 1, nx=True, ex=30):
+            return {"toast": {"type": "info", "content": "任务已下发，请勿重复点击"}}
+    except Exception:
+        pass
+    job["stage"] = orchestrator.STAGE_RUNNING
+    orchestrator._save(job)
+
+    def _run() -> None:
+        from core.dsw_scheduler import _send_card, _send_text
+        from core.bucket_transfer import orchestrator as o
+        from core.bucket_transfer.cards import result_card, progress_card
+        try:
+            def _upd(j):
+                card = result_card(j) if j["stage"] in (o.STAGE_DONE, o.STAGE_FAILED) else progress_card(j)
+                _send_card("", _cfg_bkt_chat(), card)
+            o.run_to_completion(job, on_update=_upd)
+        except Exception as e:
+            logger.error("[BKT] execute failed job=%s", job_id, exc_info=True)
+            _send_text("", _cfg_bkt_chat(), f"❌ 任务 {job_id} 失败：{e}")
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"toast": {"type": "success", "content": f"已下发，任务 {job_id}；进度卡稍后推送"}}
+
+
+def _h_query_bucket_transfer(action_val, open_id, chat_id, form_value):
+    """点“查询进度”：原地刷成进度/结果卡（均 1.0，原地替换安全）。"""
+    job_id = action_val.get("job_id", "") if isinstance(action_val, dict) else ""
+    from core.bucket_transfer import orchestrator
+    from core.bucket_transfer.cards import progress_card, result_card
+    job = orchestrator.get_job(job_id) if job_id else None
+    if not job:
+        return {"toast": {"type": "error", "content": "任务不存在或已过期"}}
+    card = (result_card(job) if job["stage"] in (orchestrator.STAGE_DONE, orchestrator.STAGE_FAILED)
+            else progress_card(job))
+    return {"toast": {"type": "success", "content": f"当前阶段：{job['stage']}"},
+            "card": {"type": "raw", "data": card}}
+
+
+def _h_retry_bucket_transfer(action_val, open_id, chat_id, form_value):
+    job_id = action_val.get("job_id", "") if isinstance(action_val, dict) else ""
+    from core.bucket_transfer import orchestrator
+    job = orchestrator.get_job(job_id) if job_id else None
+    if not job:
+        return {"toast": {"type": "error", "content": "任务不存在或已过期"}}
+    job["stage"] = orchestrator.STAGE_NEW
+    job["error"] = ""
+    orchestrator._save(job)
+    return _h_confirm_bucket_transfer({"job_id": job_id}, open_id, chat_id, form_value)
+
+
 _ACTION_HANDLERS = {
     "mfu_region":         _h_mfu_region,
     "submit_ak_register": _h_submit_ak_register,
@@ -731,6 +833,10 @@ _ACTION_HANDLERS = {
     "query_cpfs_progress":   _h_query_cpfs_progress,
     "retry_cpfs_dataflow":   _h_retry_cpfs_dataflow,
     "query_progress_by_id":  _h_query_progress_by_id,
+    "submit_bucket_transfer":  _h_submit_bucket_transfer,
+    "confirm_bucket_transfer": _h_confirm_bucket_transfer,
+    "query_bucket_transfer":   _h_query_bucket_transfer,
+    "retry_bucket_transfer":   _h_retry_bucket_transfer,
 }
 
 

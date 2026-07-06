@@ -206,6 +206,11 @@ class Config:
         '"oss://wuji-bucket-hangzhou":"wuji-egocentric-data"}',
     )
 
+    # 桶间迁移（同云一次性搬运：阿里 OSS→OSS / 火山 TOS→TOS，复用上面的迁移引擎）
+    BUCKET_TRANSFER_ENABLED = os.environ.get("BUCKET_TRANSFER_ENABLED", "false").lower() == "true"
+    # 阿里源 OSS 的 RAM 角色名（需含读权限）。留空回退 TRANSFER_OSS_ROLE（需该角色同时有源读+目的写）。
+    BUCKET_TRANSFER_OSS_SRC_ROLE = os.environ.get("BUCKET_TRANSFER_OSS_SRC_ROLE", "")
+
     # CPFS/NAS 数据预热(Import OSS→CPFS) + 沉降(Export CPFS→OSS)：阿里 NAS DataFlow
     # 只查现有 DataFlow + 提交任务，不创建/删除绑定。凭证默认走全局主账号 AK（同 MGW）。
     CPFS_DATAFLOW_ENABLED   = os.environ.get("CPFS_DATAFLOW_ENABLED", "false").lower() == "true"

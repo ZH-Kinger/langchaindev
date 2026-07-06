@@ -159,6 +159,17 @@ Migrates object-storage data across clouds from a single user-given path. The ch
 - **Config**: `TRANSFER_ENABLED`, `MGW_ENDPOINT`/`MGW_REGION`/`MGW_USER_ID`, `TRANSFER_OSS_ROLE` (RAM role for OSS dest), `TRANSFER_MODE_DEFAULT`/`TRANSFER_OVERWRITE_DEFAULT`, `TRANSFER_APPROVAL_TB`, `TRANSFER_BUCKET_MAP`. **Before go-live, fill real `wuji_il` values**: TOS domain/bucket, OSS rolename/bucket/region, transfer/overwrite modes, and the bucket map.
 - **Phase 3 SINKING is wired for 阿里 CPFS** via `core/cpfs_dataflow.engine_nas` (NAS DataFlow Export): `run_to_completion` runs `start_sinking`→`poll_sink_once` (CPFS→OSS sink_target) before `start_cross`. `vepfs→tos` sink (火山) still unimplemented (`start_sinking` fails with a clear message).
 
+### Bucket Transfer — 同云桶间迁移 (`core/bucket_transfer/`)
+
+一次性搬运**同云**对象存储：阿里 `oss://→oss://`、火山 `tos://→tos://`（同账号、跨 region/桶）。与跨云 `core/transfer/` 完全独立（新卡片/意图/编排/job 命名空间），只**加法式复用**其引擎：`engine_mgw.submit_cross_job(src_scheme="oss")`（新增 `create_oss_source_address`，源用 RAM role）+ `engine_tos.submit_cross_job(src_is_tos=True)`（DMS 源 vendor 切 `StorageVendorTOS`+`tos-<region>.volces.com`）。混合 scheme（oss↔tos）由 `paths.build_plan` 拒绝并提示改用跨云迁移。
+
+- **云别由 scheme 推断**：oss→oss=阿里(engine=mgw) / tos→tos=火山(engine=dms)。
+- **region**：OSS 用 `tools/aliyun/oss.detect_bucket_region`（GetBucketLocation）自动探测源/目的，跨 region 源走公网 domain；TOS 从 `tos://` 无法带出 → 回退 `TRANSFER_TOS_REGION`/`TOS_REGION`。
+- **火山落盘限制**：DMS 目的只到桶级，对象保持源 key 原样落入目的桶（同 OSS→TOS，见上）。
+- **三入口**：飞书发「桶间迁移」→ `cards.entry_card`（源/目的/同名策略）→ `_h_submit_bucket_transfer`→`confirm_card`→`_h_confirm_bucket_transfer` 后台 `run_to_completion` 推进度/结果（`query_bucket_transfer`/`retry_bucket_transfer` 按钮）。Redis `bkt:transfer:job:{id}`。
+- **Config**：`BUCKET_TRANSFER_ENABLED`、`BUCKET_TRANSFER_OSS_SRC_ROLE`（阿里源 OSS 读权限 role，留空回退 `TRANSFER_OSS_ROLE`）；复用 `MGW_USER_ID`/`TOS_ACCESS_KEY`。
+- **⚠️ 待真机验证**：火山 `engine_tos.SOURCE_VENDOR_TOS`（`StorageVendorTOS`）枚举串——上线前反查一个已有 TOS→TOS 任务或 dry-run 试建确认（同当初反查 OSS 金标准 task 552548）。
+
 ### CPFS/NAS DataFlow — 数据预热 / 沉降 (`core/cpfs_dataflow/`)
 
 Aliyun NAS DataFlow (product `NAS`, version `2017-06-26`, RPC): **预热**(`TaskAction=Import`, OSS→CPFS, 加载) and **沉降**(`TaskAction=Export`, CPFS→OSS, 刷回). See `docs/aliyun_cpfs_oss_dataflow_api.md`.

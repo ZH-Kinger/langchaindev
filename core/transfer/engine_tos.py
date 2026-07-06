@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 OVERWRITE_POLICY = "None"
 SOURCE_TYPE      = "StorageTypeObject"
 SOURCE_VENDOR    = "StorageVendorOSS"     # 阿里 OSS 源的 vendor 枚举（真机确认）
+SOURCE_VENDOR_TOS = "StorageVendorTOS"    # 火山 TOS 源（桶间 TOS→TOS）；⚠️枚举串待真机反查/dry-run 确认
 STORAGE_CLASS    = "InheritSource"        # 保持原存储属性
 
 # 任务状态（真机实测全枚举）：
@@ -67,18 +68,28 @@ def create_migrate_task(*, task_name: str,
                         src_bucket: str, src_prefix: str, src_region: str,
                         src_access_id: str, src_access_secret: str,
                         dest_bucket: str, dest_region: str,
-                        overwrite_policy: str = OVERWRITE_POLICY) -> int:
-    """建 OSS→TOS 迁移任务，返回 task_id。源=阿里 OSS，目的=火山 TOS。
+                        overwrite_policy: str = OVERWRITE_POLICY,
+                        src_is_tos: bool = False) -> int:
+    """建迁移任务，返回 task_id。目的=火山 TOS。
 
-    源前缀走 prefix_list（列表，is_excluded=False 表示"仅迁这些前缀"）。
-    目的用火山账号 AK/SK（与 client 同一把）。同名一律跳过（OVERWRITE_POLICY=None）。
+    src_is_tos=False（默认）：源=阿里 OSS（跨云 OSS→TOS），endpoint=oss-<region>.aliyuncs.com，
+        region=oss-<region>，源 AK/SK 用传入的阿里凭证。
+    src_is_tos=True：源=火山 TOS（桶间 TOS→TOS，同账号），vendor=StorageVendorTOS，
+        endpoint=tos-<region>.volces.com，region=<region>（不加 oss- 前缀），源 AK/SK 用火山凭证。
+    源前缀走 prefix_list（列表，is_excluded=False 表示"仅迁这些前缀"）。同名一律跳过（None）。
     """
     api, dms1 = _api(dest_region)
-    oss_endpoint = f"https://oss-{src_region}.aliyuncs.com"
-    oss_region = f"oss-{src_region}" if not src_region.startswith("oss-") else src_region
+    if src_is_tos:
+        src_vendor = SOURCE_VENDOR_TOS
+        src_endpoint = f"https://tos-{src_region}.volces.com"
+        src_reg = src_region
+    else:
+        src_vendor = SOURCE_VENDOR
+        src_endpoint = f"https://oss-{src_region}.aliyuncs.com"
+        src_reg = f"oss-{src_region}" if not src_region.startswith("oss-") else src_region
 
     src_bac = dms1.BucketAccessConfigForCreateDataMigrateTaskInput(
-        vendor=SOURCE_VENDOR, endpoint=oss_endpoint, region=oss_region,
+        vendor=src_vendor, endpoint=src_endpoint, region=src_reg,
         bucket_name=src_bucket, ak=src_access_id, sk=src_access_secret)
     source = dms1.SourceForCreateDataMigrateTaskInput(
         object_source_config=dms1.ObjectSourceConfigForCreateDataMigrateTaskInput(
@@ -98,8 +109,8 @@ def create_migrate_task(*, task_name: str,
     task_id = getattr(resp, "task_id", None)
     if task_id is None:
         raise TosMigError("create_data_migrate_task 未返回 task_id")
-    logger.info("[DMS1] OSS→TOS 任务已建 task_id=%s %s/%s → %s",
-                task_id, src_bucket, src_prefix, dest_bucket)
+    logger.info("[DMS1] %s 任务已建 task_id=%s %s/%s → %s",
+                "TOS→TOS" if src_is_tos else "OSS→TOS", task_id, src_bucket, src_prefix, dest_bucket)
     return int(task_id)
 
 
@@ -120,30 +131,36 @@ def query_task(task_id: int, dest_region: str) -> dict:
 
 def submit_cross_job(*, job_name: str,
                      src_bucket: str, src_prefix: str,
-                     src_access_id: str, src_access_secret: str, src_region: str,
+                     src_access_id: str = "", src_access_secret: str = "", src_region: str = "",
                      dest_bucket: str, dest_prefix: str, dest_region: str,
                      dest_internal: bool = True,            # 火山侧无内外网区分，留参数兼容
                      transfer_mode: str = "", overwrite_mode: str = "",
-                     open_id: str = "") -> str:
-    """提交 OSS→TOS 迁移任务，返回 task_id 字符串（存进 job 的 cross_job_name 供轮询）。
+                     src_is_tos: bool = False, open_id: str = "") -> str:
+    """提交迁移任务，返回 task_id 字符串（存进 job 的 cross_job_name 供轮询）。目的=火山 TOS。
 
+    src_is_tos=False（默认）：源=阿里 OSS，跨云 OSS→TOS（一期）。
+    src_is_tos=True：源=火山 TOS，桶间 TOS→TOS（同账号，源 AK/SK 用火山凭证）。
     DMS 1.0 建任务后自动开始迁移，无需单独 start。
-    ⚠️ 真机验证的落盘规则（task 552876）：对象**保持完整源 key 原样**落到目的桶，
-       不去前缀、不加前缀。目的只给 bucket，无法指定子目录（GUI 也只暴露源迁移范围）。
-       因此 dest_prefix 在火山侧无效，仅记录用；落盘路径由源 key 结构决定。
+    ⚠️ 落盘规则（真机 task 552876）：对象**保持完整源 key 原样**落到目的桶，不去前缀、不加前缀。
+       目的只给 bucket，无法指定子目录。dest_prefix 仅记录用；落盘路径由源 key 结构决定。
     """
+    # 桶间 TOS→TOS 同账号：源 AK/SK 就是火山账号凭证（与目的同一把）
+    if src_is_tos and not (src_access_id and src_access_secret):
+        src_access_id = settings.TRANSFER_TOS_ACCESS_KEY or settings.TOS_ACCESS_KEY
+        src_access_secret = settings.TRANSFER_TOS_SECRET_KEY or settings.TOS_SECRET_KEY
     try:
         task_id = create_migrate_task(
             task_name=job_name,
             src_bucket=src_bucket, src_prefix=src_prefix, src_region=src_region,
             src_access_id=src_access_id, src_access_secret=src_access_secret,
             dest_bucket=dest_bucket, dest_region=dest_region,
-            overwrite_policy=overwrite_mode or transfer_mode or OVERWRITE_POLICY)
+            overwrite_policy=overwrite_mode or transfer_mode or OVERWRITE_POLICY,
+            src_is_tos=src_is_tos)
         return str(task_id)
     except TosMigError:
         raise
     except Exception as e:
-        logger.error("[DMS1] 提交 OSS→TOS 任务失败 job=%s", job_name, exc_info=True)
+        logger.error("[DMS1] 提交迁移任务失败 job=%s", job_name, exc_info=True)
         raise TosMigError(f"提交火山迁移任务失败：{e}")
 
 

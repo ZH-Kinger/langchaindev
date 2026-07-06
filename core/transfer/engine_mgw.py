@@ -104,6 +104,24 @@ def create_oss_dest_address(client, name: str, *, bucket: str, prefix: str,
     _put_address(client, name, detail)
 
 
+def create_oss_source_address(client, name: str, *, bucket: str, prefix: str,
+                              region: str, role: str, internal: bool = True) -> None:
+    """创建源数据地址（阿里 OSS，同账号用 RAM role 授权，不落 AK）。幂等。
+
+    OSS→OSS 同账号桶间迁移：源也是 address_type=oss，字段与 dest 完全一致，role 需含读权限。
+    跨 region 时源桶与迁移部署地域不同 → 建议用公网 domain（internal=False）。
+    """
+    m = _models()
+    detail = m.AddressDetail()
+    detail.address_type = "oss"
+    detail.region_id = f"oss-{region}"
+    detail.bucket = bucket
+    detail.prefix = prefix
+    detail.role = role
+    detail.domain = _oss_domain(region, internal)
+    _put_address(client, name, detail)
+
+
 def _verify_once(client, name: str):
     """调一次 verify，返回 (status, error_message)。
 
@@ -208,15 +226,18 @@ def get_job_status(client, name: str) -> dict:
 
 def submit_cross_job(*, job_name: str,
                      src_bucket: str, src_prefix: str,
-                     src_access_id: str, src_access_secret: str, src_region: str,
+                     src_access_id: str = "", src_access_secret: str = "", src_region: str = "",
+                     src_scheme: str = "tos", src_internal: bool = True,
                      dest_bucket: str, dest_prefix: str, dest_region: str,
                      dest_internal: bool = True,
                      transfer_mode: str = "", overwrite_mode: str = "",
                      open_id: str = "") -> str:
-    """一次性提交 TOS→OSS 迁移任务并启动，返回 job_name（用于轮询）。
+    """一次性提交迁移任务并启动，返回 job_name（用于轮询）。目的端固定 OSS。
 
-    幂等性由调用方（orchestrator 的 job_id）保证；此处不重复建址检查，
-    地址名带 job_name 后缀避免撞名。失败抛 MgwError。
+    src_scheme='tos'：源火山 TOS，用 access_id/secret（跨云 TOS→OSS，一期，默认）。
+    src_scheme='oss'：源阿里 OSS，同账号用 RAM role（桶间 OSS→OSS）；源 role 取
+        settings.BUCKET_TRANSFER_OSS_SRC_ROLE，留空回退 TRANSFER_OSS_ROLE。
+    幂等性由调用方（orchestrator 的 job_id）保证；地址名带 job_name 后缀避免撞名。失败抛 MgwError。
     """
     client = get_mgw_client(open_id)
     if client is None:
@@ -224,7 +245,7 @@ def submit_cross_job(*, job_name: str,
     if not settings.MGW_USER_ID:
         raise MgwError("未配置 MGW_USER_ID（在线迁移服务 userid）。")
     if not settings.TRANSFER_OSS_ROLE:
-        raise MgwError("未配置 TRANSFER_OSS_ROLE（目的 OSS 的 RAM 角色名）。")
+        raise MgwError("未配置 TRANSFER_OSS_ROLE（OSS 的 RAM 角色名）。")
 
     transfer_mode = transfer_mode or settings.TRANSFER_MODE_DEFAULT
     overwrite_mode = overwrite_mode or settings.TRANSFER_OVERWRITE_DEFAULT
@@ -232,9 +253,14 @@ def submit_cross_job(*, job_name: str,
     dest_addr = f"{job_name}-dst"
 
     try:
-        create_tos_source_address(client, src_addr, bucket=src_bucket, prefix=src_prefix,
-                                  access_id=src_access_id, access_secret=src_access_secret,
-                                  region=src_region)
+        if src_scheme == "oss":
+            src_role = getattr(settings, "BUCKET_TRANSFER_OSS_SRC_ROLE", "") or settings.TRANSFER_OSS_ROLE
+            create_oss_source_address(client, src_addr, bucket=src_bucket, prefix=src_prefix,
+                                      region=src_region, role=src_role, internal=src_internal)
+        else:
+            create_tos_source_address(client, src_addr, bucket=src_bucket, prefix=src_prefix,
+                                      access_id=src_access_id, access_secret=src_access_secret,
+                                      region=src_region)
         verify_address(client, src_addr)
         create_oss_dest_address(client, dest_addr, bucket=dest_bucket, prefix=dest_prefix,
                                 region=dest_region, role=settings.TRANSFER_OSS_ROLE,

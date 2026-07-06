@@ -289,6 +289,23 @@ def _detect_region_endpoint(auth, bucket_name: str):
         return default
 
 
+def region_from_endpoint(endpoint: str) -> str:
+    """从 endpoint 提取裸 region：https://oss-cn-beijing[-internal].aliyuncs.com → cn-beijing。"""
+    host = (endpoint or "").split("://", 1)[-1].split(".", 1)[0]   # oss-cn-beijing[-internal]
+    region = host[4:] if host.startswith("oss-") else host
+    return region.replace("-internal", "")
+
+
+def detect_bucket_region(open_id: str, bucket_name: str) -> str:
+    """探测 OSS 桶所在裸 region（如 cn-beijing），供桶间迁移拼 region_id/domain。探测失败回退默认。"""
+    from utils.aliyun_client_factory import get_oss_auth
+    auth, _ = get_oss_auth(open_id)
+    if auth is None:
+        return settings.PAI_DSW_REGION_ID or "cn-hangzhou"
+    return region_from_endpoint(_detect_region_endpoint(auth, bucket_name)) or \
+        (settings.PAI_DSW_REGION_ID or "cn-hangzhou")
+
+
 def _resolve_bucket(open_id: str, bucket_name: str, region: str = ""):
     """构造 oss2.Bucket：region 留空则自动探测地域（跨地域桶可用）。"""
     from utils.aliyun_client_factory import get_oss_auth

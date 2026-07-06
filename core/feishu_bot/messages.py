@@ -119,6 +119,18 @@ def _is_mfu_report_intent(text: str) -> bool:
     return bool(_MFU_REPORT_RE.search(text or ""))
 
 
+# 桶间迁移（同云一次性搬运）：发这些词 → 弹桶间迁移卡（排在跨云 transfer 意图之前）
+_BUCKET_TRANSFER_ENTRY_WORDS = (
+    "桶间迁移", "桶间搬运", "同云迁移", "同区迁移", "桶迁移", "bucket迁移",
+    "oss迁移oss", "oss到oss", "tos到tos", "tos迁移tos",
+)
+
+
+def _is_bucket_transfer_entry_intent(text: str) -> bool:
+    compact = re.sub(r"\s+", "", text or "").lower()
+    return any(w.replace(" ", "").lower() in compact for w in _BUCKET_TRANSFER_ENTRY_WORDS)
+
+
 def _is_transfer_entry_intent(text: str) -> bool:
     """命中录入关键词且没带路径（带路径走 _is_transfer_intent 直接解析）。"""
     if _extract_transfer_paths(text)[0]:
@@ -486,6 +498,12 @@ def _process_message(message_id: str, chat_id: str, user_text: str, open_id: str
         return
 
     # ③ 跨云迁移录入意图（纯关键词、无路径）→ 弹录入卡让用户填地址
+    # 桶间迁移（同云一次性搬运）→ 弹桶间迁移卡（排在跨云迁移意图之前，避免"迁移"被抢）
+    if _is_bucket_transfer_entry_intent(user_text):
+        from core.bucket_transfer.cards import entry_card
+        messaging._feishu_reply_card(message_id, entry_card())
+        return
+
     if _is_sink_preheat_entry_intent(user_text):
         from core.cpfs_dataflow.cards import entry_card
         messaging._feishu_reply_card(message_id, entry_card())
