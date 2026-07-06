@@ -519,9 +519,9 @@ def _process_message(message_id: str, chat_id: str, user_text: str, open_id: str
         messaging._feishu_reply_card(message_id, entry_card())
         return
 
-    # 数据预热/沉降统一入口（阿里 CPFS↔OSS + 火山 vePFS↔TOS，卡内选云平台）
+    # 数据预热/沉降统一入口（选云 → 选地区 → 选文件系统 + 填源/目的地址）
     if _is_sink_preheat_entry_intent(user_text):
-        from core.cpfs_dataflow.cards import entry_card
+        from core.dataflow_cards import entry_card
         messaging._feishu_reply_card(message_id, entry_card())
         return
 

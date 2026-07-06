@@ -90,9 +90,20 @@ def _cached(refresh_if_empty: bool = True) -> dict:
     return {"fs": [], "buckets": []}
 
 
-def fs_options() -> list[dict]:
-    return _cached().get("fs", [])
+def fs_options(region: str = "") -> list[dict]:
+    opts = _cached().get("fs", [])
+    if region:
+        opts = [o for o in opts if o.get("region") == region]
+    return opts
 
 
-def bucket_options() -> list[dict]:
-    return _cached().get("buckets", [])
+def bucket_options(region: str = "") -> list[dict]:
+    opts = _cached().get("buckets", [])
+    if region:
+        opts = [o for o in opts if o.get("region") == region]
+    return opts
+
+
+def regions() -> list[str]:
+    """有 vePFS 文件系统的地区列表（供级联第一步）。"""
+    return sorted({o["region"] for o in _cached().get("fs", []) if o.get("region")})

@@ -39,43 +39,58 @@ def test_mfu_report_intent_keywords():
 
 def test_entry_card_is_cloud_picker():
     """入口卡=云平台选择（两个按钮 阿里/火山）。"""
-    ec = cards.entry_card()
+    from core.dataflow_cards import entry_card
+    ec = entry_card()
     assert ec["schema"] == "2.0"
-    actions_ = set()
-    def _walk(o):
-        if isinstance(o, dict):
-            v = o.get("value")
-            if isinstance(v, dict) and v.get("action"):
-                actions_.add(v["action"])
-            for x in o.values():
-                _walk(x)
-        elif isinstance(o, list):
-            for x in o:
-                _walk(x)
-    _walk(ec)
-    assert {"pick_cloud_aliyun", "pick_cloud_volcano"} <= actions_
+    assert {"pick_cloud_aliyun", "pick_cloud_volcano"} <= _all_actions(ec)
 
 
-def test_aliyun_guided_card_dropdowns():
-    """阿里向导卡：有 options → 下拉选 fs+桶；提交动作 submit_cpfs_dataflow。"""
+def test_region_card_buttons():
+    """选地区卡：每个地区一个按钮，带 pick_region_aliyun。"""
+    from core.dataflow_cards import region_card
+    rc = region_card("aliyun", ["cn-hangzhou", "cn-beijing"])
+    assert "pick_region_aliyun" in _all_actions(rc)
+    labels = [e["text"]["content"] for e in rc["body"]["elements"] if e.get("tag") == "button"]
+    assert "cn-hangzhou" in labels and "cn-beijing" in labels
+
+
+def test_form_card_fs_dropdown_and_addresses():
+    """向导表单卡：fs 下拉 + 源/目的地址；无操作/桶选择器；提交 submit_cpfs_dataflow。"""
+    from core.dataflow_cards import form_card
     fs = [{"value": "cpfs-a@cn-hangzhou", "text": "cpfs-a（cn-hangzhou）"}]
-    bk = [{"value": "bk@cn-hangzhou", "text": "bk（cn-hangzhou）"}]
-    ec = cards.guided_card(fs, bk)
+    ec = form_card("aliyun", "cn-hangzhou", fs)
     form = ec["body"]["elements"][1]["elements"]
     names = {e.get("name") for e in form}
-    assert {"operation", "fs", "sub_path", "bucket", "oss_prefix", "same_name"} <= names
+    assert {"fs", "source", "dest", "same_name"} <= names
+    assert "operation" not in names and "bucket" not in names   # 无操作/桶选择器
     fs_el = next(e for e in form if e.get("name") == "fs")
     assert fs_el["tag"] == "select_static"
     assert _find_action(ec) == "submit_cpfs_dataflow"
 
 
-def test_guided_card_empty_options_fallback_to_input():
-    """发现为空 → fs/桶回退成文本输入框，不卡死。"""
-    ec = cards.guided_card([], [])
+def test_form_card_empty_fs_fallback_to_input():
+    """发现为空 → fs 回退成文本输入框。"""
+    from core.dataflow_cards import form_card
+    ec = form_card("aliyun", "", [])
     form = ec["body"]["elements"][1]["elements"]
     fs_el = next(e for e in form if e.get("name") == "fs")
-    bk_el = next(e for e in form if e.get("name") == "bucket")
-    assert fs_el["tag"] == "input" and bk_el["tag"] == "input"
+    assert fs_el["tag"] == "input"
+
+
+def _all_actions(obj):
+    acts = set()
+    def _w(o):
+        if isinstance(o, dict):
+            v = o.get("value")
+            if isinstance(v, dict) and v.get("action"):
+                acts.add(v["action"])
+            for x in o.values():
+                _w(x)
+        elif isinstance(o, list):
+            for x in o:
+                _w(x)
+    _w(obj)
+    return acts
 
 
 def test_confirm_result_cards():

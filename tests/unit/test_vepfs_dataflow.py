@@ -170,7 +170,7 @@ def test_orch_submit_failure_sets_failed(monkeypatch):
 
 def test_entry_card_cloud_picker():
     """统一入口卡=两个云平台按钮（阿里/火山）。"""
-    from core.cpfs_dataflow import cards
+    from core.dataflow_cards import entry_card
     acts = set()
     def _walk(o):
         if isinstance(o, dict):
@@ -182,36 +182,48 @@ def test_entry_card_cloud_picker():
         elif isinstance(o, list):
             for x in o:
                 _walk(x)
-    _walk(cards.entry_card())
+    _walk(entry_card())
     assert {"pick_cloud_aliyun", "pick_cloud_volcano"} <= acts
 
 
-def test_vepfs_guided_card_dropdowns():
-    """火山向导卡：有 options → 下拉；提交 submit_vepfs_dataflow。"""
-    from core.vepfs_dataflow import cards
+def test_form_card_volcano_dropdown():
+    """火山向导表单卡：fs 下拉 + 源/目的地址；提交 submit_vepfs_dataflow；无操作/桶选择器。"""
+    from core.dataflow_cards import form_card
     fs = [{"value": "vepfs-a@cn-shanghai", "text": "wuji（cn-shanghai）"}]
-    bk = [{"value": "bk@cn-shanghai", "text": "bk（cn-shanghai）"}]
-    ec = cards.guided_card(fs, bk)
+    ec = form_card("volcano", "cn-shanghai", fs)
     form = ec["body"]["elements"][1]["elements"]
     names = {e.get("name") for e in form}
-    assert {"operation", "fs", "sub_path", "bucket", "tos_prefix", "same_name"} <= names
-    fs_el = next(e for e in form if e.get("name") == "fs")
-    assert fs_el["tag"] == "select_static"
+    assert {"fs", "source", "dest", "same_name"} <= names
+    assert "operation" not in names and "bucket" not in names
     btn = [e for e in form if e.get("tag") == "button"][0]
     assert btn["behaviors"][0]["value"]["action"] == "submit_vepfs_dataflow"
+    assert btn["behaviors"][0]["value"]["region"] == "cn-shanghai"
 
 
-def test_vepfs_guided_plan_from_form(monkeypatch):
-    """向导 form_value（fs@region + bucket@region）→ 正确计划；跨地区报错。"""
+def test_guided_plan_direction_from_addresses():
+    """_guided_plan：源=文件系统→沉降；源=对象存储→预热；两侧同类报错。"""
     from core.feishu_bot import actions
-    plan = actions._vepfs_guided_plan(
-        {"operation": "sink", "fs": "vepfs-a@cn-shanghai", "sub_path": "/label/",
-         "bucket": "bk@cn-shanghai", "tos_prefix": "arch/", "same_name": "skip"})
-    assert plan.fs_id == "vepfs-a" and plan.region == "cn-shanghai"
-    assert plan.operation == "sink" and plan.tos_bucket == "bk" and plan.tos_prefix == "arch/"
+    # 源=vePFS目录、目的=TOS → 沉降(Export)
+    p1 = actions._guided_plan("volcano",
+        {"fs": "vepfs-a@cn-shanghai", "source": "/label/", "dest": "tos://bk/arch/", "same_name": "skip"})
+    assert p1.operation == "sink" and p1.fs_id == "vepfs-a" and p1.region == "cn-shanghai"
+    assert p1.tos_bucket == "bk" and p1.tos_prefix == "arch/"
+    # 源=TOS、目的=vePFS目录 → 预热(Import)
+    p2 = actions._guided_plan("volcano",
+        {"fs": "vepfs-a@cn-shanghai", "source": "tos://bk/arch/", "dest": "/label/"})
+    assert p2.operation == "preheat"
+    # 两侧都是对象存储 → 报错
     with pytest.raises(orch.DataflowPathError):
-        actions._vepfs_guided_plan({"fs": "vepfs-a@cn-shanghai", "bucket": "bk@cn-beijing",
-                                    "sub_path": "/x/"})
+        actions._guided_plan("volcano",
+            {"fs": "vepfs-a@cn-shanghai", "source": "tos://a/x/", "dest": "tos://b/y/"})
+
+
+def test_guided_plan_region_from_hint(monkeypatch):
+    """fs 手填无 @region 时，用按钮带来的 region_hint。"""
+    from core.feishu_bot import actions
+    p = actions._guided_plan("volcano",
+        {"fs": "vepfs-x", "source": "/d/", "dest": "tos://bk/d/"}, region_hint="cn-shanghai")
+    assert p.fs_id == "vepfs-x" and p.region == "cn-shanghai"
 
 
 def test_vepfs_keywords_open_unified_card():
@@ -223,16 +235,6 @@ def test_vepfs_keywords_open_unified_card():
     assert not messages._is_sink_preheat_entry_intent("查一下 GPU")
 
 
-def test_submit_routes_volcano_to_vepfs(monkeypatch):
-    """统一卡提交：cloud=volcano → 委派给 vePFS 处理器。"""
-    from core.feishu_bot import actions
-    called = {}
-    monkeypatch.setattr(actions, "_h_submit_vepfs_dataflow",
-                        lambda av, oid, cid, fv: called.setdefault("vepfs", True) or {"toast": {}})
-    actions._h_submit_cpfs_dataflow({}, "ou_1", "oc_1",
-                                    {"cloud": "volcano", "region": "cn-beijing",
-                                     "source": "vepfs://fs/a/", "dest": "tos://bk/a/"})
-    assert called.get("vepfs")
 
 
 # ── fakes ──────────────────────────────────────────────────────────────────────
