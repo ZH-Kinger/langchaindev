@@ -12,7 +12,7 @@ from .aliyun import (
     cluster_health_report_tool,
     cluster_mfu_report_tool,
 )
-from .volcano import tos_tool
+from .volcano import tos_tool, vepfs_dataflow_tool
 from .transfer import transfer_tool
 from .cpfs import cpfs_dataflow_tool
 from .feishu import feishu_tool
@@ -41,6 +41,7 @@ ALL_TOOLS = [
     cluster_mfu_report_tool,
     # ── 火山引擎 ─────────────────────────────────────────────
     tos_tool,
+    vepfs_dataflow_tool,
     # ── 跨云迁移 ─────────────────────────────────────────────
     transfer_tool,
     # ── CPFS 预热/沉降 ───────────────────────────────────────
@@ -78,6 +79,7 @@ TOOL_GROUPS = {
     "tos":       {"manage_tos"},
     "transfer":  {"manage_transfer"},
     "cpfs":      {"manage_cpfs_dataflow"},
+    "vepfs":     {"manage_vepfs_dataflow"},
 }
 
 # 启动时校验 TOOL_GROUPS 中的名字与 ALL_TOOLS 一致，防止静默路由失效

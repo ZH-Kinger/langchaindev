@@ -102,13 +102,26 @@ _TRANSFER_ENTRY_WORDS = (
 
 _SINK_PREHEAT_ENTRY_WORDS = (
     "数据沉降/预热", "数据沉降", "数据预热", "沉降/预热", "沉降预热",
-    "cepfs沉降", "vepfs沉降", "cpfs沉降", "文件沉降", "数据加载",
+    "cepfs沉降", "cpfs沉降", "cpfs预热", "文件沉降", "数据加载",
 )
 
 
 def _is_sink_preheat_entry_intent(text: str) -> bool:
     compact = re.sub(r"\s+", "", text or "").lower()
     return any(word.replace(" ", "").lower() in compact for word in _SINK_PREHEAT_ENTRY_WORDS)
+
+
+# 火山 vePFS↔TOS 数据流动：排在 CPFS 意图之前，避免"沉降/预热"被 CPFS 抢走
+_VEPFS_DATAFLOW_ENTRY_WORDS = (
+    "vepfs预热", "vepfs沉降", "vepfs数据流动", "vepfs数据沉降", "vepfs数据预热",
+    "火山预热", "火山沉降", "火山数据沉降", "火山数据预热", "火山vepfs",
+    "tos预热", "tos沉降",
+)
+
+
+def _is_vepfs_dataflow_entry_intent(text: str) -> bool:
+    compact = re.sub(r"\s+", "", text or "").lower()
+    return any(word.replace(" ", "").lower() in compact for word in _VEPFS_DATAFLOW_ENTRY_WORDS)
 
 
 # 算力（MFU）日报：点菜单按钮发这些词 / 直接打字 → 回算力效率卡（不必等每日早报）
@@ -184,7 +197,7 @@ def _is_volcano_account_query_entry_intent(text: str) -> bool:
 
 # 进度查询：拦在 Agent 之前，避免 LLM 劫持 + 吃旧会话历史
 _PROGRESS_QUERY_RE = re.compile(r"(查询进度|进度查询|查进度|任务进度|查询任务)")
-_JOB_ID_RE = re.compile(r"\b(cpfs-[0-9a-fA-F]{6,}|tr-[0-9a-fA-F]{6,})\b")
+_JOB_ID_RE = re.compile(r"\b(vepfs-[0-9a-fA-F]{6,}|cpfs-[0-9a-fA-F]{6,}|tr-[0-9a-fA-F]{6,})\b")
 
 
 def _is_progress_query_text(text: str) -> bool:
@@ -501,6 +514,12 @@ def _process_message(message_id: str, chat_id: str, user_text: str, open_id: str
     # 桶间迁移（同云一次性搬运）→ 弹桶间迁移卡（排在跨云迁移意图之前，避免"迁移"被抢）
     if _is_bucket_transfer_entry_intent(user_text):
         from core.bucket_transfer.cards import entry_card
+        messaging._feishu_reply_card(message_id, entry_card())
+        return
+
+    # 火山 vePFS↔TOS 数据流动（排在 CPFS 之前，"vepfs沉降"等由此接管）
+    if _is_vepfs_dataflow_entry_intent(user_text):
+        from core.vepfs_dataflow.cards import entry_card
         messaging._feishu_reply_card(message_id, entry_card())
         return
 
