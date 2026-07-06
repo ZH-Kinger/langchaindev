@@ -113,6 +113,34 @@ def test_region_from_endpoint():
     assert oss_tool.region_from_endpoint("https://oss-cn-hangzhou-internal.aliyuncs.com") == "cn-hangzhou"
 
 
+def test_tos_detect_bucket_region(monkeypatch):
+    engine_tos._tos_region_cache.clear()
+    class _B:
+        def __init__(self, n, loc): self.name, self.location = n, loc
+    class _R:
+        buckets = [_B("data-tran", "cn-shanghai"), _B("umi-x", "cn-guangzhou")]
+    class _C:
+        def list_buckets(self): return _R()
+    monkeypatch.setattr("utils.volcano_client_factory.get_tos_client", lambda: _C())
+    assert engine_tos.detect_tos_bucket_region("data-tran", "cn-beijing") == "cn-shanghai"
+    assert engine_tos.detect_tos_bucket_region("umi-x", "cn-beijing") == "cn-guangzhou"
+    assert engine_tos.detect_tos_bucket_region("不存在的桶", "cn-beijing") == "cn-beijing"   # 回退默认
+
+
+def test_tos_query_task_extracts_error(monkeypatch):
+    class _Prog:
+        transferred_bytes = 0; transferred_objects = 0
+        failed_objects = 3; not_exist_object_count = 1
+    class _R:
+        task_status = "Failure"; task_progress = _Prog(); task_report = None
+    class _Api:
+        def query_data_migrate_task(self, req): return _R()
+    monkeypatch.setattr(engine_tos, "_api", lambda region: (_Api(), _FakeDms({})))
+    st = engine_tos.query_task(1, "cn-shanghai")
+    assert st["status"] == "Failure"
+    assert "3 个对象迁移失败" in st["error"] and "源端不存在" in st["error"]
+
+
 # ── orchestrator 状态机 ────────────────────────────────────────────────────────
 
 def test_orch_oss_run_to_completion(monkeypatch):
@@ -171,6 +199,9 @@ class _FakeDms:
         return kw
 
     def CreateDataMigrateTaskRequest(self, **kw):
+        return kw
+
+    def QueryDataMigrateTaskRequest(self, **kw):
         return kw
 
     # api

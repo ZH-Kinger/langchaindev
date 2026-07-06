@@ -120,8 +120,10 @@ def start_cross(job: dict) -> dict:
             )
         else:  # dms：火山 TOS→TOS
             from core.transfer import engine_tos
-            src_region = job.get("src_region") or settings.TRANSFER_TOS_REGION or settings.TOS_REGION or "cn-beijing"
-            dest_region = job.get("dest_region") or src_region
+            _def = settings.TRANSFER_TOS_REGION or settings.TOS_REGION or "cn-beijing"
+            # tos:// 带不出 region → 用 list_buckets 自动探测源/目的桶的 region，探测不到回退默认
+            src_region = job.get("src_region") or engine_tos.detect_tos_bucket_region(job["src_bucket"], _def)
+            dest_region = job.get("dest_region") or engine_tos.detect_tos_bucket_region(job["dest_bucket"], src_region)
             ref = engine_tos.submit_cross_job(
                 job_name=job["job_id"],
                 src_bucket=job["src_bucket"], src_prefix=job["src_prefix"], src_region=src_region,

@@ -114,16 +114,58 @@ def create_migrate_task(*, task_name: str,
     return int(task_id)
 
 
+_tos_region_cache: dict = {}
+
+
+def detect_tos_bucket_region(bucket: str, default: str = "") -> str:
+    """探测火山 TOS 桶所在 region（如 cn-shanghai）。用 list_buckets 建 桶→location 映射（一次全拿）。
+    tos:// URI 带不出 region，故据此自动定位；探测失败/找不到回退 default。进程内缓存。"""
+    if bucket in _tos_region_cache:
+        return _tos_region_cache[bucket]
+    try:
+        from utils.volcano_client_factory import get_tos_client
+        c = get_tos_client()
+        if c is not None:
+            r = c.list_buckets()
+            for b in (getattr(r, "buckets", None) or []):
+                name = getattr(b, "name", "")
+                loc = getattr(b, "location", "") or getattr(b, "region", "")
+                if name:
+                    _tos_region_cache[name] = loc
+    except Exception:
+        logger.warning("[DMS1] 探测 TOS 桶 region 失败，回退默认", exc_info=True)
+    return _tos_region_cache.get(bucket) or default
+
+
 def query_task(task_id: int, dest_region: str) -> dict:
-    """查任务状态+进度，返回 {status, bytes, objects, error}。"""
+    """查任务状态+进度，返回 {status, bytes, objects, error}。
+
+    error：DMS 无单一错误串，从 task_progress 的失败/源端不存在计数 + task_report 摘要拼出，
+    失败时给出可读原因（不再恒为空）。
+    """
     api, dms1 = _api(dest_region)
     r = api.query_data_migrate_task(dms1.QueryDataMigrateTaskRequest(task_id=int(task_id)))
     prog = getattr(r, "task_progress", None)
+    parts = []
+    if prog is not None:
+        failed = getattr(prog, "failed_objects", 0) or 0
+        notexist = getattr(prog, "not_exist_object_count", 0) or 0
+        if failed:
+            parts.append(f"{failed} 个对象迁移失败")
+        if notexist:
+            parts.append(f"{notexist} 个对象源端不存在")
+    rep = getattr(r, "task_report", None)
+    if rep is not None and not parts:
+        for a in ("err_msg", "error_message", "message", "fail_reason", "report_url"):
+            v = getattr(rep, a, "")
+            if v:
+                parts.append(str(v))
+                break
     return {
         "status":  getattr(r, "task_status", "") or "",
         "bytes":   getattr(prog, "transferred_bytes", 0) or 0 if prog else 0,
         "objects": getattr(prog, "transferred_objects", 0) or 0 if prog else 0,
-        "error":   "",
+        "error":   "；".join(parts),
     }
 
 
