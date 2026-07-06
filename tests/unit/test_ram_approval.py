@@ -322,6 +322,26 @@ def test_handle_event_dedupes_processed_instance(monkeypatch):
     assert ram_approval.load_approval_record("inst_dedup")["duplicate_count"] == 1
 
 
+def test_handle_event_ignores_cc_or_node_event_without_status(monkeypatch):
+    """流程里加审批节点/抄送后，飞书推来的无状态无实例通知事件 → 静默忽略，绝不误报失败。"""
+    from core import ram_approval
+
+    fake = FakeRedis()
+    monkeypatch.setattr(ram_approval, "get_redis", lambda: fake)
+    monkeypatch.setattr(ram_approval.settings, "FEISHU_RAM_APPROVAL_CODE", "approval_code_x")
+    failures = []
+    monkeypatch.setattr(ram_approval, "notify_failure", lambda *a, **k: failures.append(a))
+    monkeypatch.setattr(ram_approval, "save_approval_failure", lambda *a, **k: failures.append(a))
+    # 抄送/通知事件：带匹配 approval_code，但无 status、无 instance_code
+    payload = {
+        "header": {"event_type": "approval_cc"},
+        "event": {"approval_code": "approval_code_x"},
+    }
+    res = ram_approval.handle_approval_event(payload)
+    assert res == {"ignored": True, "reason": "no_status_no_instance"}
+    assert not failures   # 不得推送任何失败卡/通知
+
+
 class ExistingUserFakeRamClient(FakeRamClient):
     def get_user(self, req):
         self.calls.append(("get_user", req.user_name))

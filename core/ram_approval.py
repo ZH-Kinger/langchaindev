@@ -154,6 +154,11 @@ def handle_approval_event(payload: dict[str, Any]) -> dict[str, Any]:
         return {"ignored": True, "reason": f"status={status}"}
 
     instance_code = _extract_instance_code(payload)
+    if not status and not instance_code:
+        # 无终态状态、也无审批实例：多为「抄送(cc)」或流程里新增审批节点产生的中间/通知事件。
+        # 这类事件不可用于建号，静默忽略（避免误报"审批实例: - / status is missing"失败卡）。
+        logger.info("[ram_approval] ignore non-actionable approval event (no status & no instance)")
+        return {"ignored": True, "reason": "no_status_no_instance"}
     if instance_code and _is_instance_done(instance_code):
         _mark_duplicate(instance_code, "already_processed")
         return {"ignored": True, "reason": "already_processed", "instance_code": instance_code}
@@ -169,7 +174,9 @@ def handle_approval_event(payload: dict[str, Any]) -> dict[str, Any]:
         detail = fetch_approval_instance(instance_code) if instance_code else _event_obj(payload)
         status = status or (_extract_status(detail) or "").upper()
         if not status:
-            raise RamApprovalError("Approval status is missing; RAM creation was not executed")
+            # 拉取实例后仍无状态：非终态/通知类事件，不可执行建号 → 静默忽略（不再误报失败）。
+            logger.info("[ram_approval] no status resolved for instance=%s; ignore", instance_code or "-")
+            return {"ignored": True, "reason": "no_status", "instance_code": instance_code}
         if status not in APPROVED_STATUSES:
             logger.info("[ram_approval] ignore non-approved status=%s", status)
             return {"ignored": True, "reason": f"status={status}"}
