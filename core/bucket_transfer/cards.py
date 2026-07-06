@@ -47,13 +47,23 @@ def _cloud_label(job):
 
 def confirm_card(job):
     from core.bucket_transfer.orchestrator import same_name_policy_label
+    warn = ""
+    if job.get("engine") == "dms":
+        dp = job.get("dest_prefix") or ""
+        if dp:
+            # 用户填了目的子目录，但火山会忽略 → 明确警告，避免误以为能落到该子目录
+            warn = (f"\n\n⚠️ **火山不支持指定目的子目录**：你填的 `{dp}` 会被**忽略**，对象保持源 key "
+                    f"原样落到桶 `{job['dest_bucket']}`（如 `{job['dest_bucket']}/{job.get('src_prefix','')}…`）。"
+                    f"如需固定目录，请迁完自行 rename。")
+        else:
+            warn = "\n\n> 火山目的只到桶级，对象保持源 key 结构落入目的桶。"
     info = (
         f"**任务ID**：`{job['job_id']}`\n"
         f"**云**：{_cloud_label(job)}（{job['direction']}）\n"
         f"**源**：`{job['source']}`\n"
         f"**目的**：`{job['dest']}`\n"
         f"**同名策略**：{same_name_policy_label(job.get('same_name',''))}"
-        + ("\n> 火山目的只到桶级，落盘保持源 key 结构。" if job.get("engine") == "dms" else ""))
+        + warn)
     return {
         "schema": "2.0",
         "config": {"wide_screen_mode": True},

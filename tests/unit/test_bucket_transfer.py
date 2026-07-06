@@ -34,6 +34,26 @@ def test_plan_same_src_dest_rejected():
         paths.build_plan("oss://a/x/", "oss://a/x/")
 
 
+def test_confirm_card_warns_tos_dest_prefix():
+    from core.bucket_transfer import cards
+    import json as _j
+    # 火山 + 填了目的子目录 → 明确警告
+    job_warn = o_job("tos://a/x/", "tos://b/custom/")
+    c = _j.dumps(cards.confirm_card(job_warn), ensure_ascii=False)
+    assert "火山不支持指定目的子目录" in c and "custom/" in c
+    # 火山 + 目的桶根（无子目录）→ 只给一般说明，不报刺眼警告
+    job_note = o_job("tos://a/x/", "tos://b/")
+    c2 = _j.dumps(cards.confirm_card(job_note), ensure_ascii=False)
+    assert "火山不支持指定目的子目录" not in c2 and "保持源 key" in c2
+    # 阿里 OSS→OSS 无此警告（能指定目的目录）
+    job_oss = o_job("oss://a/x/", "oss://b/custom/")
+    assert "火山不支持" not in _j.dumps(cards.confirm_card(job_oss), ensure_ascii=False)
+
+
+def o_job(src, dst):
+    return orch.create_job_record(paths.build_plan(src, dst), same_name="skip", open_id="ou_1")
+
+
 def test_bucket_transfer_intent_and_card():
     from core.feishu_bot import messages
     from core.bucket_transfer import cards
