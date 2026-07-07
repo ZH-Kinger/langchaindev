@@ -616,8 +616,10 @@ def _process_message(message_id: str, chat_id: str, user_text: str, open_id: str
     # 延迟导入，避免在模块加载时触发 LLM 初始化
     from core.agent import _build_executor, _load_history, _save_turn
 
-    # 从 Redis 加载该 chat_id 的会话历史（Redis 不可用时降级为空列表）
-    history = _load_history(chat_id)
+    # 会话历史按【用户 open_id】隔离，而非群聊 chat_id——群里不同用户共用一个 chat_id 会
+    # 串用户/串话题（曾导致把别人的迁移任务当成本条消息的答案）。无 open_id（私聊/异常）回退 chat_id。
+    session_id = open_id or chat_id
+    history = _load_history(session_id)
 
     # 先发"思考中"提示，让用户知道 Bot 在处理
     messaging._feishu_reply(message_id, "🤔 正在分析，请稍候...")
@@ -634,8 +636,8 @@ def _process_message(message_id: str, chat_id: str, user_text: str, open_id: str
         reply = re.sub(r"!\[.*?\]\(.*?\)", "", reply)
         reply = re.sub(r"!https?://\S+", "", reply).strip()
 
-        # 写回历史时用原始 user_text（不含注入的 open_id 元数据）
-        _save_turn(chat_id, user_text, reply)
+        # 写回历史时用原始 user_text（不含注入的 open_id 元数据）；按用户隔离
+        _save_turn(session_id, user_text, reply)
 
         # 每次回复都尝试生成实时指标趋势图，失败时降级为纯文本回复
         try:

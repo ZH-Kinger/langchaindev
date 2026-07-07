@@ -297,5 +297,7 @@ def poll_job(job_name: str, open_id: str = "") -> dict:
             return {"status": "", "error": "迁移 Client 不可用"}
         return get_job_status(client, job_name)
     except Exception as e:
-        logger.error("[MGW] 轮询任务失败 job=%s", job_name, exc_info=True)
+        # 轮询是瞬时网络抖动的高发点（RemoteDisconnected 等）；orchestrator 遇空状态会继续轮询、
+        # 不会误判失败，故降为 WARNING，避免每分钟把瞬时抖动当 ERROR 推送管理员 🚨。
+        logger.warning("[MGW] 轮询任务失败(瞬时，将重试) job=%s: %s", job_name, e)
         return {"status": "", "error": str(e)}
