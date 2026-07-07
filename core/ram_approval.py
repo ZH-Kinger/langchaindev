@@ -998,11 +998,13 @@ def _approval_comment_user_id(req: RamAccountRequest | None = None) -> str:
     configured = getattr(settings, "FEISHU_RAM_APPROVAL_COMMENT_USER_ID", "")
     if configured:
         return configured
-    # 申请人 open_id 来自本 app 的事件/实例，跨 app 安全；优先于全局 ADMIN_FEISHU_OPEN_ID
-    # （后者可能是别的 app 的 open_id，写评论会报 99992361 open_id cross app）。
-    if req and req.requester_open_id:
-        return req.requester_open_id
-    return getattr(settings, "ADMIN_FEISHU_OPEN_ID", "") or ""
+    # 审批评论以管理员身份发出（原设计；用申请人身份给自己发凭证不合理）。
+    # 注意 ADMIN_FEISHU_OPEN_ID 必须是本 app（发评论用的 app）下的 open_id，
+    # 否则会报 99992361 open_id cross app。申请人 open_id 仅在无 admin 时兜底。
+    admin = getattr(settings, "ADMIN_FEISHU_OPEN_ID", "") or ""
+    if admin:
+        return admin
+    return req.requester_open_id if req else ""
 
 
 def _approval_comment_user_id_type() -> str:
