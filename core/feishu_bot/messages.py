@@ -124,6 +124,31 @@ def _is_mfu_report_intent(text: str) -> bool:
     return bool(_MFU_REPORT_RE.search(text or ""))
 
 
+# 帮助/能力菜单意图：即时回能力清单，不走 LLM
+_HELP_RE = re.compile(r"(帮助|help|能做什么|会做什么|你会什么|有什么功能|功能列表|使用说明|怎么用你|菜单)", re.IGNORECASE)
+
+
+def _is_help_intent(text: str) -> bool:
+    return bool(_HELP_RE.search(text or ""))
+
+
+def _capability_menu() -> str:
+    """用户面能力清单：帮助意图直接回它；未知意图兜底也复用它引导用户。"""
+    return (
+        "🤖 我能帮你做这些（直接用自然语言说需求即可）：\n"
+        "• GPU 卡分布 / 谁在用卡 —— 发「卡分布」\n"
+        "• 集群算力效率日报 MFU —— 发「算力日报」\n"
+        "• GPU 申请 / DSW 实例开通、启停、查询\n"
+        "• OSS / TOS 对象存储：用量、各子目录大小、目录树\n"
+        "• 跨云 / 桶间数据迁移（tos ↔ oss，直接发路径）\n"
+        "• CPFS / vePFS 数据预热与沉降\n"
+        "• RAM 账号查询、OSS 权限对账下发\n"
+        "• Jira 工单 / GPU 申请记录、GitHub 工作流\n"
+        "• K8s/Pod 运维、Prometheus 指标趋势、知识库问答\n"
+        "\n例：「看卡分布」「算力日报」「杭州 OSS 用量」「把 tos://a/ 迁到 oss://b/」"
+    )
+
+
 # GPU 卡分布：地区×卡型 + 每用户在算卡数（拦在 GPU 申请意图之前，"卡"是 GPU 资源词会被抢）
 _GPU_DIST_RE = re.compile(
     r"(卡分布|显卡分布|gpu分布|卡用量|用卡情况|卡统计|卡占用|卡的分布|谁在用卡|用了多少卡|卡使用情况)",
@@ -613,8 +638,15 @@ def _process_message(message_id: str, chat_id: str, user_text: str, open_id: str
                 return
         gpu_flow._clear_gpu_state(chat_id, open_id)  # 解析不足，清除状态走 Agent
 
+    # 帮助/能力菜单：即时回清单，不进 Agent
+    if _is_help_intent(user_text):
+        messaging._feishu_reply(message_id, _capability_menu())
+        return
+
     # 延迟导入，避免在模块加载时触发 LLM 初始化
-    from core.agent import _build_executor, _load_history, _save_turn
+    from core.agent import (_build_executor, _load_history, _save_turn,
+                            select_tools_scoped, _names_to_tools)
+    from tools import TOOL_GROUPS
 
     # 会话历史按【用户 open_id】隔离，而非群聊 chat_id——群里不同用户共用一个 chat_id 会
     # 串用户/串话题（曾导致把别人的迁移任务当成本条消息的答案）。无 open_id（私聊/异常）回退 chat_id。
@@ -624,11 +656,24 @@ def _process_message(message_id: str, chat_id: str, user_text: str, open_id: str
     # 先发"思考中"提示，让用户知道 Bot 在处理
     messaging._feishu_reply(message_id, "🤔 正在分析，请稍候...")
 
-    # 将 open_id 注入输入，供 analyze_gpu_training 等需要身份识别的工具使用
-    agent_input = f"{user_text}\n[feishu_open_id={open_id}]" if open_id else user_text
+    # 按当前消息缩小工具集：不相关消息拿不到 manage_transfer 等，从源头杜绝乱调
+    tools, intents = select_tools_scoped(user_text)
+    base_input = f"{user_text}\n[feishu_open_id={open_id}]" if open_id else user_text
+    if tools is None:
+        # 未知意图：只给知识库(RAG)，并约束"从知识库答 / 列能力并反问，绝不臆造或乱调工具"
+        tools = _names_to_tools(TOOL_GROUPS["knowledge"])
+        agent_input = (
+            "【路由提示】未能识别用户想做的具体运维操作。请：先用知识库工具尝试回答；"
+            "若知识库无相关答案，就用下面的能力清单告诉用户你能做什么、并反问他具体想做什么；"
+            "禁止调用任何其它工具、禁止编造任务/迁移/实例的状态或进度。\n"
+            f"能力清单：\n{_capability_menu()}\n\n用户消息：{base_input}"
+        )
+    else:
+        agent_input = base_input
+    logger.info("[对话] 意图=%s 工具数=%d", intents or "unknown", len(tools))
 
     try:
-        result = _build_executor().invoke({"input": agent_input, "chat_history": history})
+        result = _build_executor(tools).invoke({"input": agent_input, "chat_history": history})
         reply  = result["output"]
 
         # 清除 LLM 可能在回复文本中虚构的 Markdown 图片占位符

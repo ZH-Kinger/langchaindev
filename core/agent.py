@@ -27,13 +27,17 @@ SESSION_KEY_PREFIX = "agent:chat_history:"
 MAX_HISTORY = 20   # Redis 里最多保留最近 20 条消息（10 轮对话）
 
 
-@lru_cache(maxsize=1)
-def _build_executor() -> AgentExecutor:
-    """首次调用时构建 AgentExecutor（全量工具，非流式），供飞书 Bot 复用"""
+def _build_executor(tools: list = None) -> AgentExecutor:
+    """构建 AgentExecutor（非流式）。tools 留空=全量（向后兼容旧调用与启动预热）；
+    飞书 Bot 传入按消息缩小后的工具子集，避免不相关消息拿到全量工具而乱调。
+
+    不再缓存：工具子集按消息变化，缓存无意义；LLM client 仍由 get_cloud_llm 缓存，
+    每次仅重建 agent+executor 包装（内存操作，开销很小）。"""
+    tools = tools or ALL_TOOLS
     llm = get_cloud_llm()
     prompt = get_agent_prompt()
-    agent = create_tool_calling_agent(llm, ALL_TOOLS, prompt)
-    return AgentExecutor(agent=agent, tools=ALL_TOOLS, verbose=True, handle_parsing_errors=True)
+    agent = create_tool_calling_agent(llm, tools, prompt)
+    return AgentExecutor(agent=agent, tools=tools, verbose=True, handle_parsing_errors=True)
 
 
 # ── 工具路由：三层结构 ──────────────────────────────────────────────────────
@@ -134,59 +138,98 @@ def _looks_like_transfer(text: str) -> bool:
     return has_route_action and has_storage_ref
 
 
-def _legacy_keyword_route(text: str) -> list:
-    """老的关键词路由（保留作为 LLM 路由失败/快通道命中的执行体）。
+def _keyword_route_names(text: str) -> "set | None":
+    """老关键词路由的名集合版：命中返回 TOOL_GROUPS 名集合，**未命中返回 None**。
 
-    text 必须已经是 lower() 后的。
-    分支顺序：先强意图（带专有名词），后弱意图（自然语言泛词）。
+    text 必须已经是 lower() 后的。分支顺序：先强意图（带专有名词），后弱意图（自然语言泛词）。
     knowledge 分支放最后做兜底，避免「怎么/如何」抢占其他意图。
     """
     if any(k in text for k in ("重启", "pod", "k8s", "告警", "降噪", "修复")):
-        names = TOOL_GROUPS["ops"] | TOOL_GROUPS["monitor"]
-    elif any(k in text for k in ("dsw", "实例", "工作站", "启动实例", "停止实例", "删除实例", "pai dsw", "数据科学")):
-        names = TOOL_GROUPS["pai_dsw"]
-    elif any(k in text for k in ("jira", "工单", "gpu申请", "申请记录", "工作项")):
-        names = TOOL_GROUPS["jira"] | TOOL_GROUPS["pai_dsw"]
-    elif any(k in text for k in ("ecs", "云服务器", "重启服务器", "服务器列表", "服务器实例")):
-        names = TOOL_GROUPS["ecs"]
-    elif _looks_like_transfer(text):
-        names = TOOL_GROUPS["transfer"]
-    elif any(k in text for k in ("tos", "火山", "volcano")):
-        names = TOOL_GROUPS["tos"]
-    elif any(k in text for k in ("oss", "对象存储", "bucket", "存储桶", "存储空间",
-                                  "目录大小", "目录结构", "目录树")):
-        names = TOOL_GROUPS["oss"]
-    elif any(k in text for k in ("sls", "日志服务", "查日志", "log service", "logstore", "日志查询")):
-        names = TOOL_GROUPS["sls"]
+        return TOOL_GROUPS["ops"] | TOOL_GROUPS["monitor"]
+    if any(k in text for k in ("dsw", "实例", "工作站", "启动实例", "停止实例", "删除实例", "pai dsw", "数据科学")):
+        return TOOL_GROUPS["pai_dsw"]
+    if any(k in text for k in ("jira", "工单", "gpu申请", "申请记录", "工作项")):
+        return TOOL_GROUPS["jira"] | TOOL_GROUPS["pai_dsw"]
+    if any(k in text for k in ("ecs", "云服务器", "重启服务器", "服务器列表", "服务器实例")):
+        return TOOL_GROUPS["ecs"]
+    if _looks_like_transfer(text):
+        return TOOL_GROUPS["transfer"]
+    if any(k in text for k in ("tos", "火山", "volcano")):
+        return TOOL_GROUPS["tos"]
+    if any(k in text for k in ("oss", "对象存储", "bucket", "存储桶", "存储空间",
+                               "目录大小", "目录结构", "目录树")):
+        return TOOL_GROUPS["oss"]
+    if any(k in text for k in ("sls", "日志服务", "查日志", "log service", "logstore", "日志查询")):
+        return TOOL_GROUPS["sls"]
     # 日报/MFU 必须先于「算力→monitor」「效率→advisor」两个泛词分支，
     # 否则「算力日报」「效率日报」会被抢走，永远到不了 cluster_mfu_report
-    elif any(k in text for k in ("mfu", "日报", "算力效率", "算力利用率", "效率报告")):
-        names = TOOL_GROUPS["cluster"] | TOOL_GROUPS["advisor"] | TOOL_GROUPS["notify"]
-    elif any(k in text for k in ("dlc", "eas", "产品", "算力", "训练任务", "推理", "开发环境", "分布")):
-        names = TOOL_GROUPS["monitor"]
-    elif any(k in text for k in ("集群状态", "所有实例", "全局监控", "哪些在空转",
-                                  "总费用", "集群监控", "cluster", "全部实例",
-                                  "集群优化", "集群建议", "集群效率", "集群成本",
-                                  "集群散热", "集群调度", "集群")):
-        names = TOOL_GROUPS["cluster"] | TOOL_GROUPS["advisor"]
-    elif any(k in text for k in ("训练建议", "算法建议", "训练分析", "利用率低", "怎么优化训练",
-                                  "分析我的gpu", "分析实例", "训练瓶颈", "显存优化", "dataloader",
-                                  "tensor core", "sm利用率", "训练慢", "为什么慢")):
-        names = TOOL_GROUPS["training"]
-    elif any(k in text for k in ("健康", "巡检", "状态怎么样", "在跑吗", "费用多少",
-                                  "要不要停", "实例状态", "跑了多久", "inspect")):
-        names = TOOL_GROUPS["inspect"]
-    elif any(k in text for k in ("建议", "优化", "效率", "成本", "散热", "调度", "空闲", "瓶颈")):
-        names = TOOL_GROUPS["advisor"]
-    elif any(k in text for k in ("cpu", "内存", "memory", "prometheus", "指标", "趋势", "监控")):
-        names = TOOL_GROUPS["monitor"]
-    elif any(k in text for k in ("飞书", "通知", "发送", "消息", "推送")):
-        names = TOOL_GROUPS["notify"]
-    elif any(k in text for k in ("文档", "规程", "知识库", "操作手册", "查文档", "看文档")):
-        names = TOOL_GROUPS["knowledge"] | TOOL_GROUPS["monitor"]
-    else:
-        return ALL_TOOLS
-    return _names_to_tools(names)
+    if any(k in text for k in ("mfu", "日报", "算力效率", "算力利用率", "效率报告")):
+        return TOOL_GROUPS["cluster"] | TOOL_GROUPS["advisor"] | TOOL_GROUPS["notify"]
+    if any(k in text for k in ("dlc", "eas", "产品", "算力", "训练任务", "推理", "开发环境", "分布")):
+        return TOOL_GROUPS["monitor"]
+    if any(k in text for k in ("集群状态", "所有实例", "全局监控", "哪些在空转",
+                               "总费用", "集群监控", "cluster", "全部实例",
+                               "集群优化", "集群建议", "集群效率", "集群成本",
+                               "集群散热", "集群调度", "集群")):
+        return TOOL_GROUPS["cluster"] | TOOL_GROUPS["advisor"]
+    if any(k in text for k in ("训练建议", "算法建议", "训练分析", "利用率低", "怎么优化训练",
+                               "分析我的gpu", "分析实例", "训练瓶颈", "显存优化", "dataloader",
+                               "tensor core", "sm利用率", "训练慢", "为什么慢")):
+        return TOOL_GROUPS["training"]
+    if any(k in text for k in ("健康", "巡检", "状态怎么样", "在跑吗", "费用多少",
+                               "要不要停", "实例状态", "跑了多久", "inspect")):
+        return TOOL_GROUPS["inspect"]
+    if any(k in text for k in ("建议", "优化", "效率", "成本", "散热", "调度", "空闲", "瓶颈")):
+        return TOOL_GROUPS["advisor"]
+    if any(k in text for k in ("cpu", "内存", "memory", "prometheus", "指标", "趋势", "监控")):
+        return TOOL_GROUPS["monitor"]
+    if any(k in text for k in ("飞书", "通知", "发送", "消息", "推送")):
+        return TOOL_GROUPS["notify"]
+    if any(k in text for k in ("文档", "规程", "知识库", "操作手册", "查文档", "看文档")):
+        return TOOL_GROUPS["knowledge"] | TOOL_GROUPS["monitor"]
+    return None
+
+
+def _legacy_keyword_route(text: str) -> list:
+    """老关键词路由（薄封装，行为不变）：命中→对应工具子集；未命中→全量兜底。"""
+    names = _keyword_route_names(text)
+    return _names_to_tools(names) if names else ALL_TOOLS
+
+
+def select_tools_scoped(user_input: str) -> "tuple[list | None, list[str]]":
+    """按当前消息选工具，能区分「未知」。返回 (tools, intents)；tools=None 表示未知意图。
+
+    供飞书 Bot 用（interactive 路径仍用 _select_tools 的全量兜底语义，本函数不改它）。
+    逻辑镜像 _select_tools 三级路由，但把「兜底全量」换成「明确的未知信号」。
+    """
+    text = user_input.lower()
+    knowledge_intent = any(tok in text for tok in _KNOWLEDGE_OVERRIDE_TOKENS)
+
+    # ① 快通道（非知识库覆盖 且 含专有名词）
+    if not knowledge_intent and any(tok in text for tok in _FAST_PATH_TOKENS):
+        names = _keyword_route_names(text)
+        if names:
+            return _names_to_tools(names), []
+
+    # ② LLM 语义路由（带 lru_cache）
+    try:
+        from core.intent_router import route as llm_route
+        intents = llm_route(user_input)
+        if intents:
+            tools = _intents_to_tools(intents)
+            if tools:
+                return tools, intents
+    except Exception as e:
+        from utils.logger import get_logger
+        get_logger(__name__).warning("[Router] LLM 路由模块异常，降级关键词：%s", e)
+
+    # ③ 关键词兜底
+    names = _keyword_route_names(text)
+    if names:
+        return _names_to_tools(names), []
+
+    # 全落空 → 未知
+    return None, []
 
 
 @lru_cache(maxsize=8)
@@ -274,8 +317,7 @@ def _switch_model(model_name: str) -> str:
     # 清除 LLM 缓存，使新配置生效
     clear_llm_cache()
     
-    # 清除 agent executor 缓存
-    _build_executor.cache_clear()
+    # 清除 agent executor 缓存（_build_executor 已不缓存，无需清；流式执行器仍缓存）
     _get_streaming_executor.cache_clear()
     
     return f"模型已切换为: {model_name}"
