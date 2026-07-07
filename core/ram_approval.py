@@ -530,6 +530,9 @@ def create_volcano_iam_account(
         else:
             raise
 
+    # 主账号ID 已知后重建登录地址（火山子用户登录地址带主账号ID）
+    result.login_url = build_volcano_login_url(req.login_name, result.account_id)
+
     if _ensure_volcano_user_profile(client, models, req, existing_user, force=result.created_user):
         result.updated_user_profile = True
 
@@ -685,8 +688,14 @@ def _volcano_is_already_exists(exc: Exception) -> bool:
     return ("already" in text or "exist" in text or "conflict" in text) and not _volcano_is_not_exist(exc)
 
 
-def build_volcano_login_url(user_name: str = "") -> str:
-    return getattr(settings, "VOLCANO_IAM_LOGIN_URL", "") or "https://console.volcengine.com/auth/login/"
+def build_volcano_login_url(user_name: str = "", account_id: str = "") -> str:
+    """火山 IAM 子用户登录地址。带主账号ID 时形如
+    https://console.volcengine.com/auth/login/user/<主账号ID>（与阿里云登录不同）。"""
+    base = (getattr(settings, "VOLCANO_IAM_LOGIN_URL", "")
+            or "https://console.volcengine.com/auth/login/").rstrip("/")
+    if account_id:
+        return f"{base}/user/{account_id}"
+    return base + "/"
 
 
 def _ensure_user_profile(
@@ -947,7 +956,7 @@ def _account_delivery_text(req: RamAccountRequest, result: RamAccountResult) -> 
         access_key_secret = item.access_key_secret or "-"
         password = req.password if req.console_access else "-"
         item_groups = _groups_for_platform(req, item.platform)
-        sections.append("\n".join([
+        section_lines = [
             f"{item.platform_label} \u8d26\u53f7\u4fe1\u606f",
             "",
             "\u767b\u5f55\u5730\u5740",
@@ -956,6 +965,11 @@ def _account_delivery_text(req: RamAccountRequest, result: RamAccountResult) -> 
             login_principal or item.user_name,
             "\u767b\u5f55\u5bc6\u7801",
             password,
+        ]
+        # \u4e3b\u8d26\u53f7ID\uff08\u706b\u5c71\u767b\u5f55\u5fc5\u9700\uff1b\u963f\u91cc\u4e91 account_id \u4e3a\u7a7a\u65f6\u81ea\u52a8\u8df3\u8fc7\uff09
+        if item.account_id:
+            section_lines += ["\u6240\u5c5e\u4e3b\u8d26\u53f7ID", item.account_id]
+        section_lines += [
             "AccessKey ID",
             access_key_id,
             "AccessKey Secret",
@@ -968,7 +982,8 @@ def _account_delivery_text(req: RamAccountRequest, result: RamAccountResult) -> 
             ", ".join(item_groups) if item_groups else "-",
             "\u521b\u5efa\u7ed3\u679c",
             _result_summary(item),
-        ]))
+        ]
+        sections.append("\n".join(section_lines))
     sections.append("\n".join([
         "\u6ce8\u610f",
         "AccessKey Secret \u53ea\u5728\u672c\u6b21\u5ba1\u6279\u8bc4\u8bba\u4e2d\u5c55\u793a\u4e00\u6b21\u3002",
