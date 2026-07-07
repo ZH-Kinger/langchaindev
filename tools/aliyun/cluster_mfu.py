@@ -329,7 +329,8 @@ def _region_elements(d):
     """单区域面板（飞书卡片：fields 栅格对齐 + 诊断 bullets）。"""
     low = settings.MFU_LOW_THRESHOLD_PCT
     y, nd = d["yesterday"], d["nodes"]
-    mfu = "—" if y["active_avg"] == 0 else f"{_pct(y['mfu'])}（峰{_pct(y['mfu_peak'])}/谷{_pct(y['mfu_low'])}）"
+    # 「MFU」标签保留，值改用 GPU 算力利用率(DutyCycle，与阿里云控制台同口径)
+    mfu = "—" if y["active_avg"] == 0 else _pct(y.get("gpu_util", 0))
 
     els = [
         div(f"**▍{d['region_name']} · {d['gpu_name']}**　峰值 {d['peak_tflops']:.0f} TFLOPS"
@@ -374,7 +375,7 @@ def _summary_lines(g):
              "|---|---|---|---|---|---|---|"]
     for d in g["regions"]:
         y = d["yesterday"]
-        mfu = "—" if y["active_avg"] == 0 else _pct(y["mfu"])
+        mfu = "—" if y["active_avg"] == 0 else _pct(y.get("gpu_util", 0))  # 值=GPU算力利用率(DutyCycle)
         lines.append(f"| {d['region_name']} | {d['gpu_name']} | {d['gpu_total']}/{d['gpu_request']} "
                      f"| {mfu} | {y['active_avg']:.0f} | {y['tflops_avg']:.0f} | {d['nodes']['fully_free_nodes']} |")
     lines.append(f"| **合计** | | **{g['gpu_total']}/{g['gpu_request']}** | | | **{g['tflops']:.0f}** | |")
@@ -392,7 +393,8 @@ def _summary_lines(g):
 def _region_lines(d):
     low = settings.MFU_LOW_THRESHOLD_PCT
     y, nd = d["yesterday"], d["nodes"]
-    mfu = "—" if y["active_avg"] == 0 else f"{_pct(y['mfu'])}（峰 {_pct(y['mfu_peak'])}/谷 {_pct(y['mfu_low'])}）"
+    # 「MFU」标签保留，值改用 GPU 算力利用率(DutyCycle)
+    mfu = "—" if y["active_avg"] == 0 else _pct(y.get("gpu_util", 0))
     lines = [
         f"**▍{d['region_name']} · {d['gpu_name']}**（峰值 {d['peak_tflops']:.0f} TFLOPS · {nd['node_count']}×{nd['node_cap']}卡）",
         "",
@@ -452,7 +454,8 @@ def _realtime_lines(g):
         rk, peak = (d["region"],), d["peak_tflops"]
         active = a_dlc.get(rk, 0) + a_dsw.get(rk, 0)
         tflops = tf_dlc.get(rk, 0) + tf_dsw.get(rk, 0)
-        mfu = "—" if not active else _pct(tflops / (active * peak) * 100 if peak else 0)
+        # 「MFU」列标签保留，值改用 GPU 算力利用率(当前 DutyCycle)
+        mfu = "—" if not active else _pct(gpu.get(rk, 0))
         lines.append(f"| {d['region_name']} | {d['gpu_name']} | {_pct(gpu.get(rk, 0))} | {_pct(sm.get(rk, 0))} "
                      f"| {_pct(ta.get(rk, 0))} | {mfu} | {active:.0f} | {tflops:.0f} |")
     lines += ["", "_此为当前瞬时值；昨日全天均值见「📊 全局」_"]
