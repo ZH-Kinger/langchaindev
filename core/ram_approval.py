@@ -1258,6 +1258,28 @@ def _instance_record_key(instance_code: str) -> str:
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
+def _humanize_error(exc: Exception) -> str:
+    """把云 SDK 的原始异常（尤其火山 ApiException 的 400 HTTP dump）转成申请人能看懂的可执行提示。"""
+    raw = str(exc)
+    code = msg = ""
+    body = getattr(exc, "body", "") or ""
+    if body:
+        try:
+            j = json.loads(body)
+            err = (j.get("ResponseMetadata") or {}).get("Error") or j.get("error") or j.get("Error") or {}
+            code = err.get("Code") or err.get("code") or ""
+            msg = err.get("Message") or err.get("message") or ""
+        except Exception:
+            pass
+    blob = f"{code} {msg} {raw}".lower()
+    if "invalidpassword" in blob or ("password" in blob and any(k in blob for k in ("policy", "satisfy", "weak", "密码"))):
+        return ("登录密码不符合密码策略（一般需 8–32 位，且同时包含大写字母、小写字母、数字、特殊字符）。"
+                "请修改登录密码后重新提交审批。")
+    if code or msg:
+        return f"{code}: {msg}".strip(" :")
+    return raw[:300]
+
+
 def notify_failure(
     instance_code: str,
     exc: Exception,
@@ -1265,7 +1287,7 @@ def notify_failure(
     *,
     approval_comment_id: str = "",
 ) -> None:
-    text = f"RAM 子账号审批执行失败\n审批实例: {instance_code or '-'}\n错误: {exc}"
+    text = f"RAM 子账号审批执行失败\n审批实例: {instance_code or '-'}\n错误: {_humanize_error(exc)}"
     if _delivery_mode() in {"approval_comment", "comment"} and instance_code:
         try:
             _send_approval_comment(
