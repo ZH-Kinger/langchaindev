@@ -695,6 +695,12 @@ class DSWScheduler:
             )
             self._oss_perm_thread.start()
             extra += " + OSS权限对账推送"
+        if getattr(settings, "DATASET_DASHBOARD_ENABLED", False):
+            self._dataset_dash_thread = threading.Thread(
+                target=self._dataset_dashboard_loop, name="dataset-dashboard", daemon=True
+            )
+            self._dataset_dash_thread.start()
+            extra += " + 数据集大盘维护"
         logger.info("[Scheduler] 启动：Jira 轮询 + DSW 超时监控 + GPU 空转检测 + 每日早报(实例+集群)%s", extra)
 
     def stop(self) -> None:
@@ -758,6 +764,24 @@ class DSWScheduler:
                 run_capacity_scan()
             except Exception:
                 logger.error("[Scheduler] 容量巡检失败", exc_info=True)
+
+    def _dataset_dashboard_loop(self) -> None:
+        """数据集大盘维护：对齐到北京整点的 DATASET_DASHBOARD_INTERVAL_HOURS 倍数（同容量巡检对齐法）。"""
+        from core.dataset_dashboard import run_once
+        step = max(1, min(24, int(getattr(settings, "DATASET_DASHBOARD_INTERVAL_HOURS", 24))))
+        while self._running:
+            now = _bj_now()
+            nh = ((now.hour // step) + 1) * step
+            if nh >= 24:
+                target = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            else:
+                target = now.replace(hour=nh, minute=0, second=0, microsecond=0)
+            if not _sleep_until(target, lambda: self._running):
+                break
+            try:
+                run_once()
+            except Exception:
+                logger.error("[Scheduler] 数据集大盘维护失败", exc_info=True)
 
     def _oss_perm_loop(self) -> None:
         """每日北京时间 OSS_PERM_PUSH_HOUR:20 对账，把待同步权限推到群（带批准按钮）。"""

@@ -274,6 +274,13 @@ class Config:
     CAPACITY_BITABLE_TABLE_VENDOR   = os.environ.get("CAPACITY_BITABLE_TABLE_VENDOR", "")    # 厂家总量表
     CAPACITY_BITABLE_TABLE_BATCH    = os.environ.get("CAPACITY_BITABLE_TABLE_BATCH", "")     # 批次明细表
 
+    # 数据集大盘维护：定时遍历该多维表格现有行，按 uri 扫对象存储回填 状态/云/厂商|来源/时长/数据集类型
+    # （只填数据、不改结构、绝不碰人工分析列）。与容量巡检的三表完全独立。
+    DATASET_DASHBOARD_ENABLED        = os.environ.get("DATASET_DASHBOARD_ENABLED", "false").lower() == "true"
+    DATASET_DASHBOARD_APP_TOKEN      = os.environ.get("DATASET_DASHBOARD_APP_TOKEN", "")
+    DATASET_DASHBOARD_TABLE_ID       = os.environ.get("DATASET_DASHBOARD_TABLE_ID", "")
+    DATASET_DASHBOARD_INTERVAL_HOURS = int(os.environ.get("DATASET_DASHBOARD_INTERVAL_HOURS", 24))
+
     # Redis
     REDIS_HOST     = os.environ.get("REDIS_HOST", "127.0.0.1")
     REDIS_PORT     = int(os.environ.get("REDIS_PORT", 6379))
