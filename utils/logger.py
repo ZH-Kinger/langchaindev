@@ -87,6 +87,10 @@ class _FeishuAlertHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         if _error_callback is None:
             return
+        # 不推送 werkzeug 访问日志噪音：公网端口常被外网扫描器打畸形请求（RDP 探测等），
+        # werkzeug 会记 code 400/404 的 ERROR，与 Bot 自身故障无关。仍写 file/console，只是不 🚨。
+        if record.name.split(".")[0] == "werkzeug":
+            return
         try:
             tid   = getattr(record, "trace_id", "-")
             brief = self.format(record).splitlines()[0]   # 只取第一行，不发堆栈
