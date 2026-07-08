@@ -281,6 +281,10 @@ class Config:
     DATASET_DASHBOARD_TABLE_ID       = os.environ.get("DATASET_DASHBOARD_TABLE_ID", "")
     DATASET_DASHBOARD_INTERVAL_HOURS = int(os.environ.get("DATASET_DASHBOARD_INTERVAL_HOURS", 24))
 
+    # 数据流动/迁移在途任务对账：后台轮询线程随容器重启而死会漏掉“完成通知”；调度器每 2min
+    # 扫描孤儿(在途且 updated_ts 过期)任务，实时重查、完成即自动补推结果卡。默认开启。
+    DATAFLOW_RECONCILE_ENABLED       = os.environ.get("DATAFLOW_RECONCILE_ENABLED", "true").lower() == "true"
+
     # Redis
     REDIS_HOST     = os.environ.get("REDIS_HOST", "127.0.0.1")
     REDIS_PORT     = int(os.environ.get("REDIS_PORT", 6379))

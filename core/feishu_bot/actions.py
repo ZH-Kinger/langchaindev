@@ -1055,7 +1055,7 @@ def _h_query_bucket_transfer(action_val, open_id, chat_id, form_value):
     job_id = action_val.get("job_id", "") if isinstance(action_val, dict) else ""
     from core.bucket_transfer import orchestrator
     from core.bucket_transfer.cards import progress_card, result_card
-    job = orchestrator.get_job(job_id) if job_id else None
+    job = orchestrator.refresh(job_id) if job_id else None   # 实时重查，自愈重启导致的卡 RUNNING
     if not job:
         return {"toast": {"type": "error", "content": "任务不存在或已过期"}}
     card = (result_card(job) if job["stage"] in (orchestrator.STAGE_DONE, orchestrator.STAGE_FAILED)

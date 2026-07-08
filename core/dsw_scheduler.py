@@ -657,6 +657,7 @@ class DSWScheduler:
 
     TICKET_POLL_INTERVAL = 20    # 秒：轮询 Jira 间隔
     INSTANCE_CHECK_INTERVAL = 300  # 秒：检查实例超时间隔
+    DATAFLOW_RECONCILE_INTERVAL = 120  # 秒：数据流动/迁移在途任务对账间隔
 
     def __init__(self):
         self._running = False
@@ -665,6 +666,7 @@ class DSWScheduler:
         self._morning_thread: threading.Thread | None = None
         self._capacity_thread: threading.Thread | None = None
         self._oss_perm_thread: threading.Thread | None = None
+        self._reconcile_thread: threading.Thread | None = None
 
     def start(self) -> None:
         if self._running:
@@ -701,6 +703,12 @@ class DSWScheduler:
             )
             self._dataset_dash_thread.start()
             extra += " + 数据集大盘维护"
+        if getattr(settings, "DATAFLOW_RECONCILE_ENABLED", True):
+            self._reconcile_thread = threading.Thread(
+                target=self._dataflow_reconcile_loop, name="dataflow-reconcile", daemon=True
+            )
+            self._reconcile_thread.start()
+            extra += " + 数据流动/迁移对账"
         logger.info("[Scheduler] 启动：Jira 轮询 + DSW 超时监控 + GPU 空转检测 + 每日早报(实例+集群)%s", extra)
 
     def stop(self) -> None:
@@ -783,6 +791,17 @@ class DSWScheduler:
             except Exception:
                 logger.error("[Scheduler] 数据集大盘维护失败", exc_info=True)
 
+    def _dataflow_reconcile_loop(self) -> None:
+        """每 2 分钟对账在途数据流动/迁移任务：孤儿(重启后线程已死)完成时自动补推结果卡。
+        调度器随容器一起重启复活，故此循环本身抗重启——真正做到“跑完必通知”。"""
+        time.sleep(45)   # 等 Flask + 在线线程先起来
+        while self._running:
+            try:
+                _reconcile_dataflow_once()
+            except Exception:
+                logger.error("[Scheduler] 数据流动/迁移对账失败", exc_info=True)
+            time.sleep(self.DATAFLOW_RECONCILE_INTERVAL)
+
     def _oss_perm_loop(self) -> None:
         """每日北京时间 OSS_PERM_PUSH_HOUR:20 对账，把待同步权限推到群（带批准按钮）。"""
         hour = max(0, min(23, settings.OSS_PERM_PUSH_HOUR))
@@ -797,6 +816,84 @@ class DSWScheduler:
                 _run_oss_perm_audit_push()
             except Exception:
                 logger.error("[Scheduler] OSS 权限对账推送失败", exc_info=True)
+
+
+def _dataflow_reconcile_specs() -> list[dict]:
+    """在途数据流动/迁移任务的对账规格：命名空间 → (orchestrator, cards, 在途阶段, 目标群, 清理钩子)。
+
+    每个 orchestrator 都有 _KEY_PREFIX / get_job / refresh / _save / result_card。
+    refresh 只轮询、绝不重新提交任务，故对账是只读推进、幂等安全。
+    """
+    from core.transfer import orchestrator as tr, cards as trc
+    from core.cpfs_dataflow import orchestrator as cp, cards as cpc
+    from core.vepfs_dataflow import orchestrator as ve, cards as vec
+    from core.bucket_transfer import orchestrator as bk, cards as bkc
+    return [
+        {"name": "transfer", "o": tr, "cards": trc, "active": {tr.STAGE_CROSSING},
+         "chat": lambda: settings.TRANSFER_CHAT_ID or settings.FEISHU_CHAT_ID, "cleanup": None},
+        {"name": "cpfs", "o": cp, "cards": cpc, "active": {cp.STAGE_RUNNING},
+         "chat": lambda: settings.CPFS_CHAT_ID or settings.FEISHU_CHAT_ID,
+         "cleanup": getattr(cp, "_cleanup_ephemeral", None)},   # cpfs 终态删临时 DataFlow
+        {"name": "vepfs", "o": ve, "cards": vec, "active": {ve.STAGE_RUNNING},
+         "chat": lambda: settings.VEPFS_CHAT_ID or settings.FEISHU_CHAT_ID, "cleanup": None},
+        {"name": "bucket", "o": bk, "cards": bkc, "active": {bk.STAGE_RUNNING},
+         "chat": lambda: settings.TRANSFER_CHAT_ID or settings.FEISHU_CHAT_ID, "cleanup": None},
+    ]
+
+
+# 只对账“更新时间已过期”的在途任务：活着的后台线程每 60s 轮询一次会刷新 updated_ts，
+# 故新鲜(<阈值)的任务必有线程在管、交给它推卡；过期的才是重启后被孤儿化、需要对账接管。
+# 这样天然与在线线程错开，happy-path 不会重复推送。
+_DATAFLOW_RECONCILE_STALE = 180
+
+
+def _reconcile_dataflow_once() -> None:
+    """扫各命名空间的在途任务，对孤儿(线程已死、updated_ts 过期)实时重查；
+    完成/失败则推结果卡并置 notified，保证“任务无论中途重启几次，跑完都会自动通知”。"""
+    try:
+        r = get_redis()
+    except Exception:
+        return
+    if r is None:
+        return
+    now = time.time()
+    for spec in _dataflow_reconcile_specs():
+        o = spec["o"]
+        prefix = o._KEY_PREFIX
+        try:
+            keys = list(r.scan_iter(f"{prefix}*"))
+        except Exception:
+            continue
+        for key in keys:
+            job_id = key.replace(prefix, "")
+            try:
+                job = o.get_job(job_id)
+            except Exception:
+                continue
+            if not job or job.get("stage") not in spec["active"] or job.get("notified"):
+                continue
+            if now - float(job.get("updated_ts", 0) or 0) < _DATAFLOW_RECONCILE_STALE:
+                continue   # 新鲜 = 有活线程在轮询，交给它，避免重复通知
+            try:
+                fresh = o.refresh(job_id) or job   # 只轮询、不重提交；顺带接管孤儿轮询
+            except Exception:
+                logger.warning("[Reconcile] %s 重查失败 job=%s", spec["name"], job_id, exc_info=True)
+                continue
+            if fresh.get("stage") not in (o.STAGE_DONE, o.STAGE_FAILED):
+                continue   # 仍在途：refresh 已落库刷新 updated_ts，下一轮再看
+            if spec["cleanup"]:
+                try:
+                    spec["cleanup"](fresh)
+                except Exception:
+                    logger.warning("[Reconcile] %s 清理失败 job=%s", spec["name"], job_id, exc_info=True)
+            try:
+                _send_card("", spec["chat"](), spec["cards"].result_card(fresh))
+                fresh["notified"] = True
+                o._save(fresh)
+                logger.info("[Reconcile] %s 任务 %s 完成后自动补通知(%s)",
+                            spec["name"], job_id, fresh["stage"])
+            except Exception:
+                logger.error("[Reconcile] %s 推送结果卡失败 job=%s", spec["name"], job_id, exc_info=True)
 
 
 # 全局单例
