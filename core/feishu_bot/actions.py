@@ -464,6 +464,15 @@ def _h_submit_transfer(action_val, open_id, chat_id, form_value):
                 _send_text(open_id, _cfg_chat(),
                            f"\u26a0\ufe0f \u65b9\u5411 {plan.direction} \u6682\u672a\u652f\u6301\uff08\u4e09\u671f\u6c89\u964d\u6bb5\uff09\u3002")
                 return
+            # \u5e42\u7b49\uff1a\u8fde\u70b9\u201c\u89e3\u6790\u5e76\u9884\u4f30\u201d\u4f1a\u5404\u8dd1\u4e00\u6b21\u6162\u9884\u4f30\uff08\u5217\u5927\u76ee\u5f55 10 \u4e07+\u5bf9\u8c61\uff09+ \u5404\u63a8\u4e00\u5f20\u786e\u8ba4\u5361\u3002
+            # \u6309 job_id\uff08\u6e90/\u76ee\u7684/\u5f53\u5929 hash\uff09\u539f\u5b50\u53bb\u91cd\uff0c30s \u5185\u53ea\u89e3\u6790\u3001\u53ea\u63a8\u4e00\u5f20\u3002
+            job_id = orchestrator._job_id(plan)
+            try:
+                from utils.redis_client import get_redis
+                if not get_redis().set(f"transfer:confirmcard:{job_id}", 1, nx=True, ex=30):
+                    return
+            except Exception:
+                pass
             bytes_total, objects_total = orchestrator.estimate_source(plan)
             job = orchestrator.create_job_record(
                 plan, open_id=open_id, same_name_policy=same_name_policy,
@@ -477,7 +486,8 @@ def _h_submit_transfer(action_val, open_id, chat_id, form_value):
             _send_text(open_id, _cfg_chat(), f"\u274c \u8fc1\u79fb\u8bf7\u6c42\u5904\u7406\u5931\u8d25\uff1a{e}")
 
     threading.Thread(target=_do_prepare, daemon=True).start()
-    return {"toast": {"type": "success", "content": "\u6b63\u5728\u89e3\u6790\u5730\u5740\u5e76\u9884\u4f30\uff0c\u7a0d\u5019\u63a8\u9001\u786e\u8ba4\u5361"}}
+    return {"toast": {"type": "success",
+                      "content": "\u6b63\u5728\u540e\u53f0\u89e3\u6790+\u9884\u4f30\uff08\u5927\u76ee\u5f55\u8f83\u6162\uff0c\u7ea6 10-30 \u79d2\uff09\uff0c\u7a0d\u5019\u63a8\u9001\u786e\u8ba4\u5361\uff0c\u8bf7\u52ff\u91cd\u590d\u70b9\u51fb"}}
 
 
 def _h_confirm_transfer(action_val, open_id, chat_id, form_value):
@@ -492,6 +502,8 @@ def _h_confirm_transfer(action_val, open_id, chat_id, form_value):
         return {"toast": {"type": "error", "content": "\u4efb\u52a1\u4e0d\u5b58\u5728\u6216\u5df2\u8fc7\u671f"}}
     if job["stage"] not in (orchestrator.STAGE_NEW, orchestrator.STAGE_FAILED):
         return {"toast": {"type": "info", "content": f"\u4efb\u52a1\u5df2\u5728 {job['stage']}\uff0c\u65e0\u9700\u91cd\u590d"}}
+    if job.get("launched"):
+        return {"toast": {"type": "info", "content": "\u4efb\u52a1\u5df2\u4e0b\u53d1\uff0c\u8bf7\u52ff\u91cd\u590d\u70b9\u51fb"}}
 
     fv = form_value or {}
     same_name_policy = (
@@ -504,6 +516,18 @@ def _h_confirm_transfer(action_val, open_id, chat_id, form_value):
 
     if orchestrator.needs_approval(job.get("bytes_total", 0)) and open_id != settings.ADMIN_FEISHU_OPEN_ID:
         return {"toast": {"type": "error", "content": "\u8d85\u8fc7\u5ba1\u6279\u9608\u503c\uff0c\u4ec5\u7ba1\u7406\u5458\u53ef\u786e\u8ba4\u4e0b\u53d1"}}
+
+    # \u8fde\u70b9\u201c\u786e\u8ba4\u8fc1\u79fb\u201d\uff08\u4e0d\u540c\u786e\u8ba4\u5361 \u2192 \u4e0d\u540c msg_id\uff0c\u5185\u5bb9\u53bb\u91cd\u6321\u4e0d\u4f4f\uff09\u4f1a\u5404\u8d77\u4e00\u4e2a\u8f6e\u8be2\u7ebf\u7a0b\u3001\u5404\u5237\u8fdb\u5ea6/\u7ed3\u679c\u5361\u3002
+    # Redis \u539f\u5b50\u9501\uff08\u5feb\u8def\u5f84\uff09+ \u6301\u4e45 launched \u6807\u8bb0\uff08\u8de8\u9501\u8fc7\u671f\u515c\u5e95\uff09\uff1a\u53ea\u6709\u9996\u6b21\u771f\u6b63\u4e0b\u53d1\uff0c\u5176\u4f59\u56de\u201c\u5df2\u4e0b\u53d1\u201d\u3002
+    # \u5e95\u5c42 MGW \u5bf9\u540c\u540d\u4efb\u52a1\u5e42\u7b49\uff0c\u6545\u5373\u4fbf\u6f0f\u7f51\u4e5f\u53ea\u6709\u4e00\u4e2a\u771f\u5b9e\u8fc1\u79fb\uff0c\u8fd9\u91cc\u4e3b\u8981\u6b62\u4f4f\u7ebf\u7a0b/\u5237\u5361\u98ce\u66b4\u3002
+    try:
+        from utils.redis_client import get_redis
+        if not get_redis().set(f"transfer:launch:{job_id}", 1, nx=True, ex=120):
+            return {"toast": {"type": "info", "content": "\u4efb\u52a1\u5df2\u4e0b\u53d1\uff0c\u8bf7\u52ff\u91cd\u590d\u70b9\u51fb"}}
+    except Exception:
+        pass
+    job["launched"] = True
+    orchestrator._save(job)
 
     def _do_transfer() -> None:
         from core.dsw_scheduler import _send_card, _send_text
@@ -544,8 +568,16 @@ def _h_retry_transfer(action_val, open_id, chat_id, form_value):
     job = orchestrator.get_job(job_id) if job_id else None
     if not job:
         return {"toast": {"type": "error", "content": "\u4efb\u52a1\u4e0d\u5b58\u5728\u6216\u5df2\u8fc7\u671f"}}
+    # \u5fc5\u987b\u843d\u76d8\uff1a_h_confirm_transfer \u4f1a\u4ece Redis \u91cd\u65b0\u53d6 job\uff1b\u4e0d save \u5219\u8bfb\u5230\u65e7 launched=True \u88ab\u6321\u3002
     job["stage"] = orchestrator.STAGE_NEW
     job["error"] = ""
+    job["launched"] = False
+    orchestrator._save(job)
+    try:
+        from utils.redis_client import get_redis
+        get_redis().delete(f"transfer:launch:{job_id}")
+    except Exception:
+        pass
     return _h_confirm_transfer({"job_id": job_id}, open_id, chat_id, form_value)
 
 
