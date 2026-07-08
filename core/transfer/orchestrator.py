@@ -370,6 +370,18 @@ def poll_once(job: dict) -> dict:
     return job
 
 
+def refresh(job_id: str):
+    """查进度前实时重查云端：后台轮询线程会随容器重启而死，只读 Redis 会停在旧 CROSSING。
+    stage 仍 CROSSING 且有 cross_job_name → poll_once 重查并落库（点“查询这条”即可自愈）。"""
+    job = get_job(job_id)
+    if job and job.get("stage") == STAGE_CROSSING and job.get("cross_job_name"):
+        try:
+            job = poll_once(job)
+        except Exception:
+            pass
+    return job
+
+
 def run_to_completion(job: dict, *, on_update=None, poll_interval: int = 60,
                       max_polls: int = 1440) -> dict:
     """启动跨云段并阻塞轮询至终态（供后台线程调用）。

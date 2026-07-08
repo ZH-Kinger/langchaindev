@@ -528,7 +528,7 @@ def _h_query_transfer_progress(action_val, open_id, chat_id, form_value):
     job_id = action_val.get("job_id", "") if isinstance(action_val, dict) else ""
     from core.transfer import orchestrator
     from core.transfer.cards import progress_card, result_card
-    job = orchestrator.get_job(job_id) if job_id else None
+    job = orchestrator.refresh(job_id) if job_id else None   # 实时重查，自愈重启导致的卡 CROSSING
     if not job:
         return {"toast": {"type": "error", "content": "任务不存在或已过期"}}
     card = (result_card(job) if job["stage"] in (orchestrator.STAGE_DONE, orchestrator.STAGE_FAILED)
@@ -741,7 +741,7 @@ def _h_query_cpfs_progress(action_val, open_id, chat_id, form_value):
     job_id = action_val.get("job_id", "") if isinstance(action_val, dict) else ""
     from core.cpfs_dataflow import orchestrator
     from core.cpfs_dataflow.cards import progress_card, result_card
-    job = orchestrator.get_job(job_id) if job_id else None
+    job = orchestrator.refresh(job_id) if job_id else None   # 实时重查，自愈重启导致的卡 RUNNING
     if not job:
         return {"toast": {"type": "error", "content": "任务不存在或已过期"}}
     card = (result_card(job) if job["stage"] in (orchestrator.STAGE_DONE, orchestrator.STAGE_FAILED)
@@ -852,7 +852,7 @@ def _h_query_vepfs_progress(action_val, open_id, chat_id, form_value):
     job_id = action_val.get("job_id", "") if isinstance(action_val, dict) else ""
     from core.vepfs_dataflow import orchestrator
     from core.vepfs_dataflow.cards import progress_card, result_card
-    job = orchestrator.get_job(job_id) if job_id else None
+    job = orchestrator.refresh(job_id) if job_id else None   # 实时重查，自愈重启导致的卡 RUNNING
     if not job:
         return {"toast": {"type": "error", "content": "任务不存在或已过期"}}
     card = (result_card(job) if job["stage"] in (orchestrator.STAGE_DONE, orchestrator.STAGE_FAILED)
@@ -894,7 +894,7 @@ def _h_query_progress_by_id(action_val, open_id, chat_id, form_value):
     if low.startswith("vepfs-"):
         from core.vepfs_dataflow import orchestrator as o
         from core.vepfs_dataflow.cards import progress_card, result_card
-        job = o.get_job(jid)
+        job = o.refresh(jid)
         if not job:
             return {"toast": {"type": "error", "content": f"未找到任务 {jid}（可能已过期）"}}
         c = (result_card(job) if job["stage"] in (o.STAGE_DONE, o.STAGE_FAILED)
@@ -904,7 +904,7 @@ def _h_query_progress_by_id(action_val, open_id, chat_id, form_value):
     if low.startswith("cpfs-"):
         from core.cpfs_dataflow import orchestrator as o
         from core.cpfs_dataflow.cards import progress_card, result_card
-        job = o.get_job(jid)
+        job = o.refresh(jid)
         if not job:
             return {"toast": {"type": "error", "content": f"未找到任务 {jid}（可能已过期）"}}
         c = (result_card(job) if job["stage"] in (o.STAGE_DONE, o.STAGE_FAILED)
@@ -914,7 +914,7 @@ def _h_query_progress_by_id(action_val, open_id, chat_id, form_value):
     if low.startswith("tr-"):
         from core.transfer import orchestrator as o
         from core.transfer.cards import progress_card, result_card
-        job = o.get_job(jid)
+        job = o.refresh(jid)
         if not job:
             return {"toast": {"type": "error", "content": f"未找到任务 {jid}（可能已过期）"}}
         c = (result_card(job) if job["stage"] in (o.STAGE_DONE, o.STAGE_FAILED)

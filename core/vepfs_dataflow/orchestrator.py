@@ -307,6 +307,18 @@ def poll_once(job: dict) -> dict:
     return job
 
 
+def refresh(job_id: str):
+    """查进度前实时重查云端：后台轮询线程会随容器重启而死，只读 Redis 会停在旧 RUNNING。
+    stage 仍 RUNNING 且有 task_id → poll_once 重查并落库（点“查询”即可自愈看到真实终态）。"""
+    job = get_job(job_id)
+    if job and job.get("stage") == STAGE_RUNNING and job.get("task_id"):
+        try:
+            job = poll_once(job)
+        except Exception:
+            pass
+    return job
+
+
 def run_to_completion(job: dict, *, on_update=None, poll_interval: int = 60,
                       max_polls: int = 1440) -> dict:
     """启动任务并阻塞轮询至终态（供后台线程调用）。"""
