@@ -16,9 +16,11 @@ region 须与 vePFS 文件系统所在区域一致。
 与阿里 NAS DataFlow 的关键差异：火山**没有** CreateDataFlow 持久绑定对象，任务参数里直接带
 TOS 桶/前缀 + vePFS 侧 SubPath/FilesetId，方向只由 TaskAction 决定，不反转源/目的字段。
 
-请求字段名来自 SDK models（snake_case）。少数取值待真机反查（已在注释标注）：
-  - DataStorage 桶串格式（tos://bucket vs 裸桶名）
-  - task status 终态枚举串（SDK 里是自由 str）
+请求字段名来自 SDK models（snake_case）。cn-shanghai 真机反查已确认：
+  - DataStorage = **裸桶名**（带 tos:// 会 InvalidParameter.BucketName）
+  - DataStoragePath / SubPath 非空须 **首尾都带斜杠** /a/b/（内部名 SourceStoragePrefix / SubPath）
+  - DataStoragePath 允许空串（= 整桶根）
+待反查：task status 终态枚举串（SDK 里是自由 str）
 """
 import logging
 
@@ -86,11 +88,26 @@ def _api(region: str):
 
 
 def _data_storage(tos_bucket: str) -> str:
-    """DataStorage 桶串。默认 tos://<bucket>（若真机报参数错，改成裸桶名）。"""
+    """DataStorage = 裸桶名（cn-shanghai 真机反查：带 tos:// 前缀会被判 InvalidParameter.BucketName；
+    裸桶名才被正确解析为 BucketName）。"""
     b = (tos_bucket or "").strip()
     if b.startswith("tos://"):
-        return b
-    return f"tos://{b}"
+        b = b[len("tos://"):]
+    return b.strip("/")
+
+
+def _norm_slash_dir(p: str) -> str:
+    """vePFS DataFlow 路径格式（cn-shanghai 真机反查）：SubPath 与 DataStoragePath 非空时必须
+    首尾都带 '/'（形如 /a/b/）；无首斜杠、仅首斜杠、仅尾斜杠都会被判 InvalidParameter.*。
+    空串保留（DataStoragePath 空 = 整桶根，合法）。"""
+    p = (p or "").strip()
+    if not p:
+        return ""
+    if not p.startswith("/"):
+        p = "/" + p
+    if not p.endswith("/"):
+        p += "/"
+    return p
 
 
 def submit_task(*, fs_id: str, task_action: str, tos_bucket: str, tos_prefix: str = "",
@@ -109,14 +126,14 @@ def submit_task(*, fs_id: str, task_action: str, tos_bucket: str, tos_prefix: st
         task_action=task_action,
         data_type=data_type or DATA_TYPE_DEFAULT,
         data_storage=_data_storage(tos_bucket),
-        data_storage_path=tos_prefix or "",
+        data_storage_path=_norm_slash_dir(tos_prefix),   # 首尾带斜杠 /a/b/ 或空
         same_name_file_policy=_overwrite_policy(same_name_policy),
     )
-    # vePFS 侧目录：Fileset 优先（智算/配额目录），否则子目录 SubPath
+    # vePFS 侧目录：Fileset 优先（智算/配额目录），否则子目录 SubPath（首尾带斜杠 /a/b/）
     if fileset_id:
         kwargs["fileset_id"] = fileset_id
     if sub_path:
-        kwargs["sub_path"] = sub_path
+        kwargs["sub_path"] = _norm_slash_dir(sub_path)
     req = vepfs.CreateDataFlowTaskRequest(**kwargs)
     try:
         resp = api.create_data_flow_task(req)

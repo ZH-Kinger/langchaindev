@@ -101,11 +101,39 @@ def test_submit_task_field_mapping(monkeypatch):
     req = cap["create_req"]
     assert req["file_system_id"] == "vepfs-a"
     assert req["task_action"] == "Export"
-    assert req["data_storage"] == "tos://bk"          # 默认加 tos:// 前缀
-    assert req["data_storage_path"] == "out/"
+    # cn-shanghai 真机反查：DataStorage 须裸桶名；DataStoragePath/SubPath 须首尾带斜杠
+    assert req["data_storage"] == "bk"                 # 裸桶名（tos:// 会 InvalidParameter.BucketName）
+    assert req["data_storage_path"] == "/out/"         # 补首斜杠 → 内部 SourceStoragePrefix 合法
     assert req["sub_path"] == "/ckpt/"
     assert req["same_name_file_policy"] == "OverWrite"
     assert req["data_type"] == "MetaAndData"
+
+
+def test_data_storage_strips_scheme():
+    assert engine_vepfs._data_storage("tos://bk") == "bk"
+    assert engine_vepfs._data_storage("bk") == "bk"
+    assert engine_vepfs._data_storage("tos://bk/") == "bk"
+
+
+def test_norm_slash_dir_rules():
+    # 非空 → 首尾都带斜杠；空 → 保留空（整桶根合法）
+    assert engine_vepfs._norm_slash_dir("a/b") == "/a/b/"
+    assert engine_vepfs._norm_slash_dir("/a/b/") == "/a/b/"
+    assert engine_vepfs._norm_slash_dir("a/b/") == "/a/b/"
+    assert engine_vepfs._norm_slash_dir("") == ""
+
+
+def test_submit_task_normalizes_prefix_with_tos_scheme(monkeypatch):
+    cap = {}
+    fake = _FakeVepfs(cap)
+    monkeypatch.setattr(engine_vepfs, "_api", lambda region: (fake, fake))
+    engine_vepfs.submit_task(
+        fs_id="vepfs-a", task_action=engine_vepfs.ACTION_IMPORT,
+        tos_bucket="tos://bk", tos_prefix="wuji/x", sub_path="wuji/x", region="cn-shanghai")
+    req = cap["create_req"]
+    assert req["data_storage"] == "bk"
+    assert req["data_storage_path"] == "/wuji/x/"
+    assert req["sub_path"] == "/wuji/x/"
 
 
 def test_submit_task_rejects_bad_action():
