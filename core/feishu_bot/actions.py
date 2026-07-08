@@ -456,7 +456,7 @@ def _h_submit_transfer(action_val, open_id, chat_id, form_value):
     def _do_prepare() -> None:
         from core.dsw_scheduler import _send_card, _send_text
         from core.transfer import orchestrator
-        from core.transfer.cards import confirm_card
+        from core.transfer.cards import confirm_card, progress_card, result_card
         from core.transfer.paths import PathError
         try:
             plan = orchestrator.make_plan(source, dest)
@@ -464,9 +464,19 @@ def _h_submit_transfer(action_val, open_id, chat_id, form_value):
                 _send_text(open_id, _cfg_chat(),
                            f"\u26a0\ufe0f \u65b9\u5411 {plan.direction} \u6682\u672a\u652f\u6301\uff08\u4e09\u671f\u6c89\u964d\u6bb5\uff09\u3002")
                 return
-            # \u5e42\u7b49\uff1a\u8fde\u70b9\u201c\u89e3\u6790\u5e76\u9884\u4f30\u201d\u4f1a\u5404\u8dd1\u4e00\u6b21\u6162\u9884\u4f30\uff08\u5217\u5927\u76ee\u5f55 10 \u4e07+\u5bf9\u8c61\uff09+ \u5404\u63a8\u4e00\u5f20\u786e\u8ba4\u5361\u3002
-            # \u6309 job_id\uff08\u6e90/\u76ee\u7684/\u5f53\u5929 hash\uff09\u539f\u5b50\u53bb\u91cd\uff0c30s \u5185\u53ea\u89e3\u6790\u3001\u53ea\u63a8\u4e00\u5f20\u3002
             job_id = orchestrator._job_id(plan)
+            # \u2460 \u8be5\u6e90/\u76ee\u7684\u5f53\u5929\u5df2\u6709\u4efb\u52a1\u4e14\u5df2\u5728\u8dd1/\u5df2\u5b8c\u6210 \u2192 \u76f4\u63a5\u56de\u5b83\u7684\u8fdb\u5ea6/\u7ed3\u679c\u5361\uff0c\u7edd\u4e0d\u518d\u5f39\u201c\u786e\u8ba4\u201d\u5361\u3002
+            #    \uff08\u5426\u5219\u7528\u6237\u5bf9\u540c\u4e00\u8def\u5f84\u53cd\u590d\u70b9\u201c\u89e3\u6790\u5e76\u9884\u4f30\u201d\u4f1a\u4e00\u76f4\u6536\u5230\u786e\u8ba4\u63d0\u793a\uff0c\u5373\u4f7f\u4efb\u52a1\u65e9\u5df2\u542f\u52a8\u3002\uff09
+            existing = orchestrator.get_job(job_id)
+            if existing and existing.get("stage") in (
+                    orchestrator.STAGE_CROSSING, orchestrator.STAGE_SINKING, orchestrator.STAGE_DONE):
+                live = orchestrator.refresh(job_id) or existing   # \u987a\u4fbf\u5b9e\u65f6\u91cd\u67e5\u4e00\u6b21
+                c = (result_card(live) if live["stage"] == orchestrator.STAGE_DONE
+                     else progress_card(live))
+                _send_card(open_id, _cfg_chat(), c)
+                return
+            # \u2461 \u4ecd\u8fde\u70b9\u201c\u89e3\u6790\u5e76\u9884\u4f30\u201d\uff08\u4efb\u52a1\u672a\u542f\u52a8\u524d\uff09\uff1a\u6309 job_id \u539f\u5b50\u53bb\u91cd\uff0c30s \u5185\u53ea\u89e3\u6790\u3001\u53ea\u63a8\u4e00\u5f20\u786e\u8ba4\u5361\u3002
+            #    \u6162\u9884\u4f30\u8981\u5217\u5927\u76ee\u5f55 10 \u4e07+\u5bf9\u8c61\uff0c\u91cd\u590d\u8dd1\u65e2\u6162\u53c8\u5237\u5c4f\u3002
             try:
                 from utils.redis_client import get_redis
                 if not get_redis().set(f"transfer:confirmcard:{job_id}", 1, nx=True, ex=30):
@@ -531,20 +541,28 @@ def _h_confirm_transfer(action_val, open_id, chat_id, form_value):
 
     def _do_transfer() -> None:
         from core.dsw_scheduler import _send_card, _send_text
-        from core.transfer.cards import result_card, progress_card
+        from core.transfer.cards import result_card
         try:
+            # \u786e\u8ba4\u5361\u5df2\u5728\u4e0b\u65b9\u539f\u5730\u66ff\u6362\u4e3a\u201c\u8fdb\u884c\u4e2d\u201d\u5361\uff0c\u4e2d\u95f4\u6001\u4e0d\u518d\u53e6\u63a8\uff08\u907f\u514d\u91cd\u590d\u5237\u5361\uff09\uff1b
+            # \u53ea\u5728\u7ec8\u6001\u63a8\u4e00\u5f20\u7ed3\u679c\u5361\u3002
             def _on_update(j):
                 if j["stage"] in (orchestrator.STAGE_DONE, orchestrator.STAGE_FAILED):
                     _send_card("", _cfg_chat(), result_card(j))
-                else:
-                    _send_card("", _cfg_chat(), progress_card(j))
             orchestrator.run_to_completion(job, on_update=_on_update)
         except Exception as e:
             logger.error("[Transfer] execute failed job=%s", job_id, exc_info=True)
             _send_text("", _cfg_chat(), f"\u274c \u8fc1\u79fb\u4efb\u52a1 {job_id} \u5931\u8d25\uff1a{e}")
 
     threading.Thread(target=_do_transfer, daemon=True).start()
-    return {"toast": {"type": "success", "content": "\u5df2\u5f00\u59cb\u8fc1\u79fb\uff0c\u5b8c\u6210\u540e\u63a8\u9001\u7ed3\u679c"}}
+    # \u539f\u5730\u628a\u201c\u786e\u8ba4\u5361\u201d\u66ff\u6362\u6210\u201c\u8fdb\u884c\u4e2d\u201d\u5361\uff1a\u786e\u8ba4\u6309\u94ae\u968f\u4e4b\u6d88\u5931 \u2192 \u4e0d\u80fd\u518d\u8fde\u70b9\uff08\u4e0e CPFS \u4e00\u81f4\uff09\u3002
+    # \u7528\u5c55\u793a\u526f\u672c\u8bbe\u9636\u6bb5\uff0c\u4e0d\u52a8\u771f job \u7684 stage\uff08run_to_completion \u7684\u6c89\u964d\u6bb5\u4ecd\u6309\u771f stage \u5224\u5b9a\uff09\u3002
+    from core.transfer.cards import progress_card
+    disp = dict(job)
+    disp["stage"] = (orchestrator.STAGE_SINKING
+                     if job.get("needs_sink") and not job.get("sink_done")
+                     else orchestrator.STAGE_CROSSING)
+    return {"toast": {"type": "success", "content": "\u5df2\u5f00\u59cb\u8fc1\u79fb\uff0c\u5b8c\u6210\u540e\u63a8\u9001\u7ed3\u679c"},
+            "card": {"type": "raw", "data": progress_card(disp)}}
 
 
 def _h_query_transfer_progress(action_val, open_id, chat_id, form_value):
