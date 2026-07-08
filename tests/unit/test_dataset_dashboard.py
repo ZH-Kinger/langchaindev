@@ -82,6 +82,7 @@ def test_run_once_writes_only_script_cols(D, monkeypatch):
     ]
     monkeypatch.setattr(D, "_tenant_token", lambda: "tok")
     monkeypatch.setattr(D, "_list_records", lambda h: rows)
+    monkeypatch.setattr(D, "_existing_fields", lambda h: {"状态", "云", "厂商|来源", "时长", "数据集类型", "uri"})
     written = {}
     monkeypatch.setattr(D, "_update_one", lambda h, rid, fields: written.__setitem__(rid, fields) or True)
     monkeypatch.setattr(D, "_is_configured", lambda: True)
@@ -98,8 +99,23 @@ def test_run_once_dry_run_no_write(D, monkeypatch):
     rows = [{"record_id": "r", "fields": {"uri": "oss://b/v/ds", "云": ""}}]
     monkeypatch.setattr(D, "_tenant_token", lambda: "tok")
     monkeypatch.setattr(D, "_list_records", lambda h: rows)
+    monkeypatch.setattr(D, "_existing_fields", lambda h: {"状态", "云", "厂商|来源", "时长", "数据集类型", "uri"})
     monkeypatch.setattr(D, "_is_configured", lambda: True)
     boom = lambda *a, **k: pytest.fail("dry_run 不应写入")
     monkeypatch.setattr(D, "_update_one", boom)
     stats = D.run_once(dry_run=True)
     assert stats["ok"] and stats["written"] == 0 and stats["preview"][0]["uri"] == "oss://b/v/ds"
+
+
+def test_run_once_skips_deleted_columns(D, monkeypatch):
+    """用户删了「状态」列 → 该列不再写入，其余脚本列照常，不因未知字段整行失败。"""
+    rows = [{"record_id": "r", "fields": {"uri": "oss://b/vitra/ds_10h", "云": "", "时长": ""}}]
+    monkeypatch.setattr(D, "_tenant_token", lambda: "tok")
+    monkeypatch.setattr(D, "_list_records", lambda h: rows)
+    monkeypatch.setattr(D, "_is_configured", lambda: True)
+    monkeypatch.setattr(D, "_existing_fields", lambda h: {"云", "厂商|来源", "时长", "数据集类型", "uri"})  # 无「状态」
+    written = {}
+    monkeypatch.setattr(D, "_update_one", lambda h, rid, fields: written.__setitem__(rid, fields) or True)
+    D.run_once()
+    assert "状态" not in written["r"]              # 已删列不写
+    assert written["r"]["时长"] == "10h" and written["r"]["云"] == "OSS"

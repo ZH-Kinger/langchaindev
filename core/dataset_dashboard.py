@@ -83,6 +83,27 @@ def _list_records(headers: dict) -> list:
     return out
 
 
+def _existing_fields(headers: dict) -> set:
+    """列出表内现有字段名。用于只写还存在的列——用户删列后不会因写不存在的字段而整行失败。
+    取数失败返回空集合（调用方据此退化为不过滤）。"""
+    names, pt = set(), ""
+    try:
+        url = (f"{_BASE}/bitable/v1/apps/{_app_token()}/tables/{_table_id()}/fields")
+        while True:
+            params = {"page_size": 100}
+            if pt:
+                params["page_token"] = pt
+            r = requests.get(url, headers=headers, params=params, timeout=15)
+            d = r.json().get("data", {})
+            names.update(f.get("field_name", "") for f in d.get("items", []))
+            pt = d.get("page_token", "")
+            if not d.get("has_more"):
+                break
+    except Exception:
+        logger.warning("[DatasetDash] 拉取字段名失败，本轮不做字段过滤", exc_info=True)
+    return names
+
+
 def _update_one(headers: dict, record_id: str, fields: dict) -> bool:
     r = requests.put(f"{_records_url()}/{record_id}", headers=headers,
                      json={"fields": fields}, timeout=15)
@@ -216,12 +237,16 @@ def run_once(dry_run: bool = False, limit: int = None) -> dict:
     rows = _list_records(headers)
     if limit:
         rows = rows[:limit]
+    # 只写表里现存的列：用户删列(如「状态」)后，写已删字段会导致整行更新失败；先拿字段白名单过滤
+    existing = _existing_fields(headers)
     stats = {"total": len(rows), "in_stock": 0, "gone": 0, "filled": 0, "written": 0, "skipped": 0}
     preview = []
     for rec in rows:
         f = rec.get("fields", {})
         rid = rec.get("record_id", "")
         upd = compute_updates(f)
+        if existing:
+            upd = {k: v for k, v in upd.items() if k in existing}   # 丢弃已删列，避免整行失败
         if not upd:
             stats["skipped"] += 1
             continue
