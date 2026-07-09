@@ -21,6 +21,9 @@ def get_redis() -> redis.Redis:
             password=settings.REDIS_PASSWORD,
             db=settings.REDIS_DB,
             socket_connect_timeout=5,
+            socket_timeout=5,            # 读超时：Redis 卡住时请求/轮询线程不再无限阻塞
+            health_check_interval=30,    # 空闲连接定期 PING，避免拿到半死连接
+            retry_on_timeout=True,       # 瞬时读超时自动重试一次
             decode_responses=True,
         )
     return _client

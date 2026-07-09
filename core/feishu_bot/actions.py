@@ -778,8 +778,11 @@ def _h_submit_cpfs_dataflow(action_val, open_id, chat_id, form_value):
     return {"toast": {"type": "success", "content": "正在解析，稍候推送确认卡"}}
 
 
-def _h_confirm_cpfs_dataflow(action_val, open_id, chat_id, form_value):
-    """后台启动预热/沉降任务，完成后推结果卡。"""
+def _h_confirm_cpfs_dataflow(action_val, open_id, chat_id, form_value, *, reply_v2=True):
+    """后台启动预热/沉降任务，完成后推结果卡。
+
+    reply_v2：从 2.0 确认卡触发时回 progress_card_v2（2.0→2.0，避 200830）；
+    从 1.0 结果卡的重试按钮触发时传 False，回 1.0 progress_card（1.0→1.0）。"""
     job_id = action_val.get("job_id", "") if isinstance(action_val, dict) else ""
     if not job_id:
         return {"toast": {"type": "error", "content": "缺少任务 ID"}}
@@ -798,6 +801,9 @@ def _h_confirm_cpfs_dataflow(action_val, open_id, chat_id, form_value):
             return {"toast": {"type": "info", "content": "任务已下发，请勿重复点击"}}
     except Exception:
         pass  # Redis 不可用时降级：至少同步置 RUNNING 兜住非并发的重复投递
+    # 兜底回填 created_by：首建可能为空（无 open_id 入口先建/双投递竞态），确认者 open_id 是可靠真值。
+    if open_id and not job.get("created_by"):
+        job["created_by"] = open_id
     # 同步置 RUNNING 落盘，堵住"线程异步改 stage 之前又来一次回调"的窗口
     job["stage"] = orchestrator.STAGE_RUNNING
     orchestrator._save(job)
@@ -818,10 +824,11 @@ def _h_confirm_cpfs_dataflow(action_val, open_id, chat_id, form_value):
             _send_text(job.get("created_by", ""), _cfg_cpfs_chat(), f"❌ 任务 {job_id} 失败：{e}")
 
     threading.Thread(target=_do_run, daemon=True).start()
-    from core.cpfs_dataflow.cards import progress_card
-    # 直接把确认卡换成带「查询进度」按钮的进度卡，toast 回带任务 ID
+    from core.cpfs_dataflow.cards import progress_card, progress_card_v2
+    # 2.0 确认卡→回 2.0 进度卡（同家族原地替换）；重试(1.0 结果卡)→回 1.0 进度卡。
+    prog = progress_card_v2(job) if reply_v2 else progress_card(job)
     return {"toast": {"type": "success", "content": f"已下发，任务 {job_id}；可点“查询进度”"},
-            "card": {"type": "raw", "data": progress_card(job)}}
+            "card": {"type": "raw", "data": prog}}
 
 
 def _h_query_cpfs_progress(action_val, open_id, chat_id, form_value):
@@ -859,7 +866,7 @@ def _h_retry_cpfs_dataflow(action_val, open_id, chat_id, form_value):
         get_redis().delete(f"cpfs:dataflow:launch:{job_id}", f"dataflow:notified:{job_id}")
     except Exception:
         pass
-    return _h_confirm_cpfs_dataflow({"job_id": job_id}, open_id, chat_id, form_value)
+    return _h_confirm_cpfs_dataflow({"job_id": job_id}, open_id, chat_id, form_value, reply_v2=False)
 
 
 # 火山 vePFS 预热/沉降：录入 / 确认 / 查询 / 重试（镜像 CPFS，走 core.vepfs_dataflow）
@@ -908,8 +915,11 @@ def _h_submit_vepfs_dataflow(action_val, open_id, chat_id, form_value):
     return {"toast": {"type": "success", "content": "正在解析，稍候推送确认卡"}}
 
 
-def _h_confirm_vepfs_dataflow(action_val, open_id, chat_id, form_value):
-    """后台启动预热/沉降任务，完成后推结果卡。"""
+def _h_confirm_vepfs_dataflow(action_val, open_id, chat_id, form_value, *, reply_v2=True):
+    """后台启动预热/沉降任务，完成后推结果卡。
+
+    reply_v2：从 2.0 确认卡触发时回 progress_card_v2（2.0→2.0，避 200830）；
+    从 1.0 结果卡的重试按钮触发时传 False，回 1.0 progress_card（1.0→1.0）。"""
     job_id = action_val.get("job_id", "") if isinstance(action_val, dict) else ""
     if not job_id:
         return {"toast": {"type": "error", "content": "缺少任务 ID"}}
@@ -926,6 +936,9 @@ def _h_confirm_vepfs_dataflow(action_val, open_id, chat_id, form_value):
             return {"toast": {"type": "info", "content": "任务已下发，请勿重复点击"}}
     except Exception:
         pass
+    # 兜底回填 created_by：首建可能为空（无 open_id 入口先建/双投递竞态），确认者 open_id 是可靠真值。
+    if open_id and not job.get("created_by"):
+        job["created_by"] = open_id
     job["stage"] = orchestrator.STAGE_RUNNING
     orchestrator._save(job)
 
@@ -945,9 +958,11 @@ def _h_confirm_vepfs_dataflow(action_val, open_id, chat_id, form_value):
             _send_text(job.get("created_by", ""), _cfg_vepfs_chat(), f"❌ 任务 {job_id} 失败：{e}")
 
     threading.Thread(target=_do_run, daemon=True).start()
-    from core.vepfs_dataflow.cards import progress_card
+    from core.vepfs_dataflow.cards import progress_card, progress_card_v2
+    # 2.0 确认卡→回 2.0 进度卡（同家族原地替换）；重试(1.0 结果卡)→回 1.0 进度卡。
+    prog = progress_card_v2(job) if reply_v2 else progress_card(job)
     return {"toast": {"type": "success", "content": f"已下发，任务 {job_id}；可点“查询进度”"},
-            "card": {"type": "raw", "data": progress_card(job)}}
+            "card": {"type": "raw", "data": prog}}
 
 
 def _h_query_vepfs_progress(action_val, open_id, chat_id, form_value):
@@ -985,7 +1000,7 @@ def _h_retry_vepfs_dataflow(action_val, open_id, chat_id, form_value):
         get_redis().delete(f"vepfs:dataflow:launch:{job_id}", f"dataflow:notified:{job_id}")
     except Exception:
         pass
-    return _h_confirm_vepfs_dataflow({"job_id": job_id}, open_id, chat_id, form_value)
+    return _h_confirm_vepfs_dataflow({"job_id": job_id}, open_id, chat_id, form_value, reply_v2=False)
 
 
 def _h_query_progress_by_id(action_val, open_id, chat_id, form_value):

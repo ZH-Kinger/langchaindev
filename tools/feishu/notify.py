@@ -4,6 +4,8 @@
 """
 import logging
 import re
+import threading
+import time
 import requests
 from datetime import datetime
 from pydantic import BaseModel, Field
@@ -63,21 +65,40 @@ def _gpu_util_icon(pct: float) -> str:
 
 # ── 飞书 API 调用 ───────────────────────────────────────────────────────────────
 
+# app_access_token 模块级缓存：飞书 token 有效期约 2h，端点有 QPS 限流。早报/流式等高频路径
+# 若每次都取 token 会打爆端点（历史踩过坑）。缓存到期前 5min 刷新，并发用锁做单飞+双检。
+_token_cache = {"token": "", "expire_ts": 0.0}
+_token_lock = threading.Lock()
+
+
 def _get_access_token() -> str:
     """
-    用 app_id + app_secret 换取 app_access_token。
+    用 app_id + app_secret 换取 app_access_token（带缓存，到期前 5 分钟刷新）。
     文档：https://open.feishu.cn/document/server-docs/authentication-management/access-token/app_access_token_internal
     """
-    resp = requests.post(
-        "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal",
-        json={"app_id": settings.FEISHU_APP_ID, "app_secret": settings.FEISHU_APP_SECRET},
-        timeout=10,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    if data.get("code") != 0:
-        raise RuntimeError(f"获取飞书 Token 失败：{data.get('msg')}")
-    return data["app_access_token"]
+    now = time.time()
+    if _token_cache["token"] and now < _token_cache["expire_ts"]:
+        return _token_cache["token"]
+    with _token_lock:
+        # 双检：等锁期间可能已有别的线程刷新过
+        now = time.time()
+        if _token_cache["token"] and now < _token_cache["expire_ts"]:
+            return _token_cache["token"]
+        resp = requests.post(
+            "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal",
+            json={"app_id": settings.FEISHU_APP_ID, "app_secret": settings.FEISHU_APP_SECRET},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("code") != 0:
+            raise RuntimeError(f"获取飞书 Token 失败：{data.get('msg')}")
+        token = data["app_access_token"]
+        # expire 单位秒（通常 7200）；提前 5min 视为过期，防边界处拿到即将失效的 token
+        expire = int(data.get("expire", 7200) or 7200)
+        _token_cache["token"] = token
+        _token_cache["expire_ts"] = time.time() + max(60, expire - 300)
+        return token
 
 
 def _get_user_name(open_id: str) -> str:

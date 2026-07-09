@@ -107,13 +107,22 @@ def get_oss_service(open_id: str = ""):
 
 
 def get_oss_bucket(open_id: str, bucket_name: str, region: str = ""):
-    """返回 oss2.Bucket，用于列对象 / 上传下载等。"""
+    """返回 oss2.Bucket，用于列对象 / 上传下载等。region 留空则自动探测桶地域（跨地域桶可用）。"""
     auth, _ = get_oss_auth(open_id)
     if not auth:
         return None
     import oss2
-    region = region or settings.PAI_DSW_REGION_ID or "cn-hangzhou"
-    return oss2.Bucket(auth, f"https://oss-{region}.aliyuncs.com", bucket_name)
+    if region:
+        endpoint = f"https://oss-{region}.aliyuncs.com"
+    else:
+        # 不传 region 时探测桶真实地域，避免跨地域桶打错 endpoint 失败（与 tools.aliyun.oss 行为一致）。
+        # 延迟导入避免与 tools.aliyun.oss 的 factory 依赖形成环。探测失败回退默认地域。
+        try:
+            from tools.aliyun.oss import _detect_region_endpoint
+            endpoint = _detect_region_endpoint(auth, bucket_name)
+        except Exception:
+            endpoint = f"https://oss-{settings.PAI_DSW_REGION_ID or 'cn-hangzhou'}.aliyuncs.com"
+    return oss2.Bucket(auth, endpoint, bucket_name)
 
 
 # ── SLS ──────────────────────────────────────────────────────────────────────

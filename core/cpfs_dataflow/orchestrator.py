@@ -257,6 +257,12 @@ def create_job_record(plan: DataflowPlan, *, open_id: str = "") -> dict:
     job_id = _job_id(plan)
     existing = get_job(job_id)
     if existing and existing.get("stage") not in (STAGE_FAILED,):
+        # 幂等复用旧记录，但回填 created_by：同日同 (op/fs/目录/oss) 的 job_id 可能被
+        # 无 open_id 入口（Agent 工具/CLI）先建成空 created_by；本次带来真实 open_id 时补上。
+        # CPFS 尤其关键——created_by 还驱动云调用的 STS 身份，空则退回 master AK（越权+审计错人）。
+        if open_id and not existing.get("created_by"):
+            existing["created_by"] = open_id
+            _save(existing)
         return existing
     job = {
         "job_id": job_id,

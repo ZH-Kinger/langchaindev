@@ -105,14 +105,20 @@ def _field_names(headers: dict, table_id: str) -> set:
 
 
 def _list_records(headers: dict, table_id: str) -> list:
-    """列出表内全部记录（分页）。返回 [{record_id, fields}, ...]。"""
+    """列出表内全部记录（分页）。返回 [{record_id, fields}, ...]。
+
+    code!=0（限流/瞬时故障）抛错，而非静默返回空——否则调用方把空列表当成"表里没有记录"，
+    upsert 退化成 insert 造重复行。write_scan 捕获后放弃本次写入（下轮重来）。"""
     out, pt = [], ""
     while True:
         params = {"page_size": 500}
         if pt:
             params["page_token"] = pt
         r = requests.get(_records_url(table_id), headers=headers, params=params, timeout=20)
-        d = r.json().get("data", {})
+        j = r.json()
+        if j.get("code") != 0:
+            raise RuntimeError(f"列举记录失败 table={table_id} code={j.get('code')} msg={j.get('msg')}")
+        d = j.get("data", {})
         out.extend(d.get("items", []))
         pt = d.get("page_token", "")
         if not d.get("has_more"):
@@ -189,7 +195,11 @@ def write_scan(vendor_rows: list, readable_id: str, remark: str) -> bool:
         return False
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
-    snap_id = _upsert_snapshot(headers, readable_id, remark)
+    try:
+        snap_id = _upsert_snapshot(headers, readable_id, remark)
+    except RuntimeError as e:
+        logger.error("[Bitable] 快照表列举失败，放弃本次写入（避免重复行）：%s", e)
+        return False
     if not snap_id:
         return False
 
@@ -206,11 +216,15 @@ def write_scan(vendor_rows: list, readable_id: str, remark: str) -> bool:
     def _ven_key(f):
         return (_as_text(f.get("云厂商")), _as_text(f.get("Bucket")), _as_text(f.get("厂家")))
 
-    # 现有行索引（同键多行=历史重复）
-    ven_records = _list_records(headers, VEN)
-    ven_idx = _index(ven_records, _ven_key)
-    bat_idx = _index(_list_records(headers, BAT),
-                     lambda f: (_as_text(f.get("云厂商")), _as_text(f.get("厂家")), _as_text(f.get("批次"))))
+    # 现有行索引（同键多行=历史重复）。列举失败必须放弃本次写入——否则空索引→全当新行→重复插入。
+    try:
+        ven_records = _list_records(headers, VEN)
+        ven_idx = _index(ven_records, _ven_key)
+        bat_idx = _index(_list_records(headers, BAT),
+                         lambda f: (_as_text(f.get("云厂商")), _as_text(f.get("厂家")), _as_text(f.get("批次"))))
+    except RuntimeError as e:
+        logger.error("[Bitable] 厂家/批次表列举失败，放弃本次写入（避免重复行）：%s", e)
+        return False
 
     # 表格按创建序展示，而 upsert 原地更新不挪行、新键只能尾插——新厂家出现时会打破
     # 云厂商分组。先推演 upsert 后的展示顺序（存量原位 + 新键尾插），与期望排序不符则

@@ -129,13 +129,20 @@ def test_confirm_handler_missing_job():
 
 
 def test_confirm_handler_launches(monkeypatch):
+    """#46-A2：确认卡默认 reply_v2=True → 原地换成 schema 2.0 进度卡（同家族避 200830）。
+
+    改前断言的 query_cpfs_progress 按钮已随 progress_card_v2 移除（无按钮，终态由后台线程推结果卡）。
+    """
     monkeypatch.setattr(orchestrator, "run_to_completion", lambda job, **k: job)
     job = orchestrator.create_job_record(
         orchestrator.make_plan("sink", "/cwr/o2/", "oss://bk/e2/", fs_id="bmcpfs-y", region="cn-hangzhou"))
     out = actions._h_confirm_cpfs_dataflow({"job_id": job["job_id"]}, "ou_1", "chat", {})
     assert out["toast"]["type"] == "success"
-    # 确认后原地换成带「查询进度」按钮的进度卡
-    assert _find_action(out["card"]["data"]) == "query_cpfs_progress"
+    # 确认后原地换成 2.0 纯展示进度卡：schema 2.0、无按钮/表单（不能再连点）
+    data = out["card"]["data"]
+    assert data["schema"] == "2.0"
+    assert _find_action(data) is None
+    assert "button" not in str(data) and "form" not in str(data)
 
 
 def test_query_progress_running(monkeypatch):

@@ -58,14 +58,28 @@ def list_ram_users_api() -> list[dict]:
             endpoint="ram.aliyuncs.com",
         )
         client = Client(cfg)
-        resp = client.list_users(ram_models.ListUsersRequest())
+        # 分页：RAM ListUsers 用 is_truncated/marker 分页（这里每页取 100），子用户超过一页时循环取
+        # 全量，否则只拿到第一页当全量（permsync 的 marker 循环是对的，这里对齐同款做法）。
+        users, marker = [], None
+        while True:
+            req = ram_models.ListUsersRequest(max_items=100)
+            if marker:
+                req.marker = marker
+            resp = client.list_users(req)
+            body = resp.body
+            users.extend(body.users.user or [])
+            if not getattr(body, "is_truncated", False):
+                break
+            marker = getattr(body, "marker", None)
+            if not marker:
+                break
         return [
             {
                 "user_id": u.user_id or "",
                 "user_name": u.user_name or "",
                 "display_name": u.display_name or "",
             }
-            for u in (resp.body.users.user or [])
+            for u in users
         ]
     except Exception:
         return []

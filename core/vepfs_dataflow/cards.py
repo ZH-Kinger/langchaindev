@@ -34,6 +34,26 @@ def confirm_card(job: dict):
     }
 
 
+def progress_card_v2(job: dict):
+    """schema 2.0 纯展示"进行中"卡：确认卡是 2.0，回调里原地替换须同 schema 家族（2.0→2.0）。
+    用 1.0 的 progress_card 替换 2.0 确认卡会被飞书拒（错误 200830，静默失败，确认到完成间无反馈）。
+    无按钮——按钮随确认消失，终态由后台线程推结果卡。"""
+    info_md = (
+        f"**任务**：`{job['job_id']}`\n"
+        f"**操作**：{job.get('operation_label','')}\n"
+        f"**阶段**：{job['stage']}\n"
+        f"**vePFS** `{job.get('sub_path','')}`\n"
+        f"**TOS** `{job.get('tos_bucket','')}/{job.get('tos_prefix','')}`\n"
+        f"> 已在后台运行，完成后推送结果。"
+    )
+    return {
+        "schema": "2.0",
+        "config": {"wide_screen_mode": True},
+        "header": {"title": _pt("⏳ 数据流动进行中"), "template": "blue"},
+        "body": {"elements": [{"tag": "markdown", "content": info_md}]},
+    }
+
+
 def progress_card(job: dict):
     return card(f"⏳ {job['operation_label']}进行中", [
         fields(("任务ID", f"`{job['job_id']}`"), ("阶段", job["stage"]),
