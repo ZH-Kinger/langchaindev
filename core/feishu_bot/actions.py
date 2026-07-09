@@ -500,8 +500,12 @@ def _h_submit_transfer(action_val, open_id, chat_id, form_value):
                       "content": "\u6b63\u5728\u540e\u53f0\u89e3\u6790+\u9884\u4f30\uff08\u5927\u76ee\u5f55\u8f83\u6162\uff0c\u7ea6 10-30 \u79d2\uff09\uff0c\u7a0d\u5019\u63a8\u9001\u786e\u8ba4\u5361\uff0c\u8bf7\u52ff\u91cd\u590d\u70b9\u51fb"}}
 
 
-def _h_confirm_transfer(action_val, open_id, chat_id, form_value):
-    """Start the transfer in background using the selected same-name policy."""
+def _h_confirm_transfer(action_val, open_id, chat_id, form_value, *, reply_v2=True):
+    """Start the transfer in background using the selected same-name policy.
+
+    reply_v2: 原地替换用哪张进度卡。确认卡是 schema 2.0 → 回 2.0 展示卡（progress_card_v2，
+    同家族替换，避开 200830）。retry 由 1.0 结果卡触发 → 回 1.0 progress_card（1.0→1.0）。
+    """
     job_id = action_val.get("job_id", "") if isinstance(action_val, dict) else ""
     if not job_id:
         return {"toast": {"type": "error", "content": "\u7f3a\u5c11\u4efb\u52a1 ID"}}
@@ -557,13 +561,14 @@ def _h_confirm_transfer(action_val, open_id, chat_id, form_value):
     threading.Thread(target=_do_transfer, daemon=True).start()
     # \u539f\u5730\u628a\u201c\u786e\u8ba4\u5361\u201d\u66ff\u6362\u6210\u201c\u8fdb\u884c\u4e2d\u201d\u5361\uff1a\u786e\u8ba4\u6309\u94ae\u968f\u4e4b\u6d88\u5931 \u2192 \u4e0d\u80fd\u518d\u8fde\u70b9\uff08\u4e0e CPFS \u4e00\u81f4\uff09\u3002
     # \u7528\u5c55\u793a\u526f\u672c\u8bbe\u9636\u6bb5\uff0c\u4e0d\u52a8\u771f job \u7684 stage\uff08run_to_completion \u7684\u6c89\u964d\u6bb5\u4ecd\u6309\u771f stage \u5224\u5b9a\uff09\u3002
-    from core.transfer.cards import progress_card
+    from core.transfer.cards import progress_card, progress_card_v2
     disp = dict(job)
     disp["stage"] = (orchestrator.STAGE_SINKING
                      if job.get("needs_sink") and not job.get("sink_done")
                      else orchestrator.STAGE_CROSSING)
+    card_data = progress_card_v2(disp) if reply_v2 else progress_card(disp)
     return {"toast": {"type": "success", "content": "\u5df2\u5f00\u59cb\u8fc1\u79fb\uff0c\u5b8c\u6210\u540e\u63a8\u9001\u7ed3\u679c"},
-            "card": {"type": "raw", "data": progress_card(disp)}}
+            "card": {"type": "raw", "data": card_data}}
 
 
 def _h_query_transfer_progress(action_val, open_id, chat_id, form_value):
@@ -597,7 +602,8 @@ def _h_retry_transfer(action_val, open_id, chat_id, form_value):
         get_redis().delete(f"transfer:launch:{job_id}")
     except Exception:
         pass
-    return _h_confirm_transfer({"job_id": job_id}, open_id, chat_id, form_value)
+    # retry 由 1.0 结果卡触发，回 1.0 progress_card 原地替换（1.0→1.0，同家族）。
+    return _h_confirm_transfer({"job_id": job_id}, open_id, chat_id, form_value, reply_v2=False)
 
 
 def _cfg_chat() -> str:

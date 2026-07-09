@@ -185,6 +185,61 @@ def test_orch_tos_failure(monkeypatch):
     assert job["stage"] == orch.STAGE_FAILED and "boom" in job["error"]
 
 
+# ── refresh() 自愈 + _save 刷 updated_ts（2e5f01c / ca67c30）─────────────────────
+
+def test_refresh_running_calls_poll(monkeypatch):
+    """RUNNING + cross_job_name → 实时 poll_once 重查并落库（点“查询”/对账即自愈）。"""
+    calls = []
+    job = {"job_id": "bkt-x", "stage": orch.STAGE_RUNNING, "cross_job_name": "cj"}
+    monkeypatch.setattr(orch, "get_job", lambda jid: dict(job))
+    monkeypatch.setattr(orch, "poll_once",
+                        lambda j: (calls.append(j["job_id"]) or {**j, "stage": orch.STAGE_DONE}))
+    out = orch.refresh("bkt-x")
+    assert calls == ["bkt-x"] and out["stage"] == orch.STAGE_DONE
+
+
+def test_refresh_non_running_returns_asis(monkeypatch):
+    """非 RUNNING（已终态）→ 原样返回，绝不轮询。"""
+    monkeypatch.setattr(orch, "get_job", lambda jid: {"job_id": "bkt-y", "stage": orch.STAGE_DONE})
+    def _boom(j):
+        raise AssertionError("非 RUNNING 不应轮询")
+    monkeypatch.setattr(orch, "poll_once", _boom)
+    assert orch.refresh("bkt-y")["stage"] == orch.STAGE_DONE
+
+
+def test_refresh_running_without_cross_job_skips_poll(monkeypatch):
+    """RUNNING 但无 cross_job_name（还没真正提交）→ 守卫拦住，不轮询。"""
+    monkeypatch.setattr(orch, "get_job", lambda jid: {"job_id": "bkt-z", "stage": orch.STAGE_RUNNING})
+    def _boom(j):
+        raise AssertionError("无 cross_job_name 不应轮询")
+    monkeypatch.setattr(orch, "poll_once", _boom)
+    assert orch.refresh("bkt-z")["stage"] == orch.STAGE_RUNNING
+
+
+def test_refresh_missing_returns_none(monkeypatch):
+    monkeypatch.setattr(orch, "get_job", lambda jid: None)
+    assert orch.refresh("nope") is None
+
+
+def test_refresh_poll_exception_swallowed(monkeypatch):
+    """poll_once 抛错（网络抖动）→ refresh 吞异常返回原 job，不崩查询/对账。"""
+    monkeypatch.setattr(orch, "get_job",
+                        lambda jid: {"job_id": "bkt-e", "stage": orch.STAGE_RUNNING, "cross_job_name": "cj"})
+    def _boom(j):
+        raise RuntimeError("net down")
+    monkeypatch.setattr(orch, "poll_once", _boom)
+    assert orch.refresh("bkt-e")["stage"] == orch.STAGE_RUNNING
+
+
+def test_save_stamps_updated_ts():
+    """_save 每次刷 updated_ts：对账 stale 门靠它区分“有活线程/孤儿”，缺了会误判每个在跑任务为孤儿。"""
+    job = {"job_id": "bkt-ts", "stage": orch.STAGE_RUNNING}
+    orch._save(job)
+    assert job.get("updated_ts", 0) > 0
+    reloaded = orch.get_job("bkt-ts")
+    assert reloaded and reloaded["updated_ts"] == job["updated_ts"]
+
+
 # ── fakes ──────────────────────────────────────────────────────────────────────
 
 class _FakeDetail:

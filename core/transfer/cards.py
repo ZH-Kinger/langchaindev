@@ -112,6 +112,31 @@ def progress_card(job: dict):
     ], color="blue")
 
 
+def progress_card_v2(job: dict):
+    """schema 2.0 纯展示"进行中"卡。
+
+    确认卡是 schema 2.0，回调里原地替换必须同 schema 家族（2.0→2.0），
+    用 1.0 的 progress_card 原地替换 2.0 卡会被飞书拒（错误 200830，静默失败，
+    用户在确认到完成之间看不到"进行中"反馈）。故确认后的原地替换专用这张 2.0 卡。
+    无 form/按钮——按钮随确认消失，中间态不再另推，终态由后台线程推结果卡。
+    """
+    stage_cn = {"SINKING": "沉降中", "CROSSING": "跨云迁移中"}.get(job["stage"], job["stage"])
+    info_md = (
+        f"**任务**：`{job['job_id']}`\n"
+        f"**阶段**：{stage_cn}\n"
+        f"**同名策略**：{_same_name_label(job)}\n"
+        f"**源** `{job['source']}`\n"
+        f"**目的** `{job['dest']}`\n"
+        f"> 已在后台运行，完成后推送结果。"
+    )
+    return {
+        "schema": "2.0",
+        "config": {"wide_screen_mode": True},
+        "header": {"title": _pt(f"⏳ {stage_cn}"), "template": "blue"},
+        "body": {"elements": [{"tag": "markdown", "content": info_md}]},
+    }
+
+
 def result_card(job: dict):
     from core.transfer.orchestrator import fmt_ts, fmt_duration
     ok = job["stage"] == "DONE"
