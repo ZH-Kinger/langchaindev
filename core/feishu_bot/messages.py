@@ -661,7 +661,7 @@ def _process_message(message_id: str, chat_id: str, user_text: str, open_id: str
         return
 
     # 延迟导入，避免在模块加载时触发 LLM 初始化
-    from core.agent import (_build_executor, _load_history, _save_turn,
+    from core.agent import (_build_executor, _load_history, _load_summary, _save_turn,
                             select_tools_scoped, _names_to_tools)
     from tools import TOOL_GROUPS
 
@@ -687,7 +687,12 @@ def _process_message(message_id: str, chat_id: str, user_text: str, open_id: str
         )
     else:
         agent_input = base_input
-    logger.info("[对话] 意图=%s 工具数=%d", intents or "unknown", len(tools))
+    # 滚动摘要（更早对话的压缩）作前缀拼进输入，给长对话连贯性；不作独立 system 消息（GLM 兼容更稳）。
+    _summary = _load_summary(session_id)
+    if _summary:
+        agent_input = ("（以下为你与该用户更早对话的摘要，仅供连贯理解、请勿主动复述）：\n"
+                       f"{_summary}\n\n———\n{agent_input}")
+    logger.info("[对话] 意图=%s 工具数=%d 摘要=%s", intents or "unknown", len(tools), bool(_summary))
 
     try:
         result = _build_executor(tools).invoke({"input": agent_input, "chat_history": history})

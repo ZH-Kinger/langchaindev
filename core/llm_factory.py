@@ -4,15 +4,21 @@ from config.settings import settings
 
 
 @lru_cache(maxsize=8)
-def get_cloud_llm(temperature: float = None, streaming: bool = False) -> ChatOpenAI:
-    return ChatOpenAI(
-        model=settings.MODEL_NAME,
-        api_key=settings.API_KEY,
-        base_url=settings.BASE_URL,
-        temperature=temperature if temperature is not None else settings.TEMPERATURE,
-        max_tokens=settings.MAX_TOKENS,
-        streaming=streaming,
-    )
+def get_cloud_llm(temperature: float = None, streaming: bool = False,
+                  timeout: float = None) -> ChatOpenAI:
+    # timeout 留空=沿用 SDK 默认（不改现有调用行为）；摘要压缩等旁路调用传短超时防卡死。
+    kwargs = {
+        "model": settings.MODEL_NAME,
+        "api_key": settings.API_KEY,
+        "base_url": settings.BASE_URL,
+        "temperature": temperature if temperature is not None else settings.TEMPERATURE,
+        "max_tokens": settings.MAX_TOKENS,
+        "streaming": streaming,
+    }
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+        kwargs["max_retries"] = 0
+    return ChatOpenAI(**kwargs)
 
 
 @lru_cache(maxsize=4)

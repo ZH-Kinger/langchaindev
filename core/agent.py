@@ -1,5 +1,6 @@
 import sys
 import json
+import threading
 import logging
 from utils.logger import get_logger
 
@@ -24,8 +25,12 @@ import os
 
 # ── Redis 对话记忆 key 前缀 ───────────────────────────────────────────────────
 SESSION_KEY_PREFIX = "agent:chat_history:"
-MAX_HISTORY = 20   # Redis 里最多保留最近 20 条消息（10 轮对话）
-HISTORY_TTL_SECONDS = 7 * 86400   # 会话历史空闲 7 天自动过期，避免 Redis 里无限堆积
+SUMMARY_KEY_PREFIX = "agent:chat_summary:"   # 滚动摘要：被挤出逐字窗口的更早对话压缩存这里
+MAX_HISTORY = 20   # 逐字保留窗口：Redis 里最近 20 条消息（10 轮）原文；更早的滚进摘要
+FOLD_TRIGGER = MAX_HISTORY + 10   # 达到此长度才折叠一次（约每 5 轮 1 次，而非每轮），少调 GLM
+SUMMARY_MAX_CHARS = 1200   # 滚动摘要长度上限（约 300 字），防止摘要本身无限膨胀
+SUMMARY_TIMEOUT = 20   # 摘要压缩 LLM 短超时（秒）：卡住也只挂后台线程、不无限堆积
+HISTORY_TTL_SECONDS = 7 * 86400   # 会话历史/摘要空闲 7 天自动过期，避免 Redis 里无限堆积
 
 # AgentExecutor 兜底：限制工具调用轮数与总执行时长，防止 LLM 反复调工具把用户挂住/烧钱
 AGENT_MAX_ITERATIONS = 8
@@ -274,15 +279,21 @@ def _session_key(session_id: str) -> str:
     return f"{SESSION_KEY_PREFIX}{session_id}"
 
 
+def _summary_key(session_id: str) -> str:
+    return f"{SUMMARY_KEY_PREFIX}{session_id}"
+
+
 def _load_history(session_id: str) -> list:
-    """从 Redis 加载指定会话的历史消息，降级为空列表"""
+    """从 Redis 加载最近 MAX_HISTORY 条原文消息（不含摘要）。降级为空列表。
+
+    摘要不在这里注入——改由 _load_summary 取出、调用方拼进当前输入前缀，避免给 GLM
+    送第二条 system 消息（多条/非首位 system 的兼容性不确定；拼进输入 100% 安全）。"""
     if not is_redis_available():
         return []
     try:
         r = get_redis()
-        items = r.lrange(_session_key(session_id), 0, -1)
-        history = []
-        for item in items:
+        history: list = []
+        for item in r.lrange(_session_key(session_id), 0, -1):
             data = json.loads(item)
             cls = HumanMessage if data["role"] == "human" else AIMessage
             history.append(cls(content=data["content"]))
@@ -292,20 +303,81 @@ def _load_history(session_id: str) -> list:
         return []
 
 
+def _load_summary(session_id: str) -> str:
+    """读滚动摘要（更早对话的压缩）；无/降级返回空串。调用方把它作前缀拼进当前输入。"""
+    if not is_redis_available():
+        return ""
+    try:
+        return get_redis().get(_summary_key(session_id)) or ""
+    except Exception:
+        return ""
+
+
+def _compress_summary(old_summary: str, new_convo: str) -> str:
+    """用当前在用的云模型（get_cloud_llm，现为 GLM）把[已有摘要]+[新移出窗口的对话]合并成一段新摘要。
+    温度 0、非流式、短超时。返回空串=失败（调用方保留旧摘要）。注：edge 模型已废弃，不用 get_edge_llm。"""
+    try:
+        llm = get_cloud_llm(temperature=0, timeout=SUMMARY_TIMEOUT)
+        prompt = (
+            "你是对话记忆压缩器。把【已有摘要】和【新增对话】合并成一段简洁中文摘要，"
+            "保留关键事实、用户身份/偏好、已做的决定、未决问题与待办；去掉寒暄与冗余、不要编造。"
+            f"控制在 {SUMMARY_MAX_CHARS // 4} 字以内，只输出摘要正文。\n\n"
+            f"【已有摘要】\n{old_summary or '（无）'}\n\n【新增对话】\n{new_convo}"
+        )
+        resp = llm.invoke(prompt)
+        text = getattr(resp, "content", None) or str(resp)
+        return (text or "").strip()
+    except Exception as e:
+        logger.warning("摘要压缩调用失败（保留旧摘要）: %s", e)
+        return ""
+
+
+def _fold_into_summary(session_id: str, evicted_items: list) -> None:
+    """把被移出逐字窗口的旧消息滚进摘要。压缩失败则不动旧摘要（宁可少压一次，不丢已有摘要）。"""
+    lines = []
+    for it in evicted_items:
+        try:
+            d = json.loads(it)
+            lines.append(f"{'用户' if d.get('role') == 'human' else '助手'}：{d.get('content', '')}")
+        except Exception:
+            continue
+    convo = "\n".join(lines).strip()
+    if not convo:
+        return
+    try:
+        r = get_redis()
+        skey = _summary_key(session_id)
+        new_summary = _compress_summary(r.get(skey) or "", convo)
+        if new_summary:
+            r.set(skey, new_summary[:SUMMARY_MAX_CHARS])
+            r.expire(skey, HISTORY_TTL_SECONDS)
+    except Exception as e:
+        logger.warning("滚动摘要更新失败（保留旧摘要）: %s", e)
+
+
 def _save_turn(session_id: str, human: str, ai: str) -> None:
-    """追加一轮对话到 Redis，超出 MAX_HISTORY 时截断旧消息"""
+    """追加一轮对话；累积到 FOLD_TRIGGER 才把最旧的批量滚进摘要、再截回 MAX_HISTORY。
+
+    压缩（GLM 调用）放**后台线程**，绝不阻塞本轮回复；且按批触发（约每 5 轮 1 次）
+    而非每轮，少调 GLM。截断（ltrim）同步完成，保证窗口有界。"""
     if not is_redis_available():
         return
     try:
         r = get_redis()
         key = _session_key(session_id)
-        with r.pipeline() as pipe:
-            pipe.rpush(key,
-                       json.dumps({"role": "human", "content": human}),
-                       json.dumps({"role": "ai",    "content": ai}))
-            pipe.ltrim(key, -MAX_HISTORY, -1)
-            pipe.expire(key, HISTORY_TTL_SECONDS)   # 每轮续期：空闲 7 天后自动清理，不无限堆积
-            pipe.execute()
+        r.rpush(key,
+                json.dumps({"role": "human", "content": human}),
+                json.dumps({"role": "ai",    "content": ai}))
+        total = r.llen(key)
+        if total >= FOLD_TRIGGER:
+            # 先取出即将被移出的最旧消息并同步截断（快）；压缩交后台线程，不挡回复
+            evicted = r.lrange(key, 0, total - MAX_HISTORY - 1)
+            r.ltrim(key, -MAX_HISTORY, -1)
+            threading.Thread(target=_fold_into_summary,
+                             args=(session_id, evicted), daemon=True).start()
+        r.expire(key, HISTORY_TTL_SECONDS)   # 每轮续期：空闲 7 天后自动清理
+        if r.exists(_summary_key(session_id)):
+            r.expire(_summary_key(session_id), HISTORY_TTL_SECONDS)
     except Exception as e:
         logger.warning("Redis 保存历史失败: %s", e)
 
@@ -313,7 +385,7 @@ def _save_turn(session_id: str, human: str, ai: str) -> None:
 def _clear_history(session_id: str) -> None:
     if is_redis_available():
         try:
-            get_redis().delete(_session_key(session_id))
+            get_redis().delete(_session_key(session_id), _summary_key(session_id))
         except Exception:
             pass
 

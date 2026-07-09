@@ -34,8 +34,25 @@ def test_ttl_is_renewed_each_turn(fake_redis):
     assert agent.HISTORY_TTL_SECONDS - 5 <= ttl <= agent.HISTORY_TTL_SECONDS
 
 
-def test_truncation_unchanged(fake_redis):
-    """截断行为不变：存 15 轮（30 条）后，列表被裁到 MAX_HISTORY 条，且保留最新的。"""
+def test_truncation_unchanged(fake_redis, monkeypatch):
+    """截断行为不变：存 15 轮（30 条）后，列表被裁到 MAX_HISTORY 条，且保留最新的。
+
+    #43 二轮起，累计到 FOLD_TRIGGER(30) 才折叠一次，压缩走 `threading.Thread` 后台跑。
+    此处桩掉 `get_cloud_llm`（避免真调 LLM）+ 把 `threading.Thread` 换成同步假线程
+    （避免真起后台线程在 monkeypatch teardown 后仍运行导致 flaky/走网络）。
+    """
+    import types as _types
+    monkeypatch.setattr(agent, "get_cloud_llm",
+                        lambda *a, **k: type("L", (), {"invoke": lambda self, p: type("R", (), {"content": "s"})()})())
+
+    class _SyncThread:
+        def __init__(self, target=None, args=(), kwargs=None, daemon=None):
+            self._t, self._a, self._k = target, args, kwargs or {}
+
+        def start(self):
+            if self._t is not None:
+                self._t(*self._a, **self._k)
+    monkeypatch.setattr(agent, "threading", _types.SimpleNamespace(Thread=_SyncThread))
     for i in range(15):
         agent._save_turn(SID, f"q{i}", f"a{i}")
 
