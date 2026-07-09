@@ -127,7 +127,8 @@ def progress_card_v2(job: dict):
         f"**同名策略**：{_same_name_label(job)}\n"
         f"**源** `{job['source']}`\n"
         f"**目的** `{job['dest']}`\n"
-        f"> 已在后台运行，完成后推送结果。"
+        f"> 已在后台运行，完成后自动推送结果。\n"
+        f"> 想随时查看进度：发送 `查询进度 {job['job_id']}`"
     )
     return {
         "schema": "2.0",

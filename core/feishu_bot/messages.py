@@ -248,6 +248,31 @@ def _is_progress_query_text(text: str) -> bool:
     return bool(_PROGRESS_QUERY_RE.search(text or ""))
 
 
+def _push_terminal_result_card(chain: str, jid: str, job: dict) -> None:
+    """按 ID 查询首次把任务从在途刷成终态时，除文本外补推一张富结果卡（带重试按钮）到发起人/
+    配置频道，经 `_claim_dataflow_notify` NX 闸门与在线线程/对账去重（谁先到谁推、只推一次）。
+
+    必要性：refresh 会把 Redis 写成 DONE/FAILED，而对账 `_reconcile_dataflow_once` 的 active 集
+    只含在途态→之后永久跳过该 job；在线轮询线程又随容器重启已死。若这里不补推，重启场景下富
+    结果卡（尤其 FAILED 的「重试」按钮）+ 频道完成/失败通知会永远丢。跑在消息后台线程，可同步推。"""
+    try:
+        from core.dsw_scheduler import _claim_dataflow_notify, _send_card
+        from core.feishu_bot import actions
+        if chain == "vepfs":
+            from core.vepfs_dataflow.cards import result_card
+            chat = actions._cfg_vepfs_chat()
+        elif chain == "cpfs":
+            from core.cpfs_dataflow.cards import result_card
+            chat = actions._cfg_cpfs_chat()
+        else:
+            from core.transfer.cards import result_card
+            chat = actions._cfg_chat()
+        if _claim_dataflow_notify(jid):
+            _send_card(job.get("created_by", ""), chat, result_card(job))
+    except Exception:
+        logger.error("[进度查询] 终态补推结果卡失败 job=%s", jid, exc_info=True)
+
+
 def _handle_progress_query(message_id: str, text: str, open_id: str = "") -> None:
     """按任务ID直接查进度（cpfs-→CPFS 预热/沉降；tr-→跨云迁移）。无ID→弹输入卡让用户填 ID。"""
     m = _JOB_ID_RE.search(text or "")
@@ -259,7 +284,8 @@ def _handle_progress_query(message_id: str, text: str, open_id: str = "") -> Non
     try:
         if jid.lower().startswith("vepfs-"):
             from core.vepfs_dataflow import orchestrator as o
-            job = o.get_job(jid)
+            chain = "vepfs"
+            job = o.refresh(jid) or o.get_job(jid)   # 实时重查云端（自愈重启后死掉的轮询线程）
             if not job:
                 messaging._feishu_reply(message_id, f"未找到任务 `{jid}`（可能已过期）。")
                 return
@@ -269,7 +295,8 @@ def _handle_progress_query(message_id: str, text: str, open_id: str = "") -> Non
                    + (f"\n错误：{job['error']}" if job.get('error') else ""))
         elif jid.lower().startswith("cpfs-"):
             from core.cpfs_dataflow import orchestrator as o
-            job = o.get_job(jid)
+            chain = "cpfs"
+            job = o.refresh(jid) or o.get_job(jid)   # 实时重查云端（自愈重启后死掉的轮询线程）
             if not job:
                 messaging._feishu_reply(message_id, f"未找到任务 `{jid}`（可能已过期）。")
                 return
@@ -279,14 +306,21 @@ def _handle_progress_query(message_id: str, text: str, open_id: str = "") -> Non
                    + (f"\n错误：{job['error']}" if job.get('error') else ""))
         else:  # tr-
             from core.transfer import orchestrator as o
-            job = o.get_job(jid)
+            chain = "transfer"
+            job = o.refresh(jid) or o.get_job(jid)   # 实时重查云端（自愈重启后死掉的轮询线程）
             if not job:
                 messaging._feishu_reply(message_id, f"未找到任务 `{jid}`（可能已过期）。")
                 return
+            done = o.fmt_size(job.get("bytes_done", 0)) if job.get("bytes_done") else ""
+            total = o.fmt_size(job.get("bytes_total", 0))
+            prog = f"{done} / {total}" if done else total
             msg = (f"任务 `{jid}`：**{job['stage']}** {job.get('direction','')}\n"
-                   f"{o.fmt_size(job.get('bytes_total',0))}"
+                   f"进度 {prog}"
                    + (f"\n错误：{job['error']}" if job.get('error') else ""))
         messaging._feishu_reply(message_id, msg)
+        # 若本次查询正是那次把任务刷成终态的观测：补推富结果卡（对账此后不再管终态 job）。
+        if job["stage"] in (o.STAGE_DONE, o.STAGE_FAILED):
+            _push_terminal_result_card(chain, jid, job)
     except Exception as e:
         messaging._feishu_reply(message_id, f"查询失败：{e}")
 

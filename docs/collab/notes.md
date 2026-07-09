@@ -172,6 +172,35 @@
 - [2026-07-09] [AUDITOR] #45/#46 复审**通过、无阻塞**。#45 四处回填守卫一致（open_id 非空且旧值空才补、绝不覆盖真值）、CPFS STS 身份链路确认回填在 _save/线程前拿到真 open_id 不再退 master AK；A2 分发器 4 位置参→reply_v2 默认 True 生效、2.0→2.0 / 重试 1.0→1.0 避 200830；C3 字段名逐字一致、C4 redis-py 7.4.0 三 kwargs 合法、C5 探测签名一致避环、C6 双终止防死循环、B3 双检锁无竞态坏 token 不入缓存、B5 code!=0 抛错+legit 空表仍正常+快照单行自愈无重复。2 Low 记账：ram max_items=100 可对齐 1000（dev 已改注释措辞，值保留 100）、ram body.users 未守空但 try 吞成 []（无回归）。
 - [2026-07-09] [DEV] 据审计 Low 修 ram.py 注释措辞（去掉「上限 100」误述）；max_items 保留 100（功能正确、避免动 tester 断言）。
 
+## #49 跨云迁移(tr-)查不到进度 — 按 task_id 查询实时化（dev 已改，待 tester+auditor，未提交）
+真机：确认 tos→oss 迁移(206GB/119384对象)后查不到进度。根因：确认后原地卡是 progress_card_v2（2.0 纯展示、无按钮，加按钮会 200830），在线线程只在**终态**推结果卡→中间态无卡可点；唯一查法是发「查询进度 tr-xxxx」文本，但 `messages._handle_progress_query` 三条分支都只 `get_job`（读旧 Redis）、**不 refresh**→容器重启后台轮询线程死了就永远停在旧 CROSSING、查不到真实进度。（对比：卡片按钮 `_h_query_*` 走 `_async_refresh_and_push` 会 refresh；文本按 ID 查这条没 refresh。）
+- 修①：`_handle_progress_query` 三分支 `get_job(jid)` → `o.refresh(jid) or o.get_job(jid)`（refresh 在 stage 仍在途且有 task_id 时重查云端并落库自愈；跑在消息后台线程、无 3s 限制，可阻塞轮询）。
+- 修②：tr- 消息补 `bytes_done / bytes_total` 实时进度（原来只显示 bytes_total）。
+- 修③：`transfer.cards.progress_card_v2` 加提示行「发送 `查询进度 <任务ID>`」，让无按钮的 2.0 卡可发现文本查法（卡里本就显示 job_id）。
+- 两文件 py_compile 过。cpfs/vepfs 的 progress_card_v2 同样无按钮（同坑），本轮先只按用户所指改 transfer，hint 可后续照搬。
+- tester：三分支 refresh 被调用（mock refresh 返回在途/终态两态）、refresh 返 None 回退 get_job、tr- 消息含 bytes_done/total、progress_card_v2 含 job_id 提示行。auditor：refresh 在消息线程阻塞可接受（非 3s 回调）、不误触 200830（未给 2.0 卡加按钮）、三分支一致。
+
+- [2026-07-09] [TESTER] #49 补测完成（本地全量 **777 passed / 1 skipped / 9 deselected / 0 failed**，新增 20 例）。
+  新文件 `tests/unit/test_progress_query_by_id.py`：
+  ① 三前缀(vepfs-/cpfs-/tr-)按 ID 查都调 `o.refresh(jid)` 且 refresh 命中真值时短路不再 get_job（in-flight+终态两态，参数化×2=6 例，**本次核心断言**）；
+  ② refresh 返 None → 回退 get_job：都 None→「未找到任务」、get_job 有旧值→用旧值出文案不误报（参数化×2=6 例）；真实 `orchestrator.refresh` 内部 try 吞 poll_once 异常仍返可用 job、stage 维持原样（三链参数化 3 例）；
+  ③ tr- 消息：有 bytes_done→「done / total」、无→只 total 且不出现「 / 」、FAILED 带 error（3 例）；
+  ④ `transfer.cards.progress_card_v2` info_md 含 job_id + 「查询进度」提示行（且提示行带 job_id）、schema 2.0 无 form/button（1 例）；
+  ⑤ 无 ID→弹 query_input_card 回归（1 例）。
+  既有 `test_cpfs_feishu.py`/`test_transfer_confirm_idempotent.py` 均无「_handle_progress_query 调 get_job」断言（前者 test_progress_query_by_cpfs_id 用真实 refresh、无 task_id 不 poll，仍绿），无需改。**未发现源码问题**：三分支改动一致、refresh 短路/回退/吞错逻辑与 progress_card_v2 提示行均与断言吻合。
+
+- [2026-07-09] [AUDITOR] 复审 #49：MEDIUM——query-path refresh 首次观测终态后只回文本、不推结果卡/不占 notified NX，导致对账(active 仅含在途态)永久跳过该 job→重启场景富结果卡(尤其 FAILED 的重试按钮)丢失。建议终态分支加 `_claim_dataflow_notify` 门控的 result_card 推送(复用 _async_refresh_and_push 思路)。余 5 点通过：非 3s 路径/三分支一致/不触 200830/bytes 安全/在线并发不双推。
+- [2026-07-09] [DEV] 据审计修 MEDIUM：新增 `messages._push_terminal_result_card(chain,jid,job)`——三分支查询把 job 刷成终态后，经 `_claim_dataflow_notify` NX 闸门推 result_card 到 created_by/配置频道(复用 actions._cfg_*_chat + 各链 result_card)，与在线线程/对账去重只推一次。跑消息后台线程可同步推。已编译。请 auditor 复核 delta、tester 补测终态补推(命中 NX→推、被占→不推、FAILED 带重试按钮)。
+
+- [2026-07-09] [AUDITOR] #49 MEDIUM 修复 delta 复核**通过、无阻塞、满足 commit gate**。①NX 闸门+目标频道三链逐一比对与在线线程/对账一致(created_by→_cfg_*_chat)，谁先到谁推、连查两次被 NX 挡；②lazy import 无顶层环(messages/actions 顶层互不 import)；③o.STAGE_* 终态判定 o 单分支绑定正确、chain↔o 成对不错链；④原 updated_ts LOW 已实质消解(终态当场补推、仅真·在途 ≤180s 有界延迟自愈)。bucket(bkt-)不在 _JOB_ID_RE、非缺口。
+
+- [2026-07-09] [TESTER] #49 MEDIUM（终态补推结果卡）补测完成（本地全量 **789 passed / 1 skipped / 9 deselected / 0 failed**，同文件 20→32 例，+12）。
+  在 `tests/unit/test_progress_query_by_id.py` 加 `push_spy` fixture（桩 `dsw_scheduler._claim_dataflow_notify`(默认放行)/`_send_card` + `actions._cfg_{vepfs,cpfs,}_chat` + 三链 `result_card` 哨兵），并：
+  ① 直测 `_push_terminal_result_card`：闸门未占→推对应链 result_card、首参=job.created_by、次参=该链配置频道（3）；created_by 缺→首参 ""（3）；闸门被占(_claim 返 False)→抢闸门但不推（不双推，3）；
+  ② FAILED 走真实 result_card→含各链重试按钮(retry_{transfer,cpfs,vepfs}_dataflow)（3）；
+  ③ 更新既有终态用例：DONE 查询现「既回文本又补推卡」（文本仍在 + push 到 created_by），in-flight(RUNNING/CROSSING)不推也不抢闸门，tr- FAILED 文本用例补断言 push。
+  未发现源码问题：`_push_terminal_result_card` 的 NX 闸门去重、created_by→配置频道回落、失败卡重试按钮均与在线线程/对账一致。
+
 ## 项目要点（历史踩坑，审计/测试重点）
 - STS/RAM 多租户凭证；`ADMIN_FEISHU_OPEN_ID` 必须是本 app(cli_a962...) 的 open_id。
 - 飞书卡片回调**至少投递一次**且用户会连点 → 幂等锁 / `launched` 标记 / `SET NX` 去重。
