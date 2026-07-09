@@ -7,6 +7,7 @@
 写操作（create_bucket / put_object / delete_object / delete_bucket）
 必须 confirm=true。
 """
+import itertools
 import logging
 import re
 
@@ -106,7 +107,10 @@ def manage_oss(
             b = get_oss_bucket(open_id, bucket, region=region)
             if b is None:
                 return "❌ OSS 凭证不可用。"
-            objects = list(oss2.ObjectIterator(b, prefix=prefix or "", max_keys=max_keys))[:max_keys]
+            # 用 islice 在第一页就截断：ObjectIterator 的 max_keys 只是每页大小，直接
+            # list(...) 会翻页枚举整个 prefix 下全部对象（百万级桶→挂线程/OOM）后才切片。
+            objects = list(itertools.islice(
+                oss2.ObjectIterator(b, prefix=prefix or "", max_keys=max_keys), max_keys))
             if not objects:
                 return f"bucket `{bucket}` 下无对象（prefix={prefix!r}）。"
             lines = [f"## bucket `{bucket}` 对象列表（前 {len(objects)} 条，prefix={prefix or '-'})"]

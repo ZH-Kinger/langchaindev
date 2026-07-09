@@ -54,24 +54,26 @@ def _h_submit_ak_register(action_val, open_id, chat_id, form_value):
     if not save_user_ak(open_id, ak_id, ak_secret):
         return {"toast": {"type": "error", "content": "保存失败（Redis 不可达？）"}}
 
-    # 同步建立 RAM 映射：优先用用户填的 ram_user_name，否则尝试自动匹配
-    display = ram_user_name or ""
-    try:
-        from tools.aliyun.ram import list_ram_users_api, save_user_map
-        ram_users = list_ram_users_api()
-        if ram_user_name:
-            matched = next((u for u in ram_users if u["user_name"] == ram_user_name), None)
-        else:
-            # 按飞书显示名匹配
-            from tools.feishu.notify import _get_user_name
-            feishu_name = _get_user_name(open_id)
-            matched = next((u for u in ram_users
-                            if u.get("display_name") == feishu_name), None) if feishu_name else None
-        if matched:
-            display = matched.get("display_name") or matched["user_name"]
-            save_user_map(open_id, display, matched["user_id"])
-    except Exception as e:
-        logger.warning("[RAM映射] 同步失败（不影响 AK 绑定）: %s", e)
+    # 建立 RAM 映射：list_ram_users_api + 取飞书姓名都是网络调用（阿里 RAM 分页 + 飞书 HTTP），
+    # 放后台线程，避免占用 3s 回调预算导致飞书重投、成功卡发不出。关联结果异步补推一条文本。
+    def _link_ram() -> None:
+        try:
+            from tools.aliyun.ram import list_ram_users_api, save_user_map
+            ram_users = list_ram_users_api()
+            if ram_user_name:
+                matched = next((u for u in ram_users if u["user_name"] == ram_user_name), None)
+            else:
+                from tools.feishu.notify import _get_user_name
+                feishu_name = _get_user_name(open_id)
+                matched = next((u for u in ram_users
+                                if u.get("display_name") == feishu_name), None) if feishu_name else None
+            if matched:
+                name = matched.get("display_name") or matched["user_name"]
+                save_user_map(open_id, name, matched["user_id"])
+                messaging._feishu_send(chat_id, f"✅ 已关联 RAM 用户：{name}（资源归属你本人）")
+        except Exception as e:
+            logger.warning("[RAM映射] 同步失败（不影响 AK 绑定）: %s", e)
+    threading.Thread(target=_link_ram, daemon=True).start()
 
     # 绑定完后如有待处理的 GPU 申请，推送 GPU 卡片
     gpu_state = gpu_flow._get_gpu_state(chat_id, open_id)
@@ -99,7 +101,8 @@ def _h_submit_ak_register(action_val, open_id, chat_id, form_value):
         "toast": {"type": "success", "content": "✅ AK 已加密保存"},
         "card": card("✅ AccessKey 已绑定", [div(
             f"**AccessKey ID：** `{ak_id[:8]}****`（已 Fernet 加密存入 Redis）\n"
-            + (f"**RAM 用户：** {display}\n" if display else "")
+            + (f"**指定 RAM 用户：** {ram_user_name}（后台关联中…）\n" if ram_user_name
+               else "**RAM 用户：** 后台自动关联中…\n")
             + f"**资源归属：** 你的 RAM 用户本人（阿里云控制台可直接看到）\n"
             + f"**自动失效：** {settings.USER_AK_IDLE_TTL_SECONDS // 86400} 天未使用\n\n"
             + "随时发送「解绑AK」可删除，「查看绑定」查状态。")], color="green"),
@@ -143,11 +146,10 @@ def _h_submit_gpu_request(action_val, open_id, chat_id, form_value):
     needs_approval = gpu_count_i > 4 or duration_float > 48
     cost_hint      = _cost_str(gpu_count_i, duration_float)
 
-    # 获取飞书真实姓名，用于工单归属
-    from tools.feishu.notify import _get_user_name
-    reporter_name = _get_user_name(open_id)
-
     def _do() -> None:
+        # 获取飞书真实姓名（飞书 HTTP）放后台线程，避免占用 3s 回调预算导致重投。
+        from tools.feishu.notify import _get_user_name
+        reporter_name = _get_user_name(open_id)
         ticket_key = create_gpu_ticket(
             instance_name=instance_name,
             gpu_count=gpu_count,
@@ -571,17 +573,43 @@ def _h_confirm_transfer(action_val, open_id, chat_id, form_value, *, reply_v2=Tr
             "card": {"type": "raw", "data": card_data}}
 
 
+def _async_refresh_and_push(orch, job_id, progress_card, result_card, chat):
+    """后台真正 refresh（会 poll 云端、可能数十秒），阶段推进才推更新卡；终态经
+    _claim_dataflow_notify 去重，避免与在线线程/对账重复推。查询回调本身只读 Redis 秒回，
+    绝不在 3s 回调里 poll 云端（否则超时→飞书重投→原地卡永远刷不出、只见失败）。"""
+    from core.dsw_scheduler import _send_card, _claim_dataflow_notify
+    try:
+        prev = orch.get_job(job_id)
+        prev_stage = prev.get("stage") if prev else None
+        job = orch.refresh(job_id)
+        if not job:
+            return
+        terminal = job["stage"] in (orch.STAGE_DONE, orch.STAGE_FAILED)
+        if job["stage"] == prev_stage and not terminal:
+            return  # 无变化，别刷屏
+        if terminal and not _claim_dataflow_notify(job["job_id"]):
+            return  # 终态卡已被在线线程/对账推过
+        _send_card("", chat, result_card(job) if terminal else progress_card(job))
+    except Exception:
+        logger.error("[Query] 后台刷新失败 job=%s", job_id, exc_info=True)
+
+
 def _h_query_transfer_progress(action_val, open_id, chat_id, form_value):
-    """点“查询这条”：拉迁移任务最新状态，原地刷成进度/结果卡。"""
+    """点“查询这条”：只读缓存秒回当前卡，后台异步 refresh 后推更新卡。"""
     job_id = action_val.get("job_id", "") if isinstance(action_val, dict) else ""
     from core.transfer import orchestrator
     from core.transfer.cards import progress_card, result_card
-    job = orchestrator.refresh(job_id) if job_id else None   # 实时重查，自愈重启导致的卡 CROSSING
+    job = orchestrator.get_job(job_id) if job_id else None   # 只读缓存，不在 3s 回调里 poll 云端
     if not job:
         return {"toast": {"type": "error", "content": "任务不存在或已过期"}}
-    card = (result_card(job) if job["stage"] in (orchestrator.STAGE_DONE, orchestrator.STAGE_FAILED)
-            else progress_card(job))
-    return {"toast": {"type": "success", "content": f"当前阶段：{job['stage']}"},
+    terminal = job["stage"] in (orchestrator.STAGE_DONE, orchestrator.STAGE_FAILED)
+    if not terminal:
+        threading.Thread(target=_async_refresh_and_push,
+                         args=(orchestrator, job_id, progress_card, result_card, _cfg_chat()),
+                         daemon=True).start()
+    card = result_card(job) if terminal else progress_card(job)
+    return {"toast": {"type": "success",
+                      "content": f"当前阶段：{job['stage']}" + ("" if terminal else "（后台刷新中）")},
             "card": {"type": "raw", "data": card}}
 
 
@@ -599,7 +627,9 @@ def _h_retry_transfer(action_val, open_id, chat_id, form_value):
     orchestrator._save(job)
     try:
         from utils.redis_client import get_redis
-        get_redis().delete(f"transfer:launch:{job_id}")
+        # 清 launch 锁（否则 30s 内重试被"已下发"挡）+ 清终态通知闸门
+        # （job_id 当天不变，首次失败已占 dataflow:notified，不清则重试成功后结果卡永远不推）。
+        get_redis().delete(f"transfer:launch:{job_id}", f"dataflow:notified:{job_id}")
     except Exception:
         pass
     # retry 由 1.0 结果卡触发，回 1.0 progress_card 原地替换（1.0→1.0，同家族）。
@@ -795,16 +825,21 @@ def _h_confirm_cpfs_dataflow(action_val, open_id, chat_id, form_value):
 
 
 def _h_query_cpfs_progress(action_val, open_id, chat_id, form_value):
-    """点“查询进度”：拉最新任务状态，未完→进度卡、终态→结果卡（原地刷新）。"""
+    """点“查询进度”：只读缓存秒回当前卡，后台异步 refresh 后推更新卡。"""
     job_id = action_val.get("job_id", "") if isinstance(action_val, dict) else ""
     from core.cpfs_dataflow import orchestrator
     from core.cpfs_dataflow.cards import progress_card, result_card
-    job = orchestrator.refresh(job_id) if job_id else None   # 实时重查，自愈重启导致的卡 RUNNING
+    job = orchestrator.get_job(job_id) if job_id else None   # 只读缓存，不在 3s 回调里 poll 云端
     if not job:
         return {"toast": {"type": "error", "content": "任务不存在或已过期"}}
-    card = (result_card(job) if job["stage"] in (orchestrator.STAGE_DONE, orchestrator.STAGE_FAILED)
-            else progress_card(job))
-    return {"toast": {"type": "success", "content": f"当前阶段：{job['stage']}"},
+    terminal = job["stage"] in (orchestrator.STAGE_DONE, orchestrator.STAGE_FAILED)
+    if not terminal:
+        threading.Thread(target=_async_refresh_and_push,
+                         args=(orchestrator, job_id, progress_card, result_card, _cfg_cpfs_chat()),
+                         daemon=True).start()
+    card = result_card(job) if terminal else progress_card(job)
+    return {"toast": {"type": "success",
+                      "content": f"当前阶段：{job['stage']}" + ("" if terminal else "（后台刷新中）")},
             "card": {"type": "raw", "data": card}}
 
 
@@ -814,8 +849,16 @@ def _h_retry_cpfs_dataflow(action_val, open_id, chat_id, form_value):
     job = orchestrator.get_job(job_id) if job_id else None
     if not job:
         return {"toast": {"type": "error", "content": "任务不存在或已过期"}}
+    # 防御性落盘：_h_confirm_* 会从 Redis 重读 job（FAILED 本就过 guard），落盘保证重读到干净状态。
     job["stage"] = orchestrator.STAGE_NEW
     job["error"] = ""
+    orchestrator._save(job)
+    try:
+        from utils.redis_client import get_redis
+        # 清 launch 锁（否则 30s 内重试被"已下发"挡）+ 清终态通知闸门（否则重试成功后结果卡不推）。
+        get_redis().delete(f"cpfs:dataflow:launch:{job_id}", f"dataflow:notified:{job_id}")
+    except Exception:
+        pass
     return _h_confirm_cpfs_dataflow({"job_id": job_id}, open_id, chat_id, form_value)
 
 
@@ -908,15 +951,21 @@ def _h_confirm_vepfs_dataflow(action_val, open_id, chat_id, form_value):
 
 
 def _h_query_vepfs_progress(action_val, open_id, chat_id, form_value):
+    """点“查询进度”：只读缓存秒回当前卡，后台异步 refresh 后推更新卡。"""
     job_id = action_val.get("job_id", "") if isinstance(action_val, dict) else ""
     from core.vepfs_dataflow import orchestrator
     from core.vepfs_dataflow.cards import progress_card, result_card
-    job = orchestrator.refresh(job_id) if job_id else None   # 实时重查，自愈重启导致的卡 RUNNING
+    job = orchestrator.get_job(job_id) if job_id else None   # 只读缓存，不在 3s 回调里 poll 云端
     if not job:
         return {"toast": {"type": "error", "content": "任务不存在或已过期"}}
-    card = (result_card(job) if job["stage"] in (orchestrator.STAGE_DONE, orchestrator.STAGE_FAILED)
-            else progress_card(job))
-    return {"toast": {"type": "success", "content": f"当前阶段：{job['stage']}"},
+    terminal = job["stage"] in (orchestrator.STAGE_DONE, orchestrator.STAGE_FAILED)
+    if not terminal:
+        threading.Thread(target=_async_refresh_and_push,
+                         args=(orchestrator, job_id, progress_card, result_card, _cfg_vepfs_chat()),
+                         daemon=True).start()
+    card = result_card(job) if terminal else progress_card(job)
+    return {"toast": {"type": "success",
+                      "content": f"当前阶段：{job['stage']}" + ("" if terminal else "（后台刷新中）")},
             "card": {"type": "raw", "data": card}}
 
 
@@ -926,8 +975,16 @@ def _h_retry_vepfs_dataflow(action_val, open_id, chat_id, form_value):
     job = orchestrator.get_job(job_id) if job_id else None
     if not job:
         return {"toast": {"type": "error", "content": "任务不存在或已过期"}}
+    # 防御性落盘：_h_confirm_* 会从 Redis 重读 job（FAILED 本就过 guard），落盘保证重读到干净状态。
     job["stage"] = orchestrator.STAGE_NEW
     job["error"] = ""
+    orchestrator._save(job)
+    try:
+        from utils.redis_client import get_redis
+        # 清 launch 锁（否则 30s 内重试被"已下发"挡）+ 清终态通知闸门（否则重试成功后结果卡不推）。
+        get_redis().delete(f"vepfs:dataflow:launch:{job_id}", f"dataflow:notified:{job_id}")
+    except Exception:
+        pass
     return _h_confirm_vepfs_dataflow({"job_id": job_id}, open_id, chat_id, form_value)
 
 
@@ -940,6 +997,9 @@ def _h_query_progress_by_id(action_val, open_id, chat_id, form_value):
     jid = ((form_value or {}).get("job_id") or "").strip()
     if not jid:
         return {}
+    low = jid.lower()
+    if not low.startswith(("vepfs-", "cpfs-", "tr-")):
+        return {"toast": {"type": "error", "content": "任务 ID 需以 vepfs- / cpfs- / tr- 开头"}}
     # 飞书对同一次点击会双投递（老式回调 + schema 2.0 事件，两条都带 job_id）。
     # 推送式返回会各推一张卡 → 两张。按 (open_id, job_id) 原子去重，同一次点击只推一张。
     try:
@@ -948,39 +1008,36 @@ def _h_query_progress_by_id(action_val, open_id, chat_id, form_value):
             return {"toast": {"type": "info", "content": "查询中…"}}
     except Exception:
         pass
-    from core.dsw_scheduler import _send_card
-    low = jid.lower()
-    if low.startswith("vepfs-"):
-        from core.vepfs_dataflow import orchestrator as o
-        from core.vepfs_dataflow.cards import progress_card, result_card
-        job = o.refresh(jid)
+
+    # refresh 会 poll 云端（可能数十秒）→ 放后台线程，回调只回 toast 秒返，避免超 3s 被飞书重投。
+    def _bg():
+        from core.dsw_scheduler import _send_card, _send_text
+        if low.startswith("vepfs-"):
+            from core.vepfs_dataflow import orchestrator as o
+            from core.vepfs_dataflow.cards import progress_card, result_card
+            chat = chat_id or _cfg_vepfs_chat()
+        elif low.startswith("cpfs-"):
+            from core.cpfs_dataflow import orchestrator as o
+            from core.cpfs_dataflow.cards import progress_card, result_card
+            chat = chat_id or _cfg_cpfs_chat()
+        else:  # tr-
+            from core.transfer import orchestrator as o
+            from core.transfer.cards import progress_card, result_card
+            chat = chat_id or _cfg_chat()
+        try:
+            job = o.refresh(jid)
+        except Exception:
+            logger.error("[Query] 按 ID 刷新失败 %s", jid, exc_info=True)
+            job = None
         if not job:
-            return {"toast": {"type": "error", "content": f"未找到任务 {jid}（可能已过期）"}}
+            _send_text(open_id, chat, f"❌ 未找到任务 {jid}（可能已过期）")
+            return
         c = (result_card(job) if job["stage"] in (o.STAGE_DONE, o.STAGE_FAILED)
              else progress_card(job))
-        _send_card(open_id, chat_id or _cfg_vepfs_chat(), c)
-        return {"toast": {"type": "success", "content": f"{jid}：{job['stage']}"}}
-    if low.startswith("cpfs-"):
-        from core.cpfs_dataflow import orchestrator as o
-        from core.cpfs_dataflow.cards import progress_card, result_card
-        job = o.refresh(jid)
-        if not job:
-            return {"toast": {"type": "error", "content": f"未找到任务 {jid}（可能已过期）"}}
-        c = (result_card(job) if job["stage"] in (o.STAGE_DONE, o.STAGE_FAILED)
-             else progress_card(job))
-        _send_card(open_id, chat_id or _cfg_cpfs_chat(), c)
-        return {"toast": {"type": "success", "content": f"{jid}：{job['stage']}"}}
-    if low.startswith("tr-"):
-        from core.transfer import orchestrator as o
-        from core.transfer.cards import progress_card, result_card
-        job = o.refresh(jid)
-        if not job:
-            return {"toast": {"type": "error", "content": f"未找到任务 {jid}（可能已过期）"}}
-        c = (result_card(job) if job["stage"] in (o.STAGE_DONE, o.STAGE_FAILED)
-             else progress_card(job))
-        _send_card(open_id, chat_id or _cfg_chat(), c)
-        return {"toast": {"type": "success", "content": f"{jid}：{job['stage']}"}}
-    return {"toast": {"type": "error", "content": "任务 ID 需以 vepfs- / cpfs- / tr- 开头"}}
+        _send_card(open_id, chat, c)   # 保持原行为：私信发起人优先，降级到 chat
+
+    threading.Thread(target=_bg, daemon=True).start()
+    return {"toast": {"type": "success", "content": f"正在查询 {jid} …"}}
 
 
 # ── 桶间迁移（同云一次性搬运）──────────────────────────────────────────────────
@@ -1063,16 +1120,21 @@ def _h_confirm_bucket_transfer(action_val, open_id, chat_id, form_value):
 
 
 def _h_query_bucket_transfer(action_val, open_id, chat_id, form_value):
-    """点“查询进度”：原地刷成进度/结果卡（均 1.0，原地替换安全）。"""
+    """点“查询进度”：只读缓存秒回当前卡（均 1.0，原地替换安全），后台异步 refresh 后推更新卡。"""
     job_id = action_val.get("job_id", "") if isinstance(action_val, dict) else ""
     from core.bucket_transfer import orchestrator
     from core.bucket_transfer.cards import progress_card, result_card
-    job = orchestrator.refresh(job_id) if job_id else None   # 实时重查，自愈重启导致的卡 RUNNING
+    job = orchestrator.get_job(job_id) if job_id else None   # 只读缓存，不在 3s 回调里 poll 云端
     if not job:
         return {"toast": {"type": "error", "content": "任务不存在或已过期"}}
-    card = (result_card(job) if job["stage"] in (orchestrator.STAGE_DONE, orchestrator.STAGE_FAILED)
-            else progress_card(job))
-    return {"toast": {"type": "success", "content": f"当前阶段：{job['stage']}"},
+    terminal = job["stage"] in (orchestrator.STAGE_DONE, orchestrator.STAGE_FAILED)
+    if not terminal:
+        threading.Thread(target=_async_refresh_and_push,
+                         args=(orchestrator, job_id, progress_card, result_card, _cfg_bkt_chat()),
+                         daemon=True).start()
+    card = result_card(job) if terminal else progress_card(job)
+    return {"toast": {"type": "success",
+                      "content": f"当前阶段：{job['stage']}" + ("" if terminal else "（后台刷新中）")},
             "card": {"type": "raw", "data": card}}
 
 
@@ -1085,6 +1147,12 @@ def _h_retry_bucket_transfer(action_val, open_id, chat_id, form_value):
     job["stage"] = orchestrator.STAGE_NEW
     job["error"] = ""
     orchestrator._save(job)
+    try:
+        from utils.redis_client import get_redis
+        # 清 launch 锁（否则 30s 内重试被"已下发"挡）+ 清终态通知闸门（否则重试成功后结果卡不推）。
+        get_redis().delete(f"bkt:launch:{job_id}", f"dataflow:notified:{job_id}")
+    except Exception:
+        pass
     return _h_confirm_bucket_transfer({"job_id": job_id}, open_id, chat_id, form_value)
 
 
