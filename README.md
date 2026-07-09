@@ -1,31 +1,49 @@
 # AIOps 智能运维助手
 
-基于 LangChain 构建的企业级 AI 运维平台，集成多模型协作、RAG 知识库、实时监控与飞书机器人，实现智能化的基础设施运维与异常处理。内置 GPU 资源全生命周期管理：从申请审批、自动创建 DSW 实例，到超时告警、费用追踪、空转检测，全流程自动化。
+基于 LangChain 0.3 构建的多模式 AI 运维平台。五种运行模式（RAG / 单智能体 / 混合边云 / 多智能体协作 / 飞书 Webhook Bot）之上是一层封装了阿里云（PAI DSW / ECS / OSS / SLS / RAM / Prometheus）、火山引擎（TOS / vePFS）、Jira、GitHub、K8s 与本地 ChromaDB 的工具层。面向算法团队的日常运维：GPU 资源全生命周期、跨云/同云数据搬运、CPFS/vePFS 数据流动、OSS 权限最小化、算力效率与容量治理。每个用户的云 API 调用走 STS AssumeRole，Bot 不用共享 AK。
+
+功能按「新→旧」排列。
 
 ## 功能特性
 
-### 核心能力
-- **多运行模式**：RAG 问答、单智能体、混合双模型、多智能体协作、飞书机器人
-- **混合边云架构**：轻量边缘模型（Qwen 3-4B）负责感知，云端大模型（Qwen-Max）负责决策
-- **多智能体协作**：诊断专家与运维执行两个角色独立运作，职责分离
-- **RAG 知识库**：ChromaDB 向量数据库 + 中文 Embedding，支持运维文档语义检索
-- **持久化对话记忆**：基于 Redis 的会话历史（最近 20 条），支持优雅降级
-- **企业集成**：Prometheus 指标查询、Grafana 看板、飞书 Webhook 通知、Jira 工单系统
-- **告警降噪**：Redis 去重，防止重复告警轰炸
+### 数据搬运与存储流动（最新）
+- **跨云数据迁移**（`core/transfer`）：给一条路径自动判方向、推目的桶。方向决定引擎——搬入 OSS 用阿里「在线迁移服务」(hcs_mgw)，搬入 TOS 用火山「迁移服务」。一期打通 `TOS→OSS`；>1TB 走管理员审批。
+- **同云桶间迁移**（`core/bucket_transfer`）：同账号跨 region/桶搬运，阿里 `oss://→oss://`、火山 `tos://→tos://`；OSS 自动探测源/目的 region，跨 region 走公网。与跨云迁移独立命名空间，仅复用其引擎。
+- **CPFS/NAS 数据流动**（`core/cpfs_dataflow`）：阿里 NAS DataFlow **预热**（OSS→CPFS，Import）/**沉降**（CPFS→OSS，Export）。只查现有 DataFlow + 提交任务，按目标子目录匹配最长前缀绑定；智算版/通用版自动分支。飞书选择器从发现的 CPFS↔OSS 绑定里选。
+- **火山 vePFS/TOS 数据流动**（`core/vepfs_dataflow`）：火山「文件存储 vePFS」**预热**（TOS→vePFS）/**沉降**（vePFS→TOS）。无持久 DataFlow 对象，提交任务直接带桶/前缀，方向由地址类型自动判断。与 CPFS 共用三步级联向导卡（选云→选地区→表单）。
+- **数据流动/迁移在途任务对账**：调度器每 2 分钟对账在途任务。后台轮询线程随容器重启会死，对账线程随容器复活兜底——重启后任务完成也会自动补推结果卡（跑完必通知）。在线推送与对账推送共用 Redis `SET NX` 闸门，跨线程只推一次。
+- **三入口共享核心**：以上迁移/流动能力均是「飞书卡片 + Agent 工具 + CLI」三入口共用一套编排。飞书发意图→确认卡→后台推进度/结果卡（优先推发起人，空则降级配置频道）；Agent 工具 `manage_transfer`/`manage_cpfs_dataflow`/`manage_vepfs_dataflow`；CLI `python -m core.<pkg>.cli`（dry-run 默认）。
+
+### 权限、算力与容量治理
+- **OSS 权限最小化同步**（`core/oss_perm`）：飞书「舞肌算法组权限统计」多维表格 → 每人一条最小权限自定义 RAM 策略并挂到其 RAM 用户。桶级/目录级两档粒度（先放桶级观察再收紧）。飞书表单卡选择性下发（粒度单选默认桶级 + 成员多选默认全选 + 一键确认）；CLI `--apply`/`--audit`（对账多授/少授/孤儿）。
+- **集群算力效率（MFU）日报**（`cluster_mfu`）：多区域算力效率 + 容量 + 调度日报，交互式飞书卡片可切区域，24h Redis 快照，按钮回调只读缓存秒回。
+- **GPU 卡分布大盘**（`tools/aliyun/gpu_distribution`）：地区×卡型分布 + 每用户在算卡数 + 近 N 小时趋势，实时 HTML 页面 `/gpu/distribution`（token 门禁），15s 陈旧后台单飞刷新；飞书问「谁在用卡/卡分布」回摘要卡 + 链接。
+- **容量巡检**：定时扫 OSS/TOS 各目标子目录大小 + 与上次快照的增量，超阈值标红推卡；同时把每厂家总量 upsert 进飞书多维表格（巡检快照→厂家总量→批次明细 三表关联，去重旧行）。
+- **数据集大盘维护**（`core/dataset_dashboard`）：定时遍历飞书「数据集大盘」多维表格现有行，按 uri 扫对象存储回填脚本负责列（状态/云/厂商/时长/数据集类型），只填数据、不改表结构、绝不碰人工分析列。
+- **STS 多租户凭证**：Bot 从不用全局 AK 做用户动作。按飞书 open_id 解析 RAM 用户 → 组映射角色 ARN → Master AK `AssumeRole` 换临时凭证（Redis 缓存，到期前 5 分钟自动刷新）。用户自填 AK 经 Fernet 加密后入 Redis。
+
+### 平台基础能力
+- **多运行模式**：RAG 问答、单智能体、混合边云双模型、多智能体协作、飞书 Webhook Bot。
+- **三层工具路由**（`core/agent`）：专有名词快路径（零延迟）→ LLM 意图路由（temp 0，`@lru_cache`）→ 关键词兜底，只挂选中意图的工具组。
+- **混合边云架构**：轻量边缘模型（Qwen3-4B）感知、序列化 JSON 观测，云端大模型（Qwen-Max）决策。
+- **多智能体协作**：诊断专家（只读工具）→ 运维执行（写工具），职责分离。
+- **RAG 知识库**：ChromaDB + 中文 Embedding（`text2vec-base-chinese`），运维文档语义检索。
+- **对话滚动摘要记忆**：Redis 逐字保留最近 20 条，更早对话由 GLM 压成滚动摘要（`agent:chat_summary`）作前缀注入，长对话不再硬截断；会话历史 7 天空闲过期，失败静默降级。
+- **企业集成**：Prometheus 指标、Grafana 看板、飞书消息卡片、Jira 工单、GitHub PR/commit/sprint、K8s Pod 重启。
+- **告警降噪**：Redis 去重（24h TTL 集合），防止重复告警轰炸。
 
 ### GPU 资源管理（全生命周期）
-- **自助申请**：飞书交互式卡片申请 GPU 实例，支持快选（1/4/8 GPU）和自定义参数
-- **身份绑定**：每位用户绑定个人阿里云 AK/SK，创建实例时以本人账号操作
-- **Jira 工单**：每次申请自动创建 Jira 工单，完整记录申请信息和状态流转
-- **审批流**：大规格申请（>4 GPU 或 >48h）自动发送管理员审批卡片，支持一键批准/拒绝
-- **自动创建**：调度器轮询 Jira 待办工单，审批通过后 20 秒内自动调用 PAI DSW API 创建实例
-- **就绪通知**：实例进入 Running 状态后，立即向申请人推送就绪卡片
-- **超时预警**：实例到期前 15 分钟推送续期/停止卡片，无响应则自动停止
-- **GPU 空转检测**：对接 Prometheus 监控 GPU SM 利用率，持续低于阈值时推送节省费用提醒
-- **费用估算**：申请时实时计算费用预估，停止时告知实际费用
-- **月度配额**：按用户统计当月 GPU·小时使用量，超额自动拦截
-- **我的实例**：发送「我的实例」即可查看运行状态、费用，并在线延续或停止
-- **每日早报**：每天 09:00 向有运行实例的用户推送到期汇总
+- **自助申请**：飞书交互式卡片申请 GPU 实例，支持快选（1/4/8 GPU）和自定义参数。
+- **身份绑定**：每位用户绑定个人阿里云 AK/SK（Fernet 加密），创建实例时以本人账号（STS）操作。
+- **Jira 工单**：每次申请自动创建 Jira 工单，记录申请信息与状态流转。
+- **审批流**：大规格申请（>4 GPU 或 >48h）自动推管理员审批卡片，一键批准/拒绝。
+- **自动创建**：调度器轮询 Jira 待办工单，审批通过后自动调用 PAI DSW 创建实例。
+- **就绪通知**：实例进入 Running 后立即向申请人推送就绪卡片。
+- **超时预警（默认关）**：到期自动停止默认交给阿里云工作空间的利用率关机（`DSW_IDLE_STOP_ENABLED=false`）；置 `true` 恢复到期前 15 分钟续期/停止卡片 + 无响应自动停止。
+- **GPU 空转检测**：对接 Prometheus GPU SM 利用率，持续低于阈值推送节费提醒（独立于上面的开关，始终生效）。
+- **费用估算与月度配额**：申请时预估、停止时结算；按用户统计当月 GPU·小时，超额拦截。
+- **我的实例**：发送「我的实例」查看运行状态/费用，在线续期或停止。
+- **每日早报**：每天北京 09:00 推两张卡——各用户实例汇总 + 集群 MFU 汇总。
 
 ## 项目结构
 
@@ -38,35 +56,41 @@ langchaindev/
 │   └── settings.py             # 全局配置（路径、模型参数、API）
 │
 ├── core/
-│   ├── agent.py                # 单智能体（工具调用 + Redis 记忆）
+│   ├── agent.py                # 单智能体（三层工具路由 + Redis 记忆）
+│   ├── intent_router.py        # LLM 意图路由（temp 0，@lru_cache）
 │   ├── rag_runner.py           # RAG 模式运行入口（会话 ID 隔离）
 │   ├── hybrid_agents.py        # 混合双模型工作流（边缘→云端）
 │   ├── multi_agent_system.py   # 多智能体协作（诊断 + 执行）
-│   ├── feishu_bot/             # 飞书 Webhook 服务（Flask）
-│   ├── dsw_scheduler.py        # DSW 工单调度器（Jira轮询 + 实例监控 + 早报）
-│   ├── chains.py               # RAG 链组装
+│   ├── feishu_bot/             # 飞书 Webhook 服务（Flask，含 routes/actions/messages/gpu_flow）
+│   ├── dsw_scheduler.py        # 后台调度器（工单轮询/实例监控/早报/巡检/对账…）
+│   ├── transfer/               # 跨云迁移（paths/engine_mgw/engine_tos/orchestrator/cli）
+│   ├── bucket_transfer/        # 同云桶间迁移（oss→oss / tos→tos）
+│   ├── cpfs_dataflow/          # 阿里 CPFS/NAS 数据流动（预热/沉降）
+│   ├── vepfs_dataflow/         # 火山 vePFS/TOS 数据流动（预热/沉降）
+│   ├── dataflow_cards.py       # CPFS/vePFS 共用三步级联向导卡
+│   ├── oss_perm/               # OSS 权限最小化同步（permsync/cards/actions）
+│   ├── cpfs_dataflow.py        # (Phase-3 SINKING) NAS DataFlow Export 引擎
+│   ├── capacity_monitor.py     # 容量巡检
+│   ├── capacity_bitable.py     # 容量结果写飞书多维表格
+│   ├── dataset_dashboard.py    # 数据集大盘多维表格维护
 │   ├── llm_factory.py          # LLM 工厂（云端/边缘模型，@lru_cache）
 │   ├── vector_store.py         # ChromaDB + HuggingFace Embedding（@lru_cache）
-│   ├── prompts_rag.py          # RAG 模式系统提示词
-│   └── prompts_agent.py        # Agent / Hybrid / Collab 系统提示词
+│   └── prompts_*.py            # RAG / Agent / Hybrid / Collab 系统提示词
 │
-├── tools/
-│   ├── __init__.py             # ALL_TOOLS + TOOL_GROUPS（单一来源）
-│   ├── base_tool.py            # 工具基类（日志、路径管理）
-│   ├── system_tool.py          # 系统监控（CPU、内存、磁盘）
-│   ├── analysis_skills.py      # 告警降噪 + Pandas 数据分析
-│   ├── ops_skills.py           # K8s Pod 重启运维操作
-│   ├── monitor_skills.py       # CPU 趋势分析
-│   ├── prometheus_tool.py      # Prometheus 指标查询与分析
-│   ├── feishu_tool.py          # 飞书消息卡片推送
-│   ├── rag_tool.py             # 知识库查询工具
-│   ├── gpu_advisor_tool.py     # GPU 集群智能优化顾问
-│   ├── gpu_training_advisor.py # GPU 训练行为分析（Roofline 模型）
-│   ├── pai_dsw_tool.py         # 阿里云 PAI DSW 实例管理（Python SDK）
-│   ├── jira_tool.py            # Jira 工单操作（GPU 申请工单 CRUD）
-│   ├── ram_tool.py             # 阿里云 RAM 用户权限管理
-│   ├── dsw_instance_inspector.py  # DSW 单实例健康巡检
-│   └── cluster_health_tool.py     # GPU 集群全局监控看板
+├── tools/                      # 按厂商/领域分子包，单一来源 tools/__init__.py
+│   ├── __init__.py             # ALL_TOOLS + TOOL_GROUPS（导入期校验一致性）
+│   ├── base_tool.py            # 工具基类（审计日志、数据路径解析）
+│   ├── aliyun/                 # pai_dsw / ecs / oss / sls / ram / prometheus /
+│   │                           #   gpu_advisor / gpu_training_advisor / dsw_inspector /
+│   │                           #   cluster_health / cluster_mfu / gpu_distribution
+│   ├── volcano/                # tos（容量）/ vepfs_dataflow
+│   ├── transfer/               # manage_transfer
+│   ├── cpfs/                   # manage_cpfs_dataflow
+│   ├── feishu/                 # notify（消息卡片）+ cards（卡片原语）
+│   ├── jira/                   # ticket + workflow
+│   ├── github/                 # workflow
+│   ├── knowledge/              # rag 知识库检索
+│   └── ops/                    # system / analysis / monitor / k8s
 │
 ├── utils/
 │   ├── redis_client.py         # Redis 单例（会话/缓存/去重）
@@ -163,8 +187,9 @@ PAI_DSW_RESOURCE_ID=your-resource-id
 PAI_DSW_DEFAULT_IMAGE=dsw-registry-vpc.../pai/python:3.12-gpu-...
 
 # GPU 管理参数
-DSW_IDLE_WARN_HOURS=1           # 实例运行超时告警时间（小时）
-DSW_IDLE_STOP_MINUTES=30        # 告警后无响应自动停止（分钟）
+DSW_IDLE_STOP_ENABLED=false     # 到期自动停止总开关（默认关，利用率关机交给阿里云工作空间）
+DSW_IDLE_WARN_HOURS=1           # 实例运行超时告警时间（小时，仅开关开启时生效）
+DSW_IDLE_STOP_MINUTES=30        # 告警后无响应自动停止（分钟，仅开关开启时生效）
 ADMIN_FEISHU_OPEN_ID=           # 管理员飞书 open_id（审批大规格申请）
 GPU_PRICE_PER_HOUR=35.0         # 定价（元/GPU·小时）
 GPU_QUOTA_HOURS_PER_MONTH=200.0 # 每人月度配额上限（GPU·小时）
@@ -250,9 +275,9 @@ python main.py --mode bot               # 飞书机器人（端口 8088）
        │
        ▼
   实例运行中：每 5 分钟检查
-  ├── 到期前 15 分钟：推送「续期 / 停止」卡片
-  ├── 无响应超过 DSW_IDLE_STOP_MINUTES：自动停止
-  └── GPU 利用率 < 阈值 且持续 > GPU_IDLE_WARN_MINUTES：推送空转提醒
+  ├── 到期前 15 分钟：推送「续期 / 停止」卡片      （仅 DSW_IDLE_STOP_ENABLED=true）
+  ├── 无响应超过 DSW_IDLE_STOP_MINUTES：自动停止   （仅 DSW_IDLE_STOP_ENABLED=true）
+  └── GPU 利用率 < 阈值 且持续 > GPU_IDLE_WARN_MINUTES：推送空转提醒（始终生效）
 ```
 
 ## 飞书机器人快捷指令
@@ -270,43 +295,69 @@ python main.py --mode bot               # 飞书机器人（端口 8088）
 
 ## 调度器架构（`core/dsw_scheduler.py`）
 
-`DSWScheduler` 随 Bot 启动，包含三个后台线程：
+`DSWScheduler` 随 `bot` 模式启动，后台线程如下（部分按配置开关）：
 
 | 线程 | 间隔 | 职责 |
 |------|------|------|
 | `jira-poll` | 20 秒 | 拉取 Jira 待办工单 → 验证注册/配额/审批 → 创建 DSW 实例 |
-| `dsw-check` | 5 分钟 | 检查所有运行中实例的超时状态和 GPU 空转指标 |
-| `morning-report` | 每天 09:00 | 向有实例的用户推送今日到期汇总 |
+| `dsw-check` | 5 分钟 | 检查运行中实例的超时状态和 GPU 空转指标 |
+| `morning-report` | 每天北京 09:00 | 推两卡：各用户实例汇总 + 集群 MFU 汇总 |
+| `dataflow-reconcile` | 2 分钟 | 对账在途迁移/数据流动任务，重启后完成也补推结果卡 |
+| `capacity-monitor` | N 小时（对齐整点，opt-in） | 扫 OSS/TOS 容量 + 增量推卡 + 写多维表格 |
+| `dataset-dashboard` | N 小时（对齐整点，opt-in） | 维护飞书「数据集大盘」多维表格 |
+| `oss-perm-push` | 每天北京 HOUR:20（opt-in） | OSS 权限对账，把待同步权限推群（带批准按钮） |
 
-Redis Key 设计：
+对账线程随容器一起重启复活，因此后台轮询线程即使随重启死掉，任务跑完仍会被对账补推——在线推送与对账推送共用 Redis `SET NX` 闸门，跨线程只推一次。
+
+主要 Redis Key 命名空间：
 
 ```
-dsw:ticket:{ticket_key}       → 实例状态（instance_id / open_id / start_ts 等）
-feishu:user_ak:{open_id}      → 用户个人 AK/SK（JSON）
-feishu:gpu_state:{chat_id}    → 申请对话中间状态（10 分钟 TTL）
-gpu:quota:{open_id}:{YYYYMM}  → 当月已用 GPU·小时数（月底到期）
-dsw:approved:{ticket_key}     → 管理员已审批标记
-dsw:pending_reg:{ticket_key}  → 未注册通知去重（1 小时 TTL）
+dsw:ticket:{ticket_key}                → 工单/实例状态（7 天 TTL）
+agent:chat_history:{session_id}        → 会话历史（最近 20 条，7 天空闲 TTL）
+agent:chat_summary:{session_id}        → 更早对话的滚动摘要（GLM 压缩，7 天空闲 TTL）
+user:ak:{open_id}                      → 用户个人 AK/SK（Fernet 加密，30 天闲置 TTL）
+gpu:quota:{open_id}:{YYYYMM}           → 当月已用 GPU·小时数
+aliyun:sts:{open_id}:{role_arn}        → STS 临时凭证缓存（到期前 5 分钟刷新）
+transfer:job:{job_id}                  → 跨云迁移状态机（30 天 TTL）
+bkt:transfer:job:{job_id}              → 同云桶间迁移状态机
+cpfs:dataflow:job:{job_id}             → CPFS 预热/沉降任务状态
+vepfs:dataflow:job:{job_id}            → vePFS 预热/沉降任务状态
+dataflow:notified:{job_id}             → 对账/在线推送共用的 SET NX 闸门
+capacity:snapshot:{vendor}:{bucket}:{prefix}  → 上次容量巡检快照（算增量）
+mfu:snapshot / gpu:dist:snapshot       → MFU / GPU 卡分布快照（区域切换、大盘秒回）
+feishu:event_dedup:{event_id}          → Webhook 幂等去重（1h TTL）
 ```
 
 ## 可用工具
 
-| 工具名 | 文件 | 功能 |
+Agent 通过 `TOOL_GROUPS` 按意图选挂 1–2 组工具（`tools/__init__.py` 单一来源，导入期校验一致性）。
+
+| 工具名 | 子包 | 功能 |
 |--------|------|------|
-| `system_data_manager` | system_tool.py | 实时 CPU/内存/磁盘监控 |
-| `compress_system_alarms` | analysis_skills.py | 告警降噪去重分析 |
-| `restart_k8s_service` | ops_skills.py | Kubernetes Pod 重启（带审计日志，生产命名空间保护）|
-| `analyze_node_cpu_trend` | monitor_skills.py | CPU 趋势分析 |
-| `query_infrastructure_metrics` | prometheus_tool.py | Prometheus 指标查询与异常检测 |
-| `push_report_to_feishu` | feishu_tool.py | 飞书消息卡片推送 |
-| `query_knowledge` | rag_tool.py | 运维知识库语义查询 |
-| `advise_gpu_cluster` | gpu_advisor_tool.py | GPU 集群利用率/散热/调度/成本建议 |
-| `analyze_gpu_training` | gpu_training_advisor.py | GPU 训练行为深度分析（Roofline 模型）|
-| `manage_pai_dsw` | pai_dsw_tool.py | PAI DSW 实例查询、启停、创建、资源发现 |
-| `manage_jira` | jira_tool.py | Jira GPU 工单查询、评论、关闭 |
-| `manage_ram` | ram_tool.py | 阿里云 RAM 用户权限查询与映射 |
-| `inspect_dsw_instance` | dsw_instance_inspector.py | DSW 单实例健康巡检（GPU/温度/费用/建议）|
-| `cluster_health_report` | cluster_health_tool.py | GPU 集群全局监控看板（并行巡检 + 排行表）|
+| `manage_transfer` | transfer | 跨云迁移 plan/apply/status（TOS↔OSS） |
+| `manage_cpfs_dataflow` | cpfs | 阿里 CPFS/NAS 数据流动 list/preheat/sink/status |
+| `manage_vepfs_dataflow` | volcano | 火山 vePFS/TOS 数据流动 preheat/sink/status |
+| `manage_oss` | aliyun | OSS 桶/对象、子目录大小、目录树（自动探测地域） |
+| `manage_tos` | volcano | 火山 TOS 容量盘点 |
+| `manage_ecs` | aliyun | 阿里云 ECS 实例管理 |
+| `manage_sls` | aliyun | 阿里云 SLS 日志查询 |
+| `cluster_mfu_report` | aliyun | 多区域算力效率（MFU）+ 容量 + 调度日报卡 |
+| `cluster_health_report` | aliyun | GPU 集群全局监控看板（并行巡检 + 排行表） |
+| `manage_pai_dsw` | aliyun | PAI DSW 实例查询、启停、创建、资源发现 |
+| `inspect_dsw_instance` | aliyun | DSW 单实例健康巡检（GPU/温度/费用/建议） |
+| `advise_gpu_cluster` | aliyun | GPU 集群利用率/散热/调度/成本建议 |
+| `analyze_gpu_training` | aliyun | GPU 训练行为深度分析（Roofline 模型） |
+| `query_infrastructure_metrics` | aliyun | Prometheus 指标查询与异常检测 |
+| `manage_ram` | aliyun | 阿里云 RAM 用户权限查询与映射 |
+| `manage_jira` | jira | Jira GPU 工单查询、评论、关闭 |
+| `query_jira_workflow` | jira | Jira 算法工作流查询 |
+| `query_github_workflow` | github | GitHub PR/commit/sprint 活动查询 |
+| `query_knowledge` | knowledge | 运维知识库语义查询 |
+| `push_report_to_feishu` | feishu | 飞书消息卡片推送 |
+| `system_data_manager` | ops | 实时 CPU/内存/磁盘监控 |
+| `compress_system_alarms` | ops | 告警降噪去重分析 |
+| `analyze_node_cpu_trend` | ops | CPU 趋势分析 |
+| `restart_k8s_service` | ops | Kubernetes Pod 重启（审计日志，生产命名空间保护） |
 
 ## 技术栈
 
@@ -451,9 +502,7 @@ ngrok http 8088
 
 ## 安全注意事项
 
-- **AK/SK 明文存储**：当前实现将用户 AK/SK 明文写入 Redis，适用于内部受控环境。生产环境建议：
-  - 使用 AES/Fernet 加密后再存储（需自管密钥）
-  - 或接入阿里云 STS AssumeRole，仅存储 RAM 角色 ARN，临时凭证按需获取
+- **用户凭证加密 + STS**：用户自填 AK/SK 经 Fernet 加密后入 Redis（`BOT_CREDS_ENCRYPTION_KEY`）；用户发起的云动作走 STS AssumeRole 换临时凭证，Bot 不用共享 AK。Master AK 仅需 `STSAssumeRoleAccess + RAMReadOnlyAccess`。
 - **飞书 Verification Token**：务必配置 `FEISHU_VERIFICATION_TOKEN`，防止伪造事件请求
 - **K8s 操作**：Pod 重启工具内置命名空间白名单，禁止对 `prod`、`production`、`kube-system` 执行操作
 - **Jira PAT**：使用个人访问令牌（Personal Access Token）而非账号密码，定期轮换
