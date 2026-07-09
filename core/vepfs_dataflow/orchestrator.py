@@ -98,6 +98,19 @@ class DataflowPlan:
     same_name: str = ""
 
 
+def _strip_mount(raw: str) -> str:
+    """剥掉 vePFS 挂载前缀（VEPFS_MOUNT_PREFIX，默认 /vepfs）。
+
+    真机看到的是挂载路径 /vepfs/<dir>，但 DataFlow 的 SubPath 是**文件系统内相对路径**；
+    不剥就把 `vepfs` 当真实目录名拼进去 → 数据多套一层 vepfs/。所有解析路径都必须剥。
+    """
+    raw = (raw or "").strip()
+    mount = (settings.VEPFS_MOUNT_PREFIX or "").rstrip("/")
+    if mount and (raw == mount or raw.startswith(mount + "/")):
+        return raw[len(mount):] or "/"
+    return raw
+
+
 def _parse_vepfs(raw: str) -> tuple[str, str]:
     """返回 (fs_id, sub_path)。支持 vepfs://<fs>/<dir>/ 或裸目录（用默认 fs）。"""
     raw = (raw or "").strip()
@@ -115,7 +128,7 @@ def _parse_vepfs(raw: str) -> tuple[str, str]:
     fs = settings.VEPFS_FILE_SYSTEM_ID
     if not fs:
         raise DataflowPathError("未配置 VEPFS_FILE_SYSTEM_ID，请用 vepfs://<fs-id>/<dir>/ 显式指定。")
-    return fs, _norm_dir(raw)
+    return fs, _norm_dir(_strip_mount(raw))
 
 
 def _parse_tos(raw: str) -> tuple[str, str]:
@@ -152,7 +165,9 @@ def make_plan(operation: str, vepfs_addr: str = "", tos: str = "", *,
     """
     op = normalize_operation(operation)
     if fs_id:
-        sub_path = _norm_dir(vepfs_addr or "/")
+        # 卡片直达已给 fs_id，但用户填的目录仍可能带 /vepfs 挂载前缀 → 必须同样剥，
+        # 否则数据多套一层 vepfs/（落 <mount>/vepfs/<dir> 而非 <mount>/<dir>）。
+        sub_path = _norm_dir(_strip_mount(vepfs_addr) or "/")
     else:
         fs_id, sub_path = _parse_vepfs(vepfs_addr)
     tos_bucket, tos_prefix = _parse_tos(tos)

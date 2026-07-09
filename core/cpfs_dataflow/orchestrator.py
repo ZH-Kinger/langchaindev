@@ -80,6 +80,20 @@ class DataflowPlan:
         return engine_nas.edition(self.fs_id)
 
 
+def _strip_mount(raw: str) -> str:
+    """剥掉 CPFS 挂载前缀（CPFS_MOUNT_PREFIX，默认 /cpfs）。
+
+    真机上看到的是挂载路径 /cpfs/<dir>，但 DataFlow 的 Directory/DstDirectory 是**文件系统内
+    相对路径**；不剥前缀就把 `cpfs` 当成真实目录名拼进去 → 数据多套一层 cpfs/
+    （落 <mount>/cpfs/<dir> 而非 <mount>/<dir>）。两条解析路径都必须剥。
+    """
+    raw = (raw or "").strip()
+    mount = (settings.CPFS_MOUNT_PREFIX or "").rstrip("/")
+    if mount and (raw == mount or raw.startswith(mount + "/")):
+        return raw[len(mount):] or "/"
+    return raw
+
+
 def _parse_cpfs(raw: str) -> tuple[str, str]:
     """返回 (fs_id, cpfs_dir)。支持 cpfs://<fs>/<dir>/ 或裸目录（用默认 fs）。"""
     raw = (raw or "").strip()
@@ -95,10 +109,7 @@ def _parse_cpfs(raw: str) -> tuple[str, str]:
             raise DataflowPathError(f"路径缺少文件系统 ID：`{raw}`")
         return fs, engine_nas.normalize_dir(d)
     # 用户给的完整路径，如 /cpfs/cwr/third_party_data/label → 去挂载前缀 → /cwr/third_party_data/label
-    mount = (settings.CPFS_MOUNT_PREFIX or "").rstrip("/")
-    fs_path = raw
-    if mount and (raw == mount or raw.startswith(mount + "/")):
-        fs_path = raw[len(mount):] or "/"
+    fs_path = _strip_mount(raw)
     fs = settings.CPFS_FILE_SYSTEM_ID
     if not fs:
         raise DataflowPathError("未配置 CPFS_FILE_SYSTEM_ID，请用 cpfs://<fs-id>/<dir>/ 显式指定。")
@@ -131,7 +142,9 @@ def make_plan(operation: str, cpfs_path: str = "", oss: str = "", *,
     """
     op = normalize_operation(operation)
     if fs_id:
-        cpfs_dir = engine_nas.normalize_dir(cpfs_path or "/")
+        # 卡片直达已给 fs_id，但用户填的目录仍可能带 /cpfs 挂载前缀 → 必须同样剥，
+        # 否则数据多套一层 cpfs/（落 <mount>/cpfs/<dir> 而非 <mount>/<dir>）。
+        cpfs_dir = engine_nas.normalize_dir(_strip_mount(cpfs_path) or "/")
     else:
         fs_id, cpfs_dir = _parse_cpfs(cpfs_path)
     oss_bucket, oss_prefix = _parse_oss(oss)

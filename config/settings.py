@@ -255,6 +255,9 @@ class Config:
     # 同名冲突策略：Skip（默认，永不覆盖）/ KeepLatest / OverWrite
     VEPFS_CONFLICT_POLICY_DEFAULT = os.environ.get("VEPFS_CONFLICT_POLICY_DEFAULT", "Skip")
     VEPFS_CHAT_ID           = os.environ.get("VEPFS_CHAT_ID", "")             # 留空回退 FEISHU_CHAT_ID
+    # vePFS 挂载前缀：真机上看到的是 /vepfs/<dir>，但 DataFlow SubPath 是文件系统内相对路径；
+    # 剥掉它避免把 `vepfs` 当真实目录名拼进去（多套一层 vepfs/）。同 CPFS_MOUNT_PREFIX。
+    VEPFS_MOUNT_PREFIX      = os.environ.get("VEPFS_MOUNT_PREFIX", "/vepfs")
 
     # 容量巡检（OSS + TOS 目录大小定时盘点 → 飞书主动推送）
     # 默认关闭，opt-in；TARGETS 为 JSON 数组，每项 {vendor,bucket,prefix[,region]}
