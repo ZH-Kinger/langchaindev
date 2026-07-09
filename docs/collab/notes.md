@@ -201,6 +201,25 @@
   ③ 更新既有终态用例：DONE 查询现「既回文本又补推卡」（文本仍在 + push 到 created_by），in-flight(RUNNING/CROSSING)不推也不抢闸门，tr- FAILED 文本用例补断言 push。
   未发现源码问题：`_push_terminal_result_card` 的 NX 闸门去重、created_by→配置频道回落、失败卡重试按钮均与在线线程/对账一致。
 
+## #50 查询按 ID 推结果卡与自动完成通知重复（真机：两张一样的完成卡，dev 已改，待 tester+auditor，未提交）
+真机：用户按 task_id 查询已完成的 tr- 迁移，收到**两张一模一样的完成卡**。根因：`_h_query_progress_by_id._bg` 终态推卡 `_send_card` **未走 `dataflow:notified` NX 闸门**（只有防同一次点击双投递的 `cpfs:query:{open_id}:{jid}` 8s 锁）；而在线线程 on_update / 对账 / 我 #49 的文本查询 `_push_terminal_result_card` 都走了那把闸门。于是「自动完成通知」+「查询回复」各推一张相同结果卡。（该任务部署重启后在线线程死→对账补推完成通知，用户又正好点查询→两张撞一起。）
+- 修：`_bg` 终态分支 `if _claim_dataflow_notify(jid): _send_card(result_card)` else 只 `_send_text` 回执（见上方）；进度卡(非终态)不去重照推。与 `_async_refresh_and_push`/文本查询路径行为对齐——全链路对同一 job_id 终态结果卡「至多推一张」。
+- actions.py 编译过。tester：终态查询 NX 未占→推 result_card、已占→只回文本不推卡；进度态→照推 progress_card 不占闸门；双投递仍被 cpfs:query 8s 锁挡。auditor：确认四路径（在线/对账/文本查询/表单查询）现共用同一闸门、终态至多一张；查询者≠发起人时表单查询 gate-blocked 仅回文本（可接受）。
+- [2026-07-09] [TESTER] #50 delta 补测（据审计 Low 改后：else 文案改 error/完成两态 + Low-1 send 失败放开闸门）：全量 **815 passed / 1 skipped / 9 deselected / 0 failed**，同文件 22→26 例。case 2 文案断言放宽为「含 job_id + stage」（不锁旧措辞）；新增 2b（FAILED 带 error 的回执含 error）、2c（claim True 后 `_send_card` 抛异常→`delete(dataflow:notified:{jid})` 放开闸门、异常不冒泡、resp 仍 success）。claim/delete 均用 `job["job_id"]`（桩 job job_id==jid，断言无碍）。下方原 22 例明细为改前版本、仍适用其余分支。
+  新文件 `tests/unit/test_query_by_id_notify_gate.py`，桩同步线程 + `dsw_scheduler._claim_dataflow_notify`/`_send_card`/`_send_text` + 三链 `orchestrator.refresh`/`result_card`/`progress_card` 哨兵：
+  ① 终态(DONE/FAILED)×三前缀+claim True→`_send_card` 推 result_card、首参=open_id、不发文本、闸门被抢一次（参数化 6）；
+  ② 终态×三前缀+claim False（已被别��径推）→抢闸门但**不推卡**、改 `_send_text` 回执含 jid（参数化 6）；
+  ③ 非终态(CROSSING/RUNNING)×三前缀→推 progress_card、**从不调 `_claim_dataflow_notify`**、不发文本（3）；
+  ④ refresh 返 None×三前缀→`_send_text`「未找到」含 jid、不推卡不碰闸门（3）；
+  ⑤ FAILED 用真实 transfer.result_card→抢到闸门推的卡含 `retry_transfer` 按钮（1）；
+  ⑥ 双投递被 `cpfs:query:{open_id}:{jid}` 8s NX 锁挡：第二次同点击只回「查询中…」info toast、不进 _bg（卡数不变、闸门只抢一次），不同 jid 不误挡（1）；
+  ⑦ 前缀非法→error toast / 空 jid→{} noop 回归（2）。
+  **既有 `test_cpfs_feishu.py::test_query_progress_by_id_routes_to_cpfs` 无需改**：它用 RUNNING（非终态）job 断言 `_send_card` 推 progress_card，恰是新逻辑非终态分支的行为，仍绿；无任何既有用例断言 `_bg` 无条件终态 `_send_card`。
+  **未发现源码问题**：`_bg` 终态经 `_claim_dataflow_notify` NX 闸门单推、抢不到只文本回执、非终态不碰闸门，与在线线程/对账/`_push_terminal_result_card` 四路径行为一致。
+
+- [2026-07-09] [AUDITOR] #50 复审通过、无阻塞、满足 commit gate。五处终态推卡共用 dataflow:notified 闸门、同步原地替换卡非新推无重复、8s 锁挡同点双投、进度态不占闸门。3 Low+1nit 记账：①_bg 终态 send 无 try 兜底(claim-before-send 无回滚孤儿)；②跨用户查询推 open_id 却抢 created_by 同闸门→发起人兜底通知被吞(自查 net 正确,可接受)；③else 文案「见上方」跨会话/send失败误导；nit claim 用 jid 可改 job["job_id"]。
+- [2026-07-09] [DEV] 据审计修 Low-1(终态 claim+send 包 try、send 失败 delete dataflow:notified 放开闸门)+Low-3(else 改为回执实际结果 stage/error、不再假设「见上方」)+nit(claim 改用 job["job_id"])。Low-2 跨用户不对称按 notes 判断接受不改。已重编译，请 auditor 复核 delta、tester 据 else 文案改动更新断言。
+
 ## 项目要点（历史踩坑，审计/测试重点）
 - STS/RAM 多租户凭证；`ADMIN_FEISHU_OPEN_ID` 必须是本 app(cli_a962...) 的 open_id。
 - 飞书卡片回调**至少投递一次**且用户会连点 → 幂等锁 / `launched` 标记 / `SET NX` 去重。

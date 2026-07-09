@@ -1047,9 +1047,29 @@ def _h_query_progress_by_id(action_val, open_id, chat_id, form_value):
         if not job:
             _send_text(open_id, chat, f"❌ 未找到任务 {jid}（可能已过期）")
             return
-        c = (result_card(job) if job["stage"] in (o.STAGE_DONE, o.STAGE_FAILED)
-             else progress_card(job))
-        _send_card(open_id, chat, c)   # 保持原行为：私信发起人优先，降级到 chat
+        if job["stage"] in (o.STAGE_DONE, o.STAGE_FAILED):
+            # 终态卡与「在线线程 / 对账 / 其它查询」共用 dataflow:notified NX 闸门去重，
+            # 否则本条查询推的结果卡会与自动完成通知重复（用户同时收到两张一样的完成卡）。
+            from core.dsw_scheduler import _claim_dataflow_notify
+            jkey = job["job_id"]
+            if _claim_dataflow_notify(jkey):
+                try:
+                    _send_card(open_id, chat, result_card(job))
+                except Exception:
+                    # 推送失败要放开闸门，否则在线线程/对账的自动完成通知被永久抑制（孤儿）。
+                    logger.error("[Query] 终态结果卡推送失败 %s", jkey, exc_info=True)
+                    try:
+                        from utils.redis_client import get_redis
+                        get_redis().delete(f"dataflow:notified:{jkey}")
+                    except Exception:
+                        pass
+            else:
+                # 已被别的路径（自动完成通知）推过：只给查询者一句文本回执结果，不重复推卡。
+                txt = (f"❌ 任务 {jkey} {job['stage']}：{job['error']}" if job.get("error")
+                       else f"✅ 任务 {jkey} 已完成（阶段 {job['stage']}）。")
+                _send_text(open_id, chat, txt)
+        else:
+            _send_card(open_id, chat, progress_card(job))   # 进度卡不去重（可多次刷新）
 
     threading.Thread(target=_bg, daemon=True).start()
     return {"toast": {"type": "success", "content": f"正在查询 {jid} …"}}
