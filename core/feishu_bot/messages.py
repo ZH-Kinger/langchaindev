@@ -132,6 +132,23 @@ def _is_help_intent(text: str) -> bool:
     return bool(_HELP_RE.search(text or ""))
 
 
+# 指标趋势图意图：仅当问题确与监控/指标相关时，才在 Agent 回复后附一张实时趋势图。
+# 否则「知识库/工单/迁移」等无关回复也会被塞一张 CPU/内存曲线——又慢又费又误导。
+# 命中一次省掉：fetch_raw_series(云查询) + matplotlib 渲染 + 图片上传 + 取 token。
+# 注意：不放裸 `gpu`——"查我的 gpu 工单"是工单类问句、不该附监控图；真监控问句会命中
+# `利用率/使用率/显存/监控/趋势/mfu/集群状态` 等词或走 monitor/cluster intent。
+_METRICS_CHART_RE = re.compile(
+    r"(cpu|内存|memory|显存|利用率|使用率|指标|趋势|监控|负载|水位|"
+    r"prometheus|grafana|mfu|算力|集群状态|metrics)", re.IGNORECASE)
+_METRICS_CHART_INTENTS = {"monitor", "cluster"}
+
+
+def _wants_metrics_chart(text: str, intents=None) -> bool:
+    if intents and _METRICS_CHART_INTENTS.intersection(intents):
+        return True
+    return bool(_METRICS_CHART_RE.search(text or ""))
+
+
 def _capability_menu() -> str:
     """用户面能力清单：帮助意图直接回它；未知意图兜底也复用它引导用户。"""
     return (
@@ -684,18 +701,22 @@ def _process_message(message_id: str, chat_id: str, user_text: str, open_id: str
         # 写回历史时用原始 user_text（不含注入的 open_id 元数据）；按用户隔离
         _save_turn(session_id, user_text, reply)
 
-        # 每次回复都尝试生成实时指标趋势图，失败时降级为纯文本回复
-        try:
-            from tools.aliyun.prometheus import fetch_raw_series
-            from utils.chart_builder import build_metrics_chart
-            from tools.feishu.notify import _upload_image
-            series    = fetch_raw_series()
-            png_bytes = build_metrics_chart(series)
-            token     = _get_access_token()
-            image_key = _upload_image(token, png_bytes)
-            messaging._feishu_reply_with_chart(message_id, reply, image_key)
-        except Exception as chart_err:
-            logger.warning("[趋势图] 生成失败（已降级）: %s", chart_err)
+        # 仅在问题与监控/指标相关时才附实时趋势图；无关问题直接纯文本回复
+        # （省掉云查询+渲染+上传，且不给知识库/工单/迁移等回复塞无关曲线）。
+        if _wants_metrics_chart(user_text, intents):
+            try:
+                from tools.aliyun.prometheus import fetch_raw_series
+                from utils.chart_builder import build_metrics_chart
+                from tools.feishu.notify import _upload_image
+                series    = fetch_raw_series()
+                png_bytes = build_metrics_chart(series)
+                token     = _get_access_token()
+                image_key = _upload_image(token, png_bytes)
+                messaging._feishu_reply_with_chart(message_id, reply, image_key)
+            except Exception as chart_err:
+                logger.warning("[趋势图] 生成失败（已降级）: %s", chart_err)
+                messaging._feishu_reply(message_id, reply)
+        else:
             messaging._feishu_reply(message_id, reply)
 
     except Exception as e:

@@ -25,6 +25,11 @@ import os
 # ── Redis 对话记忆 key 前缀 ───────────────────────────────────────────────────
 SESSION_KEY_PREFIX = "agent:chat_history:"
 MAX_HISTORY = 20   # Redis 里最多保留最近 20 条消息（10 轮对话）
+HISTORY_TTL_SECONDS = 7 * 86400   # 会话历史空闲 7 天自动过期，避免 Redis 里无限堆积
+
+# AgentExecutor 兜底：限制工具调用轮数与总执行时长，防止 LLM 反复调工具把用户挂住/烧钱
+AGENT_MAX_ITERATIONS = 8
+AGENT_MAX_EXECUTION_TIME = 60   # 秒
 
 
 def _build_executor(tools: list = None) -> AgentExecutor:
@@ -37,7 +42,9 @@ def _build_executor(tools: list = None) -> AgentExecutor:
     llm = get_cloud_llm()
     prompt = get_agent_prompt()
     agent = create_tool_calling_agent(llm, tools, prompt)
-    return AgentExecutor(agent=agent, tools=tools, verbose=True, handle_parsing_errors=True)
+    return AgentExecutor(agent=agent, tools=tools, verbose=False, handle_parsing_errors=True,
+                         max_iterations=AGENT_MAX_ITERATIONS,
+                         max_execution_time=AGENT_MAX_EXECUTION_TIME)
 
 
 # ── 工具路由：三层结构 ──────────────────────────────────────────────────────
@@ -238,7 +245,9 @@ def _get_streaming_executor(tool_names: frozenset) -> AgentExecutor:
     tools = [t for t in ALL_TOOLS if t.name in tool_names]
     llm = get_cloud_llm(streaming=True)
     agent = create_tool_calling_agent(llm, tools, get_agent_prompt())
-    return AgentExecutor(agent=agent, tools=tools, verbose=False, handle_parsing_errors=True)
+    return AgentExecutor(agent=agent, tools=tools, verbose=False, handle_parsing_errors=True,
+                         max_iterations=AGENT_MAX_ITERATIONS,
+                         max_execution_time=AGENT_MAX_EXECUTION_TIME)
 
 
 def _run_with_stream(user_input: str, chat_history: list) -> str:
@@ -295,6 +304,7 @@ def _save_turn(session_id: str, human: str, ai: str) -> None:
                        json.dumps({"role": "human", "content": human}),
                        json.dumps({"role": "ai",    "content": ai}))
             pipe.ltrim(key, -MAX_HISTORY, -1)
+            pipe.expire(key, HISTORY_TTL_SECONDS)   # 每轮续期：空闲 7 天后自动清理，不无限堆积
             pipe.execute()
     except Exception as e:
         logger.warning("Redis 保存历史失败: %s", e)
