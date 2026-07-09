@@ -50,7 +50,7 @@ def _dest_root() -> str:
 
 def _job_id(plan: paths.Plan) -> str:
     day = datetime.now(_BJ).strftime("%Y%m%d")
-    raw = f"{plan.source_uri()}|{_dest_root()}/{plan.source_prefix}|{day}"
+    raw = f"{plan.source_uri()}|{_dest_root()}/{plan.dest_rel()}|{day}"
     return "sgp-" + hashlib.sha1(raw.encode()).hexdigest()[:12]
 
 
@@ -91,7 +91,9 @@ def create_job_record(plan: paths.Plan, *, open_id: str = "",
         "source_prefix": plan.source_prefix,
         "source_uri": plan.source_uri(),
         "dest_root": _dest_root(),
-        "dest_uri": f"wuji@{settings.THAI_HOST}:{_dest_root()}/{plan.source_prefix}",
+        "dest_subdir": plan.dest_subdir,
+        "dest_rel": plan.dest_rel(),
+        "dest_uri": f"{settings.THAI_USER or 'wuji'}@{settings.THAI_HOST}:{_dest_root()}/{plan.dest_rel()}",
         "stage": STAGE_NEW,
         "stage1_rc": None,          # 段1 退出码；None=未完成，0=成功
         "bytes_total": bytes_total,
@@ -138,7 +140,8 @@ def _start_stage(job: dict, stage: str) -> None:
             engine_ssh.start_stage1(job["job_id"], source_bucket=job["source_bucket"],
                                     source_prefix=job["source_prefix"])
         else:
-            engine_ssh.start_stage2(job["job_id"], source_prefix=job["source_prefix"])
+            engine_ssh.start_stage2(job["job_id"], source_prefix=job["source_prefix"],
+                                    dest_rel=job.get("dest_rel", ""))
         job["stage"] = stage
         job["error"] = ""
     except Exception as e:
@@ -147,6 +150,59 @@ def _start_stage(job: dict, stage: str) -> None:
         job["finished_ts"] = time.time()
         logger.error("[SSHT] 起 %s 失败 job=%s", stage, job.get("job_id"), exc_info=True)
     _save(job)
+
+
+def _fmt_eta(seconds: int) -> str:
+    seconds = max(0, int(seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h{m}m"
+    if m:
+        return f"{m}m{s}s"
+    return f"{s}s"
+
+
+def _sample_progress(job: dict, eng_stage: str) -> None:
+    """采样已传字节 + 速率写进 job（best-effort，失败不动）。段2 rsync 自带；段1 用日志速率，
+    没直接给速率时用相邻两次字节采样差算。"""
+    try:
+        prog = engine_ssh.stage_progress(job["job_id"], eng_stage)
+    except Exception:
+        return
+    now = time.time()
+    bd, spd = prog.get("bytes_done"), prog.get("speed_bps")
+    if bd is not None:
+        prev_bd, prev_ts = job.get("_bd_sample"), job.get("_bd_ts")
+        if spd is None and prev_bd is not None and prev_ts and now > prev_ts and bd >= prev_bd:
+            spd = int((bd - prev_bd) / (now - prev_ts))
+        job["bytes_done"] = bd
+        job["_bd_sample"] = bd
+        job["_bd_ts"] = now
+        if prog.get("pct") is not None:
+            job["pct"] = prog["pct"]
+    if spd is not None:
+        job["speed_bps"] = spd
+
+
+def progress_line(job: dict) -> str:
+    """给进度卡/CLI 的一行进度：`已传 X/Y (nn%) · 速率 nn/s · 剩余约 mm`。缺项自动省略。"""
+    bd = int(job.get("bytes_done") or 0)
+    bt = int(job.get("bytes_total") or 0)
+    spd = int(job.get("speed_bps") or 0)
+    parts = []
+    pct = job.get("pct")
+    if pct is None and bt and bd:
+        pct = int(bd * 100 / bt)
+    if bt:
+        parts.append(f"已传 {fmt_size(bd)}/{fmt_size(bt)}" + (f" ({pct}%)" if pct is not None else ""))
+    elif bd:
+        parts.append(f"已传 {fmt_size(bd)}")
+    if spd:
+        parts.append(f"速率 {fmt_size(spd)}/s")
+        if bt and bd < bt:
+            parts.append(f"剩余约 {_fmt_eta((bt - bd) / spd)}")
+    return " · ".join(parts) if parts else "进度采集中…"
 
 
 def poll_once(job: dict) -> dict:
@@ -160,6 +216,7 @@ def poll_once(job: dict) -> dict:
     except Exception:
         logger.warning("[SSHT] 轮询 %s 失败 job=%s（暂保持在途）", stage, job.get("job_id"))
         return job
+    _sample_progress(job, eng_stage)   # 已传字节 + 速率（供进度卡显示）
     status = st.get("status")
     if status == "FAILED":
         job["stage"] = STAGE_FAILED

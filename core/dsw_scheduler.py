@@ -830,11 +830,15 @@ def _dataflow_reconcile_specs() -> list[dict]:
 
     每个 orchestrator 都有 _KEY_PREFIX / get_job / refresh / _save / result_card。
     refresh 只轮询、绝不重新提交任务，故对账是只读推进、幂等安全。
+    **例外：ssh（两段链）** refresh→poll_once 在段1已完成的 STAGE1 孤儿上会自动起段2（一次远端
+    rsync launch=写动作）——这正是"重启后续跑"的期望行为；靠 stale 门(180s)与在线线程错开 + NX
+    闸门，无并发双起，rsync 增量幂等，安全。
     """
     from core.transfer import orchestrator as tr, cards as trc
     from core.cpfs_dataflow import orchestrator as cp, cards as cpc
     from core.vepfs_dataflow import orchestrator as ve, cards as vec
     from core.bucket_transfer import orchestrator as bk, cards as bkc
+    from core.ssh_transfer import orchestrator as sh, cards as shc
     return [
         {"name": "transfer", "o": tr, "cards": trc, "active": {tr.STAGE_CROSSING},
          "chat": lambda: settings.TRANSFER_CHAT_ID or settings.FEISHU_CHAT_ID, "cleanup": None},
@@ -845,6 +849,8 @@ def _dataflow_reconcile_specs() -> list[dict]:
          "chat": lambda: settings.VEPFS_CHAT_ID or settings.FEISHU_CHAT_ID, "cleanup": None},
         {"name": "bucket", "o": bk, "cards": bkc, "active": {bk.STAGE_RUNNING},
          "chat": lambda: settings.TRANSFER_CHAT_ID or settings.FEISHU_CHAT_ID, "cleanup": None},
+        {"name": "ssh", "o": sh, "cards": shc, "active": {sh.STAGE_STAGE1, sh.STAGE_STAGE2},
+         "chat": lambda: settings.SSH_TRANSFER_CHAT_ID or settings.FEISHU_CHAT_ID, "cleanup": None},
     ]
 
 

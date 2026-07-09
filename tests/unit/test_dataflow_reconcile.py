@@ -248,3 +248,19 @@ def test_real_reconcile_specs_contract():
         assert callable(sp["chat"])
         assert isinstance(sp["active"], set) and sp["active"]
         assert sp["cleanup"] is None or callable(sp["cleanup"])
+
+
+def test_reconcile_specs_include_ssh_two_stage_chain():
+    """#51 续：SSH 迁移链(两段)也纳入对账兜底。ssh spec 的 active={STAGE1, STAGE2}
+    （两段都算在途），o 有 refresh/get_job、cards 有 result_card。"""
+    from core import dsw_scheduler as s
+    from core.ssh_transfer import orchestrator as sh
+    specs = s._dataflow_reconcile_specs()
+    names = {sp["name"] for sp in specs}
+    assert "ssh" in names
+    ssh_spec = next(sp for sp in specs if sp["name"] == "ssh")
+    assert ssh_spec["active"] == {sh.STAGE_STAGE1, sh.STAGE_STAGE2}   # 两段都在途
+    assert hasattr(ssh_spec["cards"], "result_card")
+    for attr in ("get_job", "refresh", "_save", "_KEY_PREFIX", "STAGE_DONE", "STAGE_FAILED"):
+        assert hasattr(ssh_spec["o"], attr), f"ssh orchestrator 缺 {attr}"
+    assert callable(ssh_spec["chat"])

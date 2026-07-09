@@ -1191,6 +1191,113 @@ def _h_retry_bucket_transfer(action_val, open_id, chat_id, form_value):
     return _h_confirm_bucket_transfer({"job_id": job_id}, open_id, chat_id, form_value)
 
 
+# ── SSH 迁移链（杭州OSS→新加坡→泰国 H200）──────────────────────────────────────
+
+def _cfg_ssh_chat() -> str:
+    return settings.SSH_TRANSFER_CHAT_ID or settings.FEISHU_CHAT_ID
+
+
+def _h_submit_ssh_transfer(action_val, open_id, chat_id, form_value):
+    """录入卡提交 → 后台解析+估算（走 SGP ossutil du，慢）→ 推确认卡。"""
+    fv = form_value or {}
+    source = (fv.get("source") or "").strip()
+    dest = (fv.get("dest") or "").strip()
+    if not source:
+        return {"toast": {"type": "error", "content": "请填写源 OSS 路径"}}
+
+    def _do() -> None:
+        from core.dsw_scheduler import _send_card, _send_text
+        from core.ssh_transfer import orchestrator, paths
+        from core.ssh_transfer.cards import confirm_card
+        try:
+            plan = paths.build_plan(source, dest)
+            b, n, ok = orchestrator.estimate_source(plan)
+            job = orchestrator.create_job_record(plan, open_id=open_id,
+                                                 bytes_total=b, objects_total=n, size_known=ok)
+            need = orchestrator.needs_approval(b, ok)
+            _send_card(open_id, _cfg_ssh_chat(), confirm_card(job, need_approval=need))
+        except paths.SshPathError as e:
+            _send_text(open_id, _cfg_ssh_chat(), f"❌ 路径错误：{e}")
+        except Exception as e:
+            logger.error("[SSHT] submit failed", exc_info=True)
+            _send_text(open_id, _cfg_ssh_chat(), f"❌ 请求处理失败：{e}")
+
+    threading.Thread(target=_do, daemon=True).start()
+    return {"toast": {"type": "success", "content": "正在解析+估算，稍候推送确认卡"}}
+
+
+def _h_confirm_ssh_transfer(action_val, open_id, chat_id, form_value, *, reply_v2=True):
+    """确认下发：NX 锁防连点 + 后台跑两段 + 终态推结果卡。确认卡(2.0)→回 progress_card_v2(2.0)；
+    retry(1.0 结果卡)→reply_v2=False 只回 toast（避 1.0/2.0 混触 200830）。"""
+    job_id = action_val.get("job_id", "") if isinstance(action_val, dict) else ""
+    if not job_id:
+        return {"toast": {"type": "error", "content": "缺少任务 ID"}}
+    from core.ssh_transfer import orchestrator
+    from core.ssh_transfer.cards import progress_card_v2
+    job = orchestrator.get_job(job_id)
+    if not job:
+        return {"toast": {"type": "error", "content": "任务不存在或已过期"}}
+    if job["stage"] not in (orchestrator.STAGE_NEW, orchestrator.STAGE_FAILED):
+        return {"toast": {"type": "info", "content": f"任务已在 {job['stage']}，无需重复"}}
+    if (orchestrator.needs_approval(job.get("bytes_total", 0), job.get("estimate_ok", True))
+            and open_id != settings.ADMIN_FEISHU_OPEN_ID):
+        return {"toast": {"type": "error", "content": "超过审批阈值，仅管理员可确认下发"}}
+    try:
+        from utils.redis_client import get_redis
+        if not get_redis().set(f"ssh:transfer:launch:{job_id}", 1, nx=True, ex=120):
+            return {"toast": {"type": "info", "content": "任务已下发，请勿重复点击"}}
+    except Exception:
+        pass
+    if open_id and not job.get("created_by"):   # 兜底回填发起人（照 #45）
+        job["created_by"] = open_id
+    job["launched"] = True
+    job["stage"] = orchestrator.STAGE_NEW       # run_to_completion 从段1（或段1已成功则段2）起
+    orchestrator._save(job)
+
+    def _do_run() -> None:
+        from core.dsw_scheduler import _send_card, _send_text, _claim_dataflow_notify
+        from core.ssh_transfer.cards import result_card, progress_card_v2 as _pc
+        try:
+            def _on_update(j):
+                if j["stage"] in (orchestrator.STAGE_DONE, orchestrator.STAGE_FAILED):
+                    if _claim_dataflow_notify(j["job_id"]):   # 与对账/查询共用去重闸门
+                        _send_card(j.get("created_by", ""), _cfg_ssh_chat(), result_card(j))
+                else:
+                    _send_card(j.get("created_by", ""), _cfg_ssh_chat(), _pc(j))   # 阶段推进推新进度卡
+            orchestrator.run_to_completion(job, on_update=_on_update)
+        except Exception as e:
+            logger.error("[SSHT] execute failed job=%s", job_id, exc_info=True)
+            _send_text(job.get("created_by", ""), _cfg_ssh_chat(), f"❌ 任务 {job_id} 失败：{e}")
+
+    threading.Thread(target=_do_run, daemon=True).start()
+    if not reply_v2:   # 从 1.0 结果卡的重试触发：不原地换卡（避 200830），进度靠后台推 + 文本查询
+        return {"toast": {"type": "success", "content": f"已重新下发，任务 {job_id}"}}
+    disp = dict(job)
+    disp["stage"] = orchestrator.STAGE_STAGE1
+    return {"toast": {"type": "success",
+                      "content": f"已下发，任务 {job_id}；发送「查询进度 {job_id}」看进度"},
+            "card": {"type": "raw", "data": progress_card_v2(disp)}}
+
+
+def _h_retry_ssh_transfer(action_val, open_id, chat_id, form_value):
+    job_id = action_val.get("job_id", "") if isinstance(action_val, dict) else ""
+    from core.ssh_transfer import orchestrator
+    job = orchestrator.get_job(job_id) if job_id else None
+    if not job:
+        return {"toast": {"type": "error", "content": "任务不存在或已过期"}}
+    # 保留 stage1_rc：段1已成功(=0)时 run_to_completion 会只重跑段2，省 CEN 流量。
+    job["stage"] = orchestrator.STAGE_NEW
+    job["error"] = ""
+    job["launched"] = False
+    orchestrator._save(job)
+    try:
+        from utils.redis_client import get_redis
+        get_redis().delete(f"ssh:transfer:launch:{job_id}", f"dataflow:notified:{job_id}")
+    except Exception:
+        pass
+    return _h_confirm_ssh_transfer({"job_id": job_id}, open_id, chat_id, form_value, reply_v2=False)
+
+
 _ACTION_HANDLERS = {
     "mfu_region":         _h_mfu_region,
     "submit_ak_register": _h_submit_ak_register,
@@ -1210,6 +1317,9 @@ _ACTION_HANDLERS = {
     "confirm_transfer":   _h_confirm_transfer,
     "query_transfer_progress": _h_query_transfer_progress,
     "retry_transfer":     _h_retry_transfer,
+    "submit_ssh_transfer":  _h_submit_ssh_transfer,
+    "confirm_ssh_transfer": _h_confirm_ssh_transfer,
+    "retry_ssh_transfer":   _h_retry_ssh_transfer,
     "pick_cloud_aliyun":     _h_pick_cloud_aliyun,
     "pick_cloud_volcano":    _h_pick_cloud_volcano,
     "pick_region_aliyun":    _h_pick_region_aliyun,

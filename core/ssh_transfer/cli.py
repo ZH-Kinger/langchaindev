@@ -12,14 +12,14 @@ from core.ssh_transfer import paths, orchestrator as o
 
 def _cmd_plan(args) -> int:
     try:
-        plan = paths.build_plan(args.source)
+        plan = paths.build_plan(args.source, getattr(args, "dest", "") or "")
     except paths.SshPathError as e:
         print(f"路径错误：{e}")
         return 2
     b, n, ok = o.estimate_source(plan)
     print(f"源      : {plan.source_uri()}")
     print(f"段1落地 : {plan.source_prefix}  → SGP 挂载盘")
-    print(f"段2落地 : {o._dest_root()}/{plan.source_prefix}  （泰国）")
+    print(f"段2落地 : {o._dest_root()}/{plan.dest_rel()}  （泰国{'，自定义' if plan.dest_subdir else '，镜像源'}）")
     print(f"估算    : {o.fmt_size(b)} / {n} 对象" + ("" if ok else "（估算失败/未知）"))
     print(f"审批    : {'需审批' if o.needs_approval(b, ok) else '无需审批'}")
     print(f"job_id  : {o._job_id(plan)}（当天幂等，apply 时才建）")
@@ -28,7 +28,7 @@ def _cmd_plan(args) -> int:
 
 def _cmd_apply(args) -> int:
     try:
-        plan = paths.build_plan(args.source)
+        plan = paths.build_plan(args.source, getattr(args, "dest", "") or "")
     except paths.SshPathError as e:
         print(f"路径错误：{e}")
         return 2
@@ -69,9 +69,11 @@ def main(argv=None) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
     sp = sub.add_parser("plan", help="估算+打印计划，不建 job")
     sp.add_argument("source")
+    sp.add_argument("--dest", default="", help="泰国目标子目录（相对 THAI_DEST_ROOT，默认镜像源前缀）")
     sp.set_defaults(func=_cmd_plan)
     sa = sub.add_parser("apply", help="建 job 并跑完两段")
     sa.add_argument("source")
+    sa.add_argument("--dest", default="", help="泰国目标子目录（相对 THAI_DEST_ROOT，默认镜像源前缀）")
     sa.add_argument("--force", action="store_true", help="越过审批阈值强制下发")
     sa.set_defaults(func=_cmd_apply)
     ss = sub.add_parser("status", help="实时查某 job 状态")

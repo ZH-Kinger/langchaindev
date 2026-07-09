@@ -39,10 +39,15 @@ def _validate(bucket: str, prefix: str) -> None:
 @dataclass
 class Plan:
     source_bucket: str    # 源 OSS 桶，如 wuji-data-tran
-    source_prefix: str    # 目录前缀，保证以 '/' 结尾（根为 ''）
+    source_prefix: str    # 源目录前缀，保证以 '/' 结尾（根为 ''）
+    dest_subdir: str = ""  # 泰国侧目标子目录（相对 THAI_DEST_ROOT，尾斜杠）；空=镜像源前缀
 
     def source_uri(self) -> str:
         return f"oss://{self.source_bucket}/{self.source_prefix}"
+
+    def dest_rel(self) -> str:
+        """段2 落地相对 THAI_DEST_ROOT 的子目录：自定义优先，否则镜像源前缀。"""
+        return self.dest_subdir or self.source_prefix
 
 
 def parse_source(raw: str) -> Plan:
@@ -68,6 +73,22 @@ def parse_source(raw: str) -> Plan:
     return Plan(source_bucket=bucket, source_prefix=prefix)
 
 
-def build_plan(source_raw: str) -> Plan:
-    """对外入口：从源路径构造计划。目前只有源需要用户填，目的全由配置推导。"""
-    return parse_source(source_raw)
+def _norm_dest_subdir(raw: str) -> str:
+    """规整并校验用户填的目标子目录：去首尾斜杠/空白、补尾斜杠、走同一道白名单。空→空串(镜像源)。"""
+    raw = (raw or "").strip().strip("/")
+    if not raw:
+        return ""
+    sub = raw + "/"
+    # 复用段级白名单校验（同样会拼进泰国 ssh 双跳，必须防注入/穿越）
+    for seg in sub.rstrip("/").split("/"):
+        if not seg or seg in (".", "..") or not _SEG_RE.match(seg):
+            raise SshPathError(
+                f"目标子目录含非法字符或路径穿越：`{raw}`。每级只允许 字母/数字/`.`/`_`/`-`，禁 `..`/空格/特殊符号。")
+    return sub
+
+
+def build_plan(source_raw: str, dest_subdir: str = "") -> Plan:
+    """对外入口：源路径(必填) + 目标子目录(可选，默认镜像源前缀)。两者都走白名单。"""
+    plan = parse_source(source_raw)
+    plan.dest_subdir = _norm_dest_subdir(dest_subdir)
+    return plan

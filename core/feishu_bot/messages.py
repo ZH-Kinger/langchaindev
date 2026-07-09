@@ -188,6 +188,21 @@ def _is_bucket_transfer_entry_intent(text: str) -> bool:
     return any(w.replace(" ", "").lower() in compact for w in _BUCKET_TRANSFER_ENTRY_WORDS)
 
 
+# SSH 迁移链（杭州OSS→新加坡→泰国服务器）：触发词「数据迁移（泰国H200）」及变体。
+# 注意：含「迁移」会与跨云 transfer 意图撞，必须在 _process_message 里排在 transfer 意图之前判定。
+_SSH_TRANSFER_WORDS = (
+    "数据迁移泰国", "泰国h200", "泰国迁移", "迁移泰国", "迁到泰国", "传到泰国",
+    "h200迁移", "泰国数据迁移", "迁移到泰国", "sshtransfer",
+)
+
+
+def _is_ssh_transfer_intent(text: str) -> bool:
+    compact = re.sub(r"\s+", "", text or "").lower().replace("（", "(").replace("）", ")")
+    if any(w in compact for w in _SSH_TRANSFER_WORDS):
+        return True
+    return "泰国" in compact and ("迁移" in compact or "h200" in compact)
+
+
 def _is_transfer_entry_intent(text: str) -> bool:
     """命中录入关键词且没带路径（带路径走 _is_transfer_intent 直接解析）。"""
     if _extract_transfer_paths(text)[0]:
@@ -241,7 +256,7 @@ def _is_volcano_account_query_entry_intent(text: str) -> bool:
 
 # 进度查询：拦在 Agent 之前，避免 LLM 劫持 + 吃旧会话历史
 _PROGRESS_QUERY_RE = re.compile(r"(查询进度|进度查询|查进度|任务进度|查询任务)")
-_JOB_ID_RE = re.compile(r"\b(vepfs-[0-9a-fA-F]{6,}|cpfs-[0-9a-fA-F]{6,}|tr-[0-9a-fA-F]{6,})\b")
+_JOB_ID_RE = re.compile(r"\b(vepfs-[0-9a-fA-F]{6,}|cpfs-[0-9a-fA-F]{6,}|tr-[0-9a-fA-F]{6,}|sgp-[0-9a-fA-F]{6,})\b")
 
 
 def _is_progress_query_text(text: str) -> bool:
@@ -264,6 +279,9 @@ def _push_terminal_result_card(chain: str, jid: str, job: dict) -> None:
         elif chain == "cpfs":
             from core.cpfs_dataflow.cards import result_card
             chat = actions._cfg_cpfs_chat()
+        elif chain == "ssh":
+            from core.ssh_transfer.cards import result_card
+            chat = actions._cfg_ssh_chat()
         else:
             from core.transfer.cards import result_card
             chat = actions._cfg_chat()
@@ -303,6 +321,16 @@ def _handle_progress_query(message_id: str, text: str, open_id: str = "") -> Non
             msg = (f"任务 `{jid}`：**{job['stage']}** {job.get('operation_label','')}\n"
                    f"进度 {job.get('files_done',0)}/{job.get('files_total',0)} 文件，"
                    f"{o.fmt_size(job.get('bytes_done',0))}"
+                   + (f"\n错误：{job['error']}" if job.get('error') else ""))
+        elif jid.lower().startswith("sgp-"):
+            from core.ssh_transfer import orchestrator as o
+            chain = "ssh"
+            job = o.refresh(jid) or o.get_job(jid)   # 实时重查（自愈重启后死掉的轮询线程）
+            if not job:
+                messaging._feishu_reply(message_id, f"未找到任务 `{jid}`（可能已过期）。")
+                return
+            msg = (f"任务 `{jid}`：**{job['stage']}** {o.stage_label(job['stage'])}\n"
+                   f"进度 {o.progress_line(job)}"
                    + (f"\n错误：{job['error']}" if job.get('error') else ""))
         else:  # tr-
             from core.transfer import orchestrator as o
@@ -627,6 +655,12 @@ def _process_message(message_id: str, chat_id: str, user_text: str, open_id: str
 
     # ③ 跨云迁移录入意图（纯关键词、无路径）→ 弹录入卡让用户填地址
     # 桶间迁移（同云一次性搬运）→ 弹桶间迁移卡（排在跨云迁移意图之前，避免"迁移"被抢）
+    # SSH 迁移链（泰国H200）：排在跨云 transfer 意图之前——「数据迁移」会被 transfer 入口误抢。
+    if _is_ssh_transfer_intent(user_text):
+        from core.ssh_transfer.cards import entry_card
+        messaging._feishu_reply_card(message_id, entry_card())
+        return
+
     if _is_bucket_transfer_entry_intent(user_text):
         from core.bucket_transfer.cards import entry_card
         messaging._feishu_reply_card(message_id, entry_card())

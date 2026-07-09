@@ -248,6 +248,30 @@
 
 - [2026-07-09] [AUDITOR] #51 T0–T3 复审两轮收口：白名单 \A...\Z 闭合换行绕过、注入/穿越全拒、审批 fail-safe、Low 全修，过闸无阻塞。
 
+## #51 续：T4–T6 飞书入口 + 目标子目录 + 进度/速度（dev 已改，待 tester+auditor，未提交；骨架 82de239 已提交）
+用户确认触发词「数据迁移（泰国H200）」+ 首单 `oss://wuji-data-tran/ossutil_output/`→`.../data/test/`（**B 语义：内容铺进 test/，不套源目录名**）。两边目录都自动建（段1 ossutil 写挂载盘自动建→ossfs 建桶前缀；段2 rsync 前 ssh mkdir -p）。
+- **目标子目录**（新需求）：`paths.Plan` 加 `dest_subdir` + `dest_rel()`（空=镜像源前缀）；`build_plan(source, dest_subdir)` **dest 也走同一道白名单**（`_norm_dest_subdir`，防泰国 ssh 双跳注入/穿越）；engine.start_stage2 用 `dest_rel`；orchestrator job 存 dest_subdir/dest_rel、job_id 纳入 dest_rel、dest_uri 用 dest_rel；cli 加 `--dest`。已自证 B 语义 + dest 白名单挡 `; rm`/`../`/空格/`$()`。
+- **进度+速度**：engine `stage_progress`（tail 日志解析：段2 rsync `--info=progress2` 取字节+%+速率、段1 ossutil 取瞬时速率，`_RSYNC_PROG`/`_RATE`/`_speed_bps`）；orchestrator `_sample_progress`（poll_once 每轮采样，日志无速率则用相邻字节采样差算）+ `progress_line`（`已传X/Y(nn%)·速率nn/s·剩余约mm`，`_fmt_eta`）。进度卡显示它。
+- **T4 cards**：entry_card(2.0 表单：源+目标子目录) / confirm_card(2.0，估算+审批门，超阈值 red+仅 admin) / progress_card_v2(2.0 纯展示含 progress_line，无按钮避 200830) / result_card(1.0，FAILED 带 retry_ssh_transfer)。
+- **T5 messages**：`_is_ssh_transfer_intent`（泰国+迁移/h200；**排在跨云 transfer 意图前**，「数据迁移」会被 transfer 入口误抢）；`_JOB_ID_RE` 加 `sgp-`；`_handle_progress_query` 加 sgp- 分支（refresh+progress_line+终态经闸门补推）；`_push_terminal_result_card` 加 "ssh" 链。
+- **T6 actions**：`_cfg_ssh_chat`；`_h_submit_ssh_transfer`(后台解析+估算→confirm_card) / `_h_confirm_ssh_transfer`(NX launch 锁+launched+created_by 回填+审批门+后台 run_to_completion+on_update 终态经 `_claim_dataflow_notify` 去重推 created_by；确认卡 2.0→progress_card_v2、retry reply_v2=False 只回 toast 避 200830) / `_h_retry_ssh_transfer`(重置+清 launch/notified 键+保留 stage1_rc 只重段2)。注册进 _ACTION_HANDLERS。
+- 7 文件编译过；smoke：意图不误撞跨云、四卡 schema 正确、progress_line 出「已传/速率/剩余」、handlers 注册齐。**待部署（paramiko 需 up -d --build 重建镜像）+ SGP_SSH_KEY_ENC 注入 .env 才能真跑。**
+- tester：dest_subdir B 语义+dest 白名单注入用例；stage_progress 解析 rsync progress2/ossutil 速率、_speed_bps 单位、progress_line 各分支+_fmt_eta；_sample_progress 字节差算速率；意图 `_is_ssh_transfer_intent`(命中泰国H200 变体/不误撞跨云)；_JOB_ID_RE sgp-；三 handler(submit 后台估算/confirm NX+审批门+created_by 回填+reply_v2 分支/retry 清键保留 stage1_rc)；cards 四件套结构。auditor：dest_subdir 经白名单（新用户输入面！注入复核）、confirm 审批门+admin、200830 规避（confirm 2.0→2.0 / retry 只 toast）、终态闸门去重、created_by 回填、意图排序不误抢跨云。
+
+- [2026-07-09] [TESTER] #51 续（T4–T6 + 目标子目录 + 进度/速度）补测完成，全量 **1021 passed / 1 skipped / 9 deselected / 0 failed**（+108 例，paramiko 全程 mock、fakeredis）。新增 4 文件 + 1 例入 reconcile：
+  `test_ssh_transfer_dest_subdir.py`(19)：build_plan('...ossutil_output/','test')→源前缀不变/dest_subdir='test/'/dest_rel()='test/'(B 语义)、空 dest 镜像源前缀、显式空==缺省、多级 'a/b'→'a/b/'、去首尾斜杠空白；dest 白名单拒 `test; rm`/`../etc`/`a b`/`a$(id)`/反引号/管道/&/>/引号/反斜杠/换行/中段穿越/单点(14 参数化)、段内 `.`/`_`/`-` 合法；job_id 纳入 dest_rel(异 dest 异 id、空==显式镜像、自定≠镜像)；create_job_record 存 dest_subdir/dest_rel/dest_uri(自定+镜像两态)。
+  `test_ssh_transfer_progress.py`(30)：engine.stage_progress——段2 rsync progress2 取 bytes/pct/speed+取最后一次匹配、段1 ossutil 只稳取速率(bytes/pct=None)、无匹配全 None；_speed_bps 单位 K/M/G/T/空+大小写(7 参数化)、MiB/s==MB/s(4 参数化)；start_stage2 用 dest_rel(mkdir -p+rsync target 落 `<root>/test/`、源仍源前缀、空 dest_rel 镜像)；orchestrator._sample_progress(直接速率/字节差算速率含 time.time 桩/首采样无速率/set pct/引擎抛错 noop)；progress_line(全字段/有total无速率/spd=0 不除零/仅 bytes 无 total/完成无 ETA/空→采集中)；_fmt_eta(s/m/h/负数归零)。
+  `test_ssh_transfer_feishu.py`(33)：_is_ssh_transfer_intent 命中「数据迁移（泰国H200）」全半角/泰国H200/迁到泰国/迁移到泰国服务器(6)、不命中「把 tos://a 迁到 oss://b」跨云话术/普通迁移/查询进度(5)；_JOB_ID_RE 认 sgp-(≥6hex)不认 <6；_handle_progress_query sgp- 分支路由到 ssh orchestrator.refresh+文本含 progress_line、终态 claim True 补推 result_card 到 created_by、claim False 抢闸门不推、refresh None「未找到」；_h_submit(空源 error toast/后台估算推 confirm 2.0/非法路径 _send_text)、_h_confirm(NX 锁 ex=120 首下发回 progress_card_v2·连点第二次 info 且只真下发一次/超阈值非 admin 拒且锁未占/created_by 空回填不覆盖/reply_v2=False 只 toast/缺job_id·不存在·stage 非NEW-FAILED early-return)、_h_retry(清 launch+notified 键·stage=NEW·保留 stage1_rc·转 confirm reply_v2=False/缺 job error)、handlers 注册齐。
+  `test_ssh_transfer_cards_v2.py`(13)：entry(2.0+source/dest/submit 回调)、confirm(2.0 orange/审批 red+管理员字样/估算失败标/缺可选不 KeyError)、progress_card_v2(2.0 无 form/button+含 progress_line+缺进度「采集中」+各 stage 不炸)、result_card(DONE 无 schema 键·无重试/FAILED 无 schema·含 retry_ssh_transfer 按钮/缺可选不 KeyError/缺 error 显「未知」)。
+  `test_dataflow_reconcile.py`+1：`_dataflow_reconcile_specs()` 含 "ssh"、active=={STAGE_STAGE1,STAGE_STAGE2}、cards 有 result_card、o 有 refresh/get_job/_save/_KEY_PREFIX/STAGE_DONE/STAGE_FAILED、chat 可调用。
+  **未发现源码问题**：dest 白名单复用段级校验挡注入/穿越、B 语义 dest_rel、job_id/落库纳入 dest_rel、进度解析(rsync/ossutil/单位/采样差)、意图排序(SSH 排跨云前)、三 handler NX/审批/回填/reply_v2/清键、四卡 schema 与 200830 规避均与断言吻合。
+
+- [2026-07-09] [AUDITOR] #51续 T4-T6 复审通过、无阻塞（无 HIGH）；7 重点全 PASS（dest_subdir 走同一白名单封死泰国 ssh 双跳、200830 规避、审批门、意图排序不误抢跨云、终态闸门去重+created_by 回填、进度/速度无除零、NX/后台/3s）。1 MED：ssh 链漏进 `_dataflow_reconcile_specs`→sgp- 任务重启无对账兜底补终态卡（数据不丢、仅自动通知）；建议同批补。5 Low 记账（confirm 后双推进度卡/retry authz 在 mutation 后/MB按1024/段1 bd=0 显示/重复 import）。
+- [2026-07-09] [DEV] 据审计补 MED（T8）：`dsw_scheduler._dataflow_reconcile_specs` 加 ssh 链（active={STAGE_STAGE1,STAGE_STAGE2}、chat=SSH_TRANSFER_CHAT_ID||FEISHU_CHAT_ID、cleanup=None），docstring 注明 ssh 两段链 refresh 会自动起段2（重启续跑，靠 stale 门+NX 无双起、rsync 幂等）。已验 5 链齐（transfer/cpfs/vepfs/bucket/ssh）、result_card 齐。5 Low 记账不改（与既有链一致）。请 auditor 复核这一 spec delta、tester 加「ssh 在 specs + active 两段」用例。
+
+- [2026-07-09] [AUDITOR] #51续 T4-T6 复审通过、无阻塞、满足 commit gate。7 重点全 PASS（dest_subdir 白名单/200830/审批门/意图序/终态去重/进度速度/3s）；MED（reconcile 漏 ssh 链）已补 spec 并复核正确（active 双段/result_card/refresh/chat/cleanup 齐、docstring 例外注解准、5 链齐、去重闸门同目标）；6 Low 记账（L1 双进度卡·L2 retry authz-after-mutation·L3 MiB/MB·L4 段1已传0B·L5 重复 import·**L6 ssh refresh 触发段2 与手动查询窄窗并发可选加 NX 锁**），皆与既有链一致、非阻塞。
+- [2026-07-09] [DEV] L6 记为已知可选硬化（`_start_stage(STAGE2)` 复用 `ssh:transfer:launch` NX 锁），当前 rsync -a 幂等+自纠、极低概率，不churn 已过闸批次，留后续。
+
 ## 项目要点（历史踩坑，审计/测试重点）
 - STS/RAM 多租户凭证；`ADMIN_FEISHU_OPEN_ID` 必须是本 app(cli_a962...) 的 open_id。
 - 飞书卡片回调**至少投递一次**且用户会连点 → 幂等锁 / `launched` 标记 / `SET NX` 去重。

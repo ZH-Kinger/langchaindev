@@ -10,6 +10,7 @@ host key：固定 `SGP_SSH_HOST_KEY`（禁 AutoAddPolicy，fail-closed）。
 """
 import io
 import logging
+import re
 import shlex
 
 from config.settings import settings
@@ -160,14 +161,18 @@ def start_stage1(job_id: str, *, source_bucket: str, source_prefix: str) -> None
     _launch(job_id, STAGE1, work)
 
 
-def start_stage2(job_id: str, *, source_prefix: str) -> None:
-    """段2：rsync SGP 挂载盘 → 泰国服务器（方案 A 免 sudo；B 走 --rsync-path=sudo rsync）。"""
+def start_stage2(job_id: str, *, source_prefix: str, dest_rel: str = "") -> None:
+    """段2：rsync SGP 挂载盘 → 泰国服务器（方案 A 免 sudo；B 走 --rsync-path=sudo rsync）。
+
+    源尾斜杠=拷贝目录内容；dest_rel=相对 THAI_DEST_ROOT 的目标子目录（空则镜像源前缀）。
+    dest_rel 已在 paths 层走白名单校验（防泰国 ssh 双跳注入）。
+    """
     mount = (settings.SGP_OSS_MOUNT or "/mnt/sgp_oss").rstrip("/")
     local_src = f"{mount}/{source_prefix}"                      # 尾斜杠：拷贝目录内容
     dest_root = (settings.THAI_DEST_ROOT or "").rstrip("/")
     if not dest_root:
         raise SshTransferError("未配置 THAI_DEST_ROOT（泰国目标根目录）。")
-    remote_dest = f"{dest_root}/{source_prefix}"               # 尾斜杠
+    remote_dest = f"{dest_root}/{dest_rel or source_prefix}"    # 尾斜杠
     thai_user = settings.THAI_USER or "wuji"
     thai_host = settings.THAI_HOST
     thai_port = int(settings.THAI_PORT or 22)
@@ -226,7 +231,6 @@ def estimate_source(source_bucket: str, source_prefix: str) -> tuple[int, int, b
     ok=True 仅当确实解析出大小行（含 0 字节的空前缀也算已知）；SSH 不通/正则没命中→ok=False，
     由上层 fail-safe 当作需审批（不 fail-open 放行大迁移）。
     """
-    import re
     src = f"oss://{source_bucket}/{source_prefix}"
     _, out, _ = run(f"ossutil du {shlex.quote(src)} 2>&1 | tail -30", timeout=180)
     text = out or ""
@@ -248,3 +252,30 @@ def tail_log(job_id: str, stage: str, lines: int = 20) -> str:
     log_path = _marker(job_id, stage, "log")
     _, out, _ = run(f"tail -n {int(lines)} {shlex.quote(log_path)} 2>/dev/null || true", timeout=30)
     return out
+
+
+# rsync --info=progress2 末行：`  1,234,567  73%   45.67MB/s    0:12:34`
+_RSYNC_PROG = re.compile(r"([\d,]+)\s+(\d+)%\s+([\d.]+)\s*([KMGT]?)i?B/s", re.I)
+# ossutil 2.x 进度里的速率（如 `123.4 MiB/s` / `12.3MB/s`），字节数格式不稳，只稳取速率
+_RATE = re.compile(r"([\d.]+)\s*([KMGT]?)i?B/s", re.I)
+_MULT = {"": 1, "k": 1024, "m": 1024**2, "g": 1024**3, "t": 1024**4}
+
+
+def _speed_bps(num: str, unit: str) -> int:
+    return int(float(num) * _MULT.get(unit.lower(), 1))
+
+
+def stage_progress(job_id: str, stage: str) -> dict:
+    """从日志尾部解析进度/速率（best-effort，只 tail 不 du，快）。返回 {bytes_done, pct, speed_bps}，
+    解析不到的字段为 None。段2(rsync --info=progress2)最准；段1(ossutil)只稳取瞬时速率。"""
+    text = tail_log(job_id, stage, lines=3)
+    bytes_done = pct = speed_bps = None
+    if stage == STAGE2:
+        for m in _RSYNC_PROG.finditer(text):   # 取最后一次匹配（最新进度）
+            bytes_done = int(m.group(1).replace(",", ""))
+            pct = int(m.group(2))
+            speed_bps = _speed_bps(m.group(3), m.group(4))
+    else:
+        for m in _RATE.finditer(text):         # 段1 只取最新速率
+            speed_bps = _speed_bps(m.group(1), m.group(2))
+    return {"bytes_done": bytes_done, "pct": pct, "speed_bps": speed_bps}
