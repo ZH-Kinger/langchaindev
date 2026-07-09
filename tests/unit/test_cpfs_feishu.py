@@ -181,10 +181,20 @@ def test_progress_query_no_id_pops_input_card(monkeypatch):
     assert "query_progress_by_id" in dumped and "job_id" in dumped
 
 
+class _SyncThread:
+    """同步跑后台线程体，便于断言 _bg 推送结果。"""
+    def __init__(self, target=None, daemon=None, **k): self._t = target
+    def start(self): self._t()
+
+
 def test_query_progress_by_id_routes_to_cpfs(monkeypatch):
-    """输入卡提交 cpfs- id → 推送该任务卡（不原地替换，避开 2.0↔1.0 schema 冲突）+ 回 toast。"""
+    """输入卡提交 cpfs- id → sync 秒回“正在查询”toast，后台线程推该任务卡（不原地替换，避开 2.0↔1.0）。
+
+    HIGH#3 后：refresh（poll 云端）挪进后台线程，sync 只回 toast。用同步线程桩断言后台推送。
+    """
     import json as _j
     from core.feishu_bot import actions
+    monkeypatch.setattr(actions.threading, "Thread", _SyncThread)
     job = orchestrator.create_job_record(
         orchestrator.make_plan("sink", "/cwr/q/", "oss://bk/q/", fs_id="bmcpfs-x", region="cn-hangzhou"))
     job["stage"] = orchestrator.STAGE_RUNNING
@@ -192,9 +202,10 @@ def test_query_progress_by_id_routes_to_cpfs(monkeypatch):
     pushed = []
     monkeypatch.setattr("core.dsw_scheduler._send_card", lambda oid, cid, card: pushed.append(card))
     resp = actions._h_query_progress_by_id({}, "ou_me", "oc_x", {"job_id": job["job_id"]})
-    # 推了一张带该任务的卡，且 toast 带阶段
+    # sync 只回 toast（秒返、不阻塞 3s），后台线程推该任务卡
+    assert resp["toast"]["type"] == "success" and "正在查询" in resp["toast"]["content"]
+    assert "card" not in resp                                     # sync 不原地替换
     assert pushed and job["job_id"] in _j.dumps(pushed[0], ensure_ascii=False)
-    assert "RUNNING" in _j.dumps(resp, ensure_ascii=False)
 
 
 def test_query_progress_by_id_empty_is_noop(monkeypatch):
