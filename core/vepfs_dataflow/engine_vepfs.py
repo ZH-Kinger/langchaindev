@@ -22,6 +22,7 @@ TOS 桶/前缀 + vePFS 侧 SubPath/FilesetId，方向只由 TaskAction 决定，
   - DataStoragePath 允许空串（= 整桶根）
 待反查：task status 终态枚举串（SDK 里是自由 str）
 """
+import json
 import logging
 
 from config.settings import settings
@@ -44,7 +45,9 @@ POLICY_OVERWRITE  = "OverWrite"
 # task status：SDK 未把 status 做成受限枚举（自由 str），故用「子串归类」判终态，
 # 兼容 Running/Success/Finished/Failed/Canceled 等未知大小写变体。上线前真机反查确认。
 _DONE_HINTS = ("success", "finished", "complete", "done")
-_FAIL_HINTS = ("fail", "error", "cancel", "stopped", "abort")
+# 含 "unsuccess"：捕获 "Unsuccessful" 这类既含 success(DONE命中) 又表失败的歧义串；
+# 配合 poll_once 先判 failed，确保它判为 FAILED 而非 DONE。
+_FAIL_HINTS = ("unsuccess", "fail", "error", "cancel", "stopped", "abort")
 
 
 class VepfsDataflowError(RuntimeError):
@@ -151,13 +154,18 @@ def query_task(task_id: str, fs_id: str, region: str) -> dict:
     """DescribeDataFlowTasks 查单任务，返回 {status, bytes_total, bytes_done,
     files_total, files_done, error}。字段容错 getattr（SDK 命名可能有出入）。"""
     api, vepfs = _api(region)
+    # 必须带分页！真机反查确认：不传 page_number/page_size 时火山返回 total_count>0 但
+    # data_flow_tasks=[]（空列表）→ 永远拿不到任务 → 空 status → 任务永远卡 RUNNING。
     req = vepfs.DescribeDataFlowTasksRequest(
-        file_system_id=fs_id, data_flow_task_ids=str(task_id))
+        file_system_id=fs_id, data_flow_task_ids=str(task_id),
+        page_number=1, page_size=100)
     try:
         resp = api.describe_data_flow_tasks(req)
     except Exception as e:
         raise VepfsDataflowError(f"DescribeDataFlowTasks 调用失败：{_err(e)}")
     tasks = getattr(resp, "data_flow_tasks", None) or getattr(resp, "DataFlowTasks", None) or []
+    if not tasks and (getattr(resp, "total_count", 0) or getattr(resp, "TotalCount", 0) or 0):
+        logger.warning("[VEPFS] DescribeDataFlowTasks 命中 total_count 但列表空——检查分页参数 (task=%s)", task_id)
     task = None
     for t in tasks:
         tid = getattr(t, "data_flow_task_id", None) or getattr(t, "DataFlowTaskId", None)
@@ -236,10 +244,38 @@ def cancel_task(task_id: str, fs_id: str, region: str) -> None:
         raise VepfsDataflowError(f"CancelDataFlowTask 调用失败：{_err(e)}")
 
 
+# 常见火山错误码 → 人话（面向用户，替代甩原始 JSON）
+_FRIENDLY_CODES = {
+    "InvalidParameter.BucketMaybeNotExist":
+        "指定的 TOS 桶不存在，请检查是否漏填桶名（完整格式：tos://<桶>/<路径>/）",
+    "InvalidParameter.SourceStoragePrefix":
+        "源/目的路径前缀非法（子目录需形如 /a/b/、首尾带斜杠）",
+    "InvalidParameter.BucketName":
+        "TOS 桶名格式非法（应是裸桶名，别带 tos:// 前缀或多余斜杠）",
+}
+
+
 def _err(e) -> str:
-    """从火山 SDK 异常里抽可读消息。"""
+    """从火山 SDK 异常里抽可读消息：优先解析错误 JSON 的 Error.Code/Message，
+    命中已知码给人话，否则回退 Code：Message，再退回原始文本（截断）。"""
+    raw = ""
     for attr in ("body", "message", "reason"):
         v = getattr(e, attr, "")
         if v:
-            return str(v)[:300]
-    return str(e)[:300]
+            raw = str(v)
+            break
+    if not raw:
+        raw = str(e)
+    try:
+        obj = json.loads(raw)
+        err = (obj.get("ResponseMetadata") or {}).get("Error") or obj.get("Error") or {}
+        code = err.get("Code") or ""
+        msg = err.get("Message") or ""
+        if code:
+            friendly = _FRIENDLY_CODES.get(code)
+            if friendly:
+                return f"{friendly}（{code}）"
+            return f"{code}：{msg}" if msg else code
+    except Exception:
+        pass
+    return raw[:300]

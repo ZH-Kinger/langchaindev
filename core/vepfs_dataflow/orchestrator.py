@@ -311,13 +311,14 @@ def poll_once(job: dict) -> dict:
         if st.get(k):
             job[k] = st[k]
     status = st.get("status", "")
-    if engine_vepfs.is_done(status):
-        job["stage"] = STAGE_DONE
-        job["finished_ts"] = time.time()
-    elif engine_vepfs.is_failed(status):
+    # 先判 failed 再判 done：防歧义子串（如 "unsuccessful" 含 "success"）被误判为完成。
+    if engine_vepfs.is_failed(status):
         job["stage"] = STAGE_FAILED
         job["finished_ts"] = time.time()
         job["error"] = st.get("error", "") or f"任务{status}"
+    elif engine_vepfs.is_done(status):
+        job["stage"] = STAGE_DONE
+        job["finished_ts"] = time.time()
     _save(job)
     return job
 
