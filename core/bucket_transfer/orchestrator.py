@@ -63,6 +63,9 @@ def get_job(job_id: str) -> dict | None:
 
 
 def _save(job: dict) -> None:
+    # 每次落盘刷新 updated_ts：调度器对账靠它判“新鲜(有活线程在轮询)/过期(孤儿)”。
+    # 缺了它，对账会把每个在跑的桶间迁移都当孤儿、与在线线程并行推卡（对齐 transfer/cpfs/vepfs）。
+    job["updated_ts"] = _now()
     try:
         get_redis().setex(_key(job["job_id"]), _TTL, json.dumps(job, ensure_ascii=False))
     except Exception:

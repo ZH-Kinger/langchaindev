@@ -540,13 +540,14 @@ def _h_confirm_transfer(action_val, open_id, chat_id, form_value):
     orchestrator._save(job)
 
     def _do_transfer() -> None:
-        from core.dsw_scheduler import _send_card, _send_text
+        from core.dsw_scheduler import _send_card, _send_text, _claim_dataflow_notify
         from core.transfer.cards import result_card
         try:
             # \u786e\u8ba4\u5361\u5df2\u5728\u4e0b\u65b9\u539f\u5730\u66ff\u6362\u4e3a\u201c\u8fdb\u884c\u4e2d\u201d\u5361\uff0c\u4e2d\u95f4\u6001\u4e0d\u518d\u53e6\u63a8\uff08\u907f\u514d\u91cd\u590d\u5237\u5361\uff09\uff1b
-            # \u53ea\u5728\u7ec8\u6001\u63a8\u4e00\u5f20\u7ed3\u679c\u5361\u3002
+            # \u53ea\u5728\u7ec8\u6001\u63a8\u4e00\u5f20\u7ed3\u679c\u5361\uff0c\u4e14\u4e0e\u8c03\u5ea6\u5668\u5bf9\u8d26\u5171\u7528 NX \u95f8\u95e8\u53bb\u91cd\uff08\u8c01\u5148\u5230\u8c01\u63a8\uff09\u3002
             def _on_update(j):
-                if j["stage"] in (orchestrator.STAGE_DONE, orchestrator.STAGE_FAILED):
+                if j["stage"] in (orchestrator.STAGE_DONE, orchestrator.STAGE_FAILED) \
+                        and _claim_dataflow_notify(j["job_id"]):
                     _send_card("", _cfg_chat(), result_card(j))
             orchestrator.run_to_completion(job, on_update=_on_update)
         except Exception as e:
@@ -766,12 +767,13 @@ def _h_confirm_cpfs_dataflow(action_val, open_id, chat_id, form_value):
     orchestrator._save(job)
 
     def _do_run() -> None:
-        from core.dsw_scheduler import _send_card, _send_text
+        from core.dsw_scheduler import _send_card, _send_text, _claim_dataflow_notify
         from core.cpfs_dataflow.cards import result_card, progress_card
         try:
             def _on_update(j):
                 if j["stage"] in (orchestrator.STAGE_DONE, orchestrator.STAGE_FAILED):
-                    _send_card("", _cfg_cpfs_chat(), result_card(j))
+                    if _claim_dataflow_notify(j["job_id"]):   # 与对账共用去重闸门
+                        _send_card("", _cfg_cpfs_chat(), result_card(j))
                 else:
                     _send_card("", _cfg_cpfs_chat(), progress_card(j))
             orchestrator.run_to_completion(job, on_update=_on_update)
@@ -879,12 +881,13 @@ def _h_confirm_vepfs_dataflow(action_val, open_id, chat_id, form_value):
     orchestrator._save(job)
 
     def _do_run() -> None:
-        from core.dsw_scheduler import _send_card, _send_text
+        from core.dsw_scheduler import _send_card, _send_text, _claim_dataflow_notify
         from core.vepfs_dataflow.cards import result_card, progress_card
         try:
             def _on_update(j):
                 if j["stage"] in (orchestrator.STAGE_DONE, orchestrator.STAGE_FAILED):
-                    _send_card("", _cfg_vepfs_chat(), result_card(j))
+                    if _claim_dataflow_notify(j["job_id"]):   # 与对账共用去重闸门
+                        _send_card("", _cfg_vepfs_chat(), result_card(j))
                 else:
                     _send_card("", _cfg_vepfs_chat(), progress_card(j))
             orchestrator.run_to_completion(job, on_update=_on_update)
@@ -1034,13 +1037,16 @@ def _h_confirm_bucket_transfer(action_val, open_id, chat_id, form_value):
     orchestrator._save(job)
 
     def _run() -> None:
-        from core.dsw_scheduler import _send_card, _send_text
+        from core.dsw_scheduler import _send_card, _send_text, _claim_dataflow_notify
         from core.bucket_transfer import orchestrator as o
         from core.bucket_transfer.cards import result_card, progress_card
         try:
             def _upd(j):
-                card = result_card(j) if j["stage"] in (o.STAGE_DONE, o.STAGE_FAILED) else progress_card(j)
-                _send_card("", _cfg_bkt_chat(), card)
+                if j["stage"] in (o.STAGE_DONE, o.STAGE_FAILED):
+                    if _claim_dataflow_notify(j["job_id"]):   # 与对账共用去重闸门
+                        _send_card("", _cfg_bkt_chat(), result_card(j))
+                else:
+                    _send_card("", _cfg_bkt_chat(), progress_card(j))
             o.run_to_completion(job, on_update=_upd)
         except Exception as e:
             logger.error("[BKT] execute failed job=%s", job_id, exc_info=True)

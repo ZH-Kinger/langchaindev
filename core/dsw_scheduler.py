@@ -847,6 +847,19 @@ def _dataflow_reconcile_specs() -> list[dict]:
 _DATAFLOW_RECONCILE_STALE = 180
 
 
+def _claim_dataflow_notify(job_id: str) -> bool:
+    """终态结果卡“只推一次”的跨线程闸门：在线线程 on_update 与对账循环共用同一把 NX 锁，
+    谁先抢到谁推。这样即使 stale 门失准（如单次 poll hang 超阈值、某 orchestrator 漏刷 updated_ts）
+    也不会重复推送。Redis 不可用 → 放行（宁可重复也别漏）。TTL 覆盖任务生命周期。"""
+    try:
+        return bool(get_redis().set(f"dataflow:notified:{job_id}", 1, nx=True, ex=_TTL_NOTIFY))
+    except Exception:
+        return True
+
+
+_TTL_NOTIFY = 30 * 86400
+
+
 def _reconcile_dataflow_once() -> None:
     """扫各命名空间的在途任务，对孤儿(线程已死、updated_ts 过期)实时重查；
     完成/失败则推结果卡并置 notified，保证“任务无论中途重启几次，跑完都会自动通知”。"""
@@ -865,7 +878,7 @@ def _reconcile_dataflow_once() -> None:
         except Exception:
             continue
         for key in keys:
-            job_id = key.replace(prefix, "")
+            job_id = key[len(prefix):]
             try:
                 job = o.get_job(job_id)
             except Exception:
@@ -886,10 +899,13 @@ def _reconcile_dataflow_once() -> None:
                     spec["cleanup"](fresh)
                 except Exception:
                     logger.warning("[Reconcile] %s 清理失败 job=%s", spec["name"], job_id, exc_info=True)
+            fresh["notified"] = True
+            o._save(fresh)
+            # 抢到 NX 闸门才推：在线线程若已在终态推过卡，这里就不重复（跨线程去重的最终保证）。
+            if not _claim_dataflow_notify(job_id):
+                continue
             try:
                 _send_card("", spec["chat"](), spec["cards"].result_card(fresh))
-                fresh["notified"] = True
-                o._save(fresh)
                 logger.info("[Reconcile] %s 任务 %s 完成后自动补通知(%s)",
                             spec["name"], job_id, fresh["stage"])
             except Exception:
