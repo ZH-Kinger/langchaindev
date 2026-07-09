@@ -54,3 +54,6 @@ python-dotenv
 pytest>=7.4
 pytest-mock>=3.12
 fakeredis>=2.20
+
+# SSH 迁移链(杭州→新加坡→泰国)：bot 用纯 Python SSH 遥控 SGP 跑 ossutil/rsync
+paramiko>=3.4.0

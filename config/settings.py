@@ -291,6 +291,31 @@ class Config:
     # 扫描孤儿(在途且 updated_ts 过期)任务，实时重查、完成即自动补推结果卡。默认开启。
     DATAFLOW_RECONCILE_ENABLED       = os.environ.get("DATAFLOW_RECONCILE_ENABLED", "true").lower() == "true"
 
+    # SSH 迁移链：杭州 OSS →(CEN)→ 新加坡 ECS 挂载盘 →(rsync)→ 泰国服务器。bot 用 paramiko SSH 到
+    # SGP 遥控 ossutil(段1)+rsync(段2)。私钥 SGP_SSH_KEY_ENC 是 Fernet 密文（绝不明文），其余为真机验证默认值。
+    SSH_TRANSFER_ENABLED   = os.environ.get("SSH_TRANSFER_ENABLED", "false").lower() == "true"
+    SGP_SSH_HOST           = os.environ.get("SGP_SSH_HOST", "43.98.203.59")
+    SGP_SSH_PORT           = int(os.environ.get("SGP_SSH_PORT", 22))
+    SGP_SSH_USER           = os.environ.get("SGP_SSH_USER", "root")
+    SGP_SSH_KEY_ENC        = os.environ.get("SGP_SSH_KEY_ENC", "")   # bot→SGP 私钥，Fernet 密文
+    SGP_SSH_HOST_KEY       = os.environ.get(
+        "SGP_SSH_HOST_KEY",
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA9UE2kL3F3DOk/1GIig6W9SCny57xc7rLRJNvKzLbuK")
+    SGP_OSS_MOUNT          = os.environ.get("SGP_OSS_MOUNT", "/mnt/sgp_oss")
+    SGP_WORK_DIR           = os.environ.get("SGP_WORK_DIR", "/var/run/ssh_transfer")
+    SGP_OSSUTIL_JOBS       = int(os.environ.get("SGP_OSSUTIL_JOBS", 30))
+    SOURCE_OSS_BUCKET      = os.environ.get("SOURCE_OSS_BUCKET", "wuji-data-tran")
+    SOURCE_OSS_REGION      = os.environ.get("SOURCE_OSS_REGION", "cn-hangzhou")
+    THAI_HOST              = os.environ.get("THAI_HOST", "203.156.3.194")
+    THAI_PORT              = int(os.environ.get("THAI_PORT", 40002))
+    THAI_USER              = os.environ.get("THAI_USER", "wuji")
+    THAI_DEST_ROOT         = os.environ.get(
+        "THAI_DEST_ROOT", "/mnt/data04/296834/Wuji-Algorithm@wuji.tech/data")
+    THAI_RSYNC_SUDO        = os.environ.get("THAI_RSYNC_SUDO", "false")   # true=方案B(--rsync-path=sudo rsync)
+    THAI_RSYNC_BWLIMIT     = os.environ.get("THAI_RSYNC_BWLIMIT", "")     # 空=不限速
+    SSH_TRANSFER_APPROVAL_TB = float(os.environ.get("SSH_TRANSFER_APPROVAL_TB", 1))
+    SSH_TRANSFER_CHAT_ID   = os.environ.get("SSH_TRANSFER_CHAT_ID", "")
+
     # Redis
     REDIS_HOST     = os.environ.get("REDIS_HOST", "127.0.0.1")
     REDIS_PORT     = int(os.environ.get("REDIS_PORT", 6379))
@@ -332,6 +357,7 @@ class Config:
         ("MGW_USER_ID",            "跨云迁移(TOS→OSS)不可用：缺在线迁移服务 userid"),
         ("CPFS_FILE_SYSTEM_ID",    "CPFS 预热/沉降不可用：缺默认文件系统 ID（可在 cpfs:// 路径里显式给）"),
         ("VEPFS_FILE_SYSTEM_ID",   "vePFS 预热/沉降不可用：缺默认文件系统 ID（可在 vepfs:// 路径里显式给）"),
+        ("SGP_SSH_KEY_ENC",        "SSH 迁移链(杭州→新加坡→泰国)不可用：缺 bot→SGP 私钥(Fernet 密文)"),
     ]
 
     def validate(self) -> list[tuple[str, str]]:

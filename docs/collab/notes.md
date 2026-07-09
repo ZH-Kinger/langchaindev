@@ -220,6 +220,34 @@
 - [2026-07-09] [AUDITOR] #50 复审通过、无阻塞、满足 commit gate。五处终态推卡共用 dataflow:notified 闸门、同步原地替换卡非新推无重复、8s 锁挡同点双投、进度态不占闸门。3 Low+1nit 记账：①_bg 终态 send 无 try 兜底(claim-before-send 无回滚孤儿)；②跨用户查询推 open_id 却抢 created_by 同闸门→发起人兜底通知被吞(自查 net 正确,可接受)；③else 文案「见上方」跨会话/send失败误导；nit claim 用 jid 可改 job["job_id"]。
 - [2026-07-09] [DEV] 据审计修 Low-1(终态 claim+send 包 try、send 失败 delete dataflow:notified 放开闸门)+Low-3(else 改为回执实际结果 stage/error、不再假设「见上方」)+nit(claim 改用 job["job_id"])。Low-2 跨用户不对称按 notes 判断接受不改。已重编译，请 auditor 复核 delta、tester 据 else 文案改动更新断言。
 
+## #51 SSH 迁移链 杭州OSS→新加坡→泰国（T0–T3 骨架，dev 已改，待 tester+auditor，未提交）
+按 planner `planning/thailand-transfer-chain.md`。**所有前置真机验证全绿**（bot→SGP root@43.98.203.59:22 密钥通/ossutil2.2.2 配好能读源桶/rsync 有；SGP→泰国 wuji@203.156.3.194:40002 免密通；泰国目标 `/mnt/data04/296834/Wuji-Algorithm@wuji.tech/data` 已 chown wuji、免 sudo=**方案 A 锁定**）。
+- 新包 `core/ssh_transfer/`：`paths.py`(解析 oss://bucket/prefix/→Plan)、`engine_ssh.py`(paramiko 连接层：私钥 Fernet decrypt 内存加载 RSAKey、host key 固定 SGP_SSH_HOST_KEY 禁 AutoAdd fail-closed；`run` 短命令 drain 后取 exit；`start_stage1/2` nohup+pid/rc/log marker、redirection 全远端、shlex.quote 全参数；`poll_stage` 一次 SSH 取 RC=/ALIVE/DEAD→status；rc 映射 stage1==0 / stage2∈{0,24}；`estimate_source` 走 SGP ossutil du 容错解析)、`orchestrator.py`(状态机 NEW→STAGE1→STAGE2→DONE/FAILED、Redis `ssh:transfer:*`、job 前缀 `sgp-`、`_save` 每次刷 updated_ts、create_job_record 幂等+回填 created_by 照 #45、段1 rc=0 落盘后起段2、run_to_completion 两段轮询、refresh 自愈、retry 段1已成功只重段2)、`cli.py`(plan/apply/status)。
+- settings 加整块 SSH_TRANSFER_*/SGP_*/THAI_*（真机值做默认，私钥 SGP_SSH_KEY_ENC 仅 env、Fernet 密文）；SGP_SSH_KEY_ENC 进 _REQUIRED_FIELDS。requirements 加 paramiko>=3.4.0（**部署要 up -d --build 重建镜像**，非普通 deploy）。
+- 6 文件 py_compile 全过。**私钥 /root/bot_sgp_rsa 在 bot 宿主机，SGP_SSH_KEY_ENC 密文待 T10 生成注入 .env。**
+- tester：paths 解析/规整/拒非 oss；orchestrator job_id 幂等+created_by 回填+needs_approval 阈值+poll_once 状态转移(mock engine)+run_to_completion 两段(段1 DONE→段2 / 段1 FAILED→不进段2)+retry 段1已成功只起段2；engine `_rc_ok` 映射、start_stage1/2 生成命令含预期片段(mock run 捕获)、poll_stage 解析 RC=/ALIVE/DEAD、estimate 解析、缺 SGP_SSH_KEY_ENC/HOST_KEY 报错。**paramiko 未装→测试须 mock engine_ssh.run/_client（engine 内 lazy import paramiko，导入模块不需 paramiko）**。auditor：私钥绝不落盘/入日志、host key 固定禁 AutoAdd、shlex.quote 防命令注入(source_bucket/prefix 全经 quote)、nohup/marker 正确性、rc 语义、settings 默认无敏感、方案A 段2 免 sudo。
+
+- [2026-07-09] [TESTER] #51 SSH 迁移链 T0–T3 骨架补测完成（本地全量 **879 passed / 1 skipped / 9 deselected / 0 failed**，新增 3 文件 64 例）。paramiko 未装，全程 mock（命令类桩 `engine_ssh.run` 捕命令串、守卫路径注入空 stub paramiko），Redis 走 fakeredis。
+  `test_ssh_transfer_paths.py`(19)：合法目录/自动补尾斜杠/单级前缀/根前缀空/裸桶名空前缀/去空白/scheme 大小写；拒 tos/cpfs scheme、缺 bucket(`oss://`/`oss:///`)、空串/纯空白/None/无 scheme；SshPathError 继承 ValueError；build_plan 委派+拒非法。
+  `test_ssh_transfer_orchestrator.py`(27)：`_job_id` 同 plan 同天一致+sgp- 前缀+异 prefix 异 id；create_job_record 首建 NEW/created_by/落库、幂等返旧不复位、空 created_by 回填并落库、非空不覆盖、空 open_id 不写空、FAILED 走新建复位；needs_approval 默认 1TB 边界+自定阈值+坏值回退 1TB；poll_once 段1DONE→起段2/段1FAILED→不起段2/段2DONE→DONE/RUNNING 保持/终态 noop/引擎抛错保持在途；refresh 在途重查+终态不查+缺 job 返 None；run_to_completion 两段推进(on_update 见 STAGE1/STAGE2/DONE)+段1FAILED 不进段2+起段1即抛→FAILED+retry(stage1_rc==0)只起段2 不调 start_stage1。
+  `test_ssh_transfer_engine.py`(18)：`_rc_ok`(段1只0/段2 0&24/23&255 失败)；start_stage1 命令含 ossutil cp+oss URI+--jobs+-u+--checkpoint-dir+nohup+rc/pid/log marker+SGP 挂载 dst；start_stage2 含 rsync+-a+--info=progress2+mkdir -p+`wuji@host:`+sudo true/false 切 --rsync-path+bwlimit 设置+缺 THAI_DEST_ROOT 报错；poll_stage RC=0→DONE/段2 RC=23→FAILED/RC=24→DONE/ALIVE→RUNNING/DEAD→FAILED/RC=非数字兜底1；estimate_source du 解析/无法解析→(0,0)/空→(0,0)；`_load_private_key` 缺 SGP_SSH_KEY_ENC 报错、`_add_host_key` 缺/畸形 SGP_SSH_HOST_KEY 报错。
+  **未发现源码问题**：paths 规整/拒非 oss、orchestrator 幂等回填/两段推进/retry 跳段1、engine rc 语义与命令片段均与断言吻合。
+
+- [2026-07-09] [AUDITOR] #51 T0–T3 复审：**HIGH 命令注入阻塞**——engine_ssh 泰国 ssh 双跳的 prefix 未过滤（`oss://b/foo; rm -rf x/` 经 ssh 双层 shell 在泰国生产机 RCE，shlex.quote 只护 SGP 单层）；MED-2 路径穿越(..)；MED-3 估算失败(0,0)→审批 fail-open；6 Low 记账。核心逻辑(私钥内存/host key fail-closed/rc/状态机/幂等/settings)PASS。
+- [2026-07-09] [DEV] 据审计修：**HIGH-1+MED-2** `paths.parse_source` 加严格白名单（桶名 OSS 规范正则；prefix 每级 `^[A-Za-z0-9._\-]+$`、禁 `..`/`.`/空格/shell 元字符）——从源头挡住注入+穿越，已自证 `; rm`/`..`/空格/`$(id)` 全被拒、正常路径通过。**MED-3** estimate_source 返 `(b,n,ok)`，ok=False(SSH不通/没解析出大小)→`needs_approval(...,size_known=False)` fail-safe 当需审批；job 存 estimate_ok；CLI 相应改。Low：_load_private_key 校验解密结果含 `-----BEGIN` 否则明确报错(修 decrypt 静默透传误导)；host key 同时按裸 host 和 `[host]:port` 登记(改端口不误拒)；bwlimit 值 shlex.quote；orchestrator fmt_ts/fmt_duration 加 __all__ 声明(供 cards)。4 文件编译过。请 auditor 复核 delta、tester 补注入用例 + estimate 3 元组断言。
+- [2026-07-09] [TESTER] #51 HIGH 命令注入 + MED-3 审批 fail-open 修复同步补测（全量 **911 passed / 1 skipped / 9 deselected / 0 failed**，3 文件 64→96 例，+32）。
+  paths 安全白名单（新增）：拒 prefix 注入（`; rm -rf`/`$(id)`/反引号/管道/空格/`&`/`>`/引号/反斜杠/换行）、路径穿越（`..`/`.` 整段/中段）、非法桶名（大写/<3/单字符/首尾非字母数字/下划线/点）；真机风格 `oss://wuji-data-tran/wangyuran/AgiBotWorld-Beta/` 仍通过+prefix 规整、段内 `.`/`_`/`-` 合法。
+  estimate_source 改 3 元组 `(bytes,objects,ok)`：engine 解析出 size→ok=True（含 size=0 空前缀 ok=True）/没匹配 size 行→`(0,0,False)`/空输出→`(0,0,False)`；orchestrator 透传+异常→`(0,0,False)`。
+  needs_approval(bytes, size_known)：size_known=False→恒 True（与字节数无关）/默认 True 按阈值/边界/坏值回退 1TB。create_job_record 新增 size_known 参+落 `estimate_ok`（默认 True，size_known=False 落盘 False）。
+  Low：_load_private_key decrypt 结果非 PEM/空串→SshTransferError（桩 utils.crypto.decrypt）。
+  **未发现源码问题**：白名单正则收严不误伤真机路径、estimate 3 元组与 fail-safe 审批语义一致、PEM 校验挡明文透传。
+
+- [2026-07-09] [AUDITOR] #51 修复复核：白名单+审批 fail-safe 基本到位，唯正则尾锚 `$` 放行结尾换行(`aaa\n/` 溜过)，一字符 `\Z`/fullmatch 修后过闸。
+- [2026-07-09] [DEV] 据审计把 `_BUCKET_RE`/`_SEG_RE` 尾锚 `$`→`\A...\Z`（`$` 会在结尾换行前匹配）。自证：审计的确切绕过 `oss://b/aaa\n/`、`buck\net`、`a\nrm -rf x/` 全被拒；`_SEG_RE.match('aaa\n')`/`_BUCKET_RE.match('abcd\n')` 均 None；安全不变量「凡被接受的输入输出 bucket/prefix 只含 `[A-Za-z0-9._/-]`（无换行/元字符）」成立（含 `.strip()` 把纯尾换行归一成干净路径）。请 auditor 复核这一字符 delta。
+- [2026-07-09] [TESTER] #51 尾锚 `$`→`\Z` 补 2 例回归：段内尾换行 `oss://bucket/aaa\n/`→SshPathError、桶名尾换行 `oss://bucket\n/aaa/`→SshPathError（两者旧 `$` 版会被误放行，`\Z` 收严后拒）。全量 **913 passed / 1 skipped / 9 deselected / 0 failed**（+2）。`\Z` 只收严、未破坏任何既有断言。
+
+- [2026-07-09] [AUDITOR] #51 T0–T3 复审两轮收口：白名单 \A...\Z 闭合换行绕过、注入/穿越全拒、审批 fail-safe、Low 全修，过闸无阻塞。
+
 ## 项目要点（历史踩坑，审计/测试重点）
 - STS/RAM 多租户凭证；`ADMIN_FEISHU_OPEN_ID` 必须是本 app(cli_a962...) 的 open_id。
 - 飞书卡片回调**至少投递一次**且用户会连点 → 幂等锁 / `launched` 标记 / `SET NX` 去重。
