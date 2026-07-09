@@ -265,6 +265,65 @@ def test_on_update_terminal_pushes_result_once(monkeypatch):
     assert sent == [{"RESULT": "tr-once"}]   # 终态结果卡只推一次
 
 
+# ── #41 在线 _on_update 结果/错误优先推发起人（created_by），空则降级配置频道 ──────
+
+def _confirm_capture_target(monkeypatch, created_by, *, fail=False):
+    """跑 _h_confirm_transfer，让 run_to_completion 回调一次终态（或抛错），
+    捕获 _send_card / _send_text 的首参（推送目标）。返回目标列表。"""
+    from core.feishu_bot import actions
+    from core.transfer import orchestrator
+    import core.transfer.cards as cards
+    import core.dsw_scheduler as sched
+
+    monkeypatch.setattr(actions.threading, "Thread", _SyncThread)
+    monkeypatch.setattr(orchestrator, "needs_approval", lambda b: False)
+    monkeypatch.setattr(orchestrator, "set_same_name_policy", lambda job, p: job)
+
+    job = _new_job()
+    if created_by is not None:
+        job["created_by"] = created_by
+    store = {"tr-cb": {**job, "job_id": "tr-cb"}}
+    monkeypatch.setattr(orchestrator, "get_job", lambda jid: store.get(jid))
+    monkeypatch.setattr(orchestrator, "_save", lambda j: store.__setitem__(j["job_id"], j))
+
+    done = {**store["tr-cb"], "stage": orchestrator.STAGE_DONE}
+
+    def _rtc(j, on_update=None, **k):
+        if fail:
+            raise RuntimeError("boom")
+        on_update(done)
+        return done
+    monkeypatch.setattr(orchestrator, "run_to_completion", _rtc)
+    monkeypatch.setattr(cards, "result_card", lambda j: {"RESULT": j["job_id"]})
+    monkeypatch.setattr(cards, "progress_card", lambda j: {"PROGRESS": j["job_id"]})
+    monkeypatch.setattr(sched, "_claim_dataflow_notify", lambda jid: True)
+
+    card_targets, text_targets = [], []
+    monkeypatch.setattr(sched, "_send_card", lambda o, c, card: card_targets.append(o))
+    monkeypatch.setattr(sched, "_send_text", lambda o, c, t: text_targets.append(o))
+
+    actions._h_confirm_transfer({"job_id": "tr-cb"}, "ou_admin", "chat", {})
+    return card_targets, text_targets
+
+
+def test_on_update_result_pushes_to_created_by(monkeypatch):
+    """在线终态结果卡首参=job.created_by（发起人 open_id）。"""
+    card_targets, _ = _confirm_capture_target(monkeypatch, "ou_creator")
+    assert card_targets == ["ou_creator"]
+
+
+def test_on_update_result_created_by_missing_falls_back_empty(monkeypatch):
+    """无 created_by → 首参 ""（_send_card 内 target or chat 回落配置频道）。"""
+    card_targets, _ = _confirm_capture_target(monkeypatch, None)
+    assert card_targets == [""]
+
+
+def test_on_update_error_text_pushes_to_created_by(monkeypatch):
+    """执行抛错 → 错误文本也优先推发起人。"""
+    _, text_targets = _confirm_capture_target(monkeypatch, "ou_creator", fail=True)
+    assert text_targets == ["ou_creator"]
+
+
 # ── 200830 回归：确认路 2.0→2.0、retry 路 1.0→1.0（同家族原地替换） ───────────────
 
 def test_confirm_default_returns_schema_2_0(A, monkeypatch):

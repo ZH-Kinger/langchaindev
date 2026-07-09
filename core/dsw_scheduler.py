@@ -4,8 +4,10 @@ DSW 工单调度器。
 职责：
   1. 每 2 分钟轮询 Jira，发现新 GPU 申请工单 → 自动创建 DSW 实例
   2. 每 5 分钟检查运行中的实例：
-     - 超时前 15 分钟 → 飞书提醒（卡片���「延续/停止」按钮）
-     - 警告后 DSW_IDLE_STOP_MINUTES 分钟无响应 → 自动停止实例
+     - GPU 空转（利用率低于阈值）→ 飞书提醒用户手动停止
+     - 到期警告 + 到期自动停止：默认屏蔽（DSW_IDLE_STOP_ENABLED=False），
+       实例利用率关机交给阿里云工作空间内置设置，不再重复造轮子；
+       显式开启才恢复「即将到期」警告卡 + 无响应自动 stop。
 
 状态存储在 Redis：
   dsw:ticket:{ticket_key}  →  JSON 字符串，含：
@@ -599,31 +601,35 @@ def _check_running_instances() -> None:
         expire_ts = start_ts + duration_h * 3600
         remaining = expire_ts - now
 
-        if not warned and remaining <= warn_advance:
-            # 发警告卡片
-            logger.info("[Scheduler] 实例 %s 还有 %s 分钟到期，发送警告", instance_id, int(remaining/60))
-            card = _make_idle_warn_card(instance_id, instance_name,
-                                        ticket_key, settings.DSW_IDLE_STOP_MINUTES)
-            _send_card(open_id, chat_id, card)
-            state["warned"] = True
-            state["warn_ts"] = now
-            _redis_set(ticket_key, state)
+        # ── 到期警告 + 到期自动关机：默认屏蔽（DSW_IDLE_STOP_ENABLED=False）──────────
+        # 实例利用率关机交给阿里云工作空间的内置设置，不再重复造轮子。
+        # 只有显式开启才恢复「即将到期」警告卡 + 无响应自动 stop 实例。
+        if settings.DSW_IDLE_STOP_ENABLED:
+            if not warned and remaining <= warn_advance:
+                # 发警告卡片
+                logger.info("[Scheduler] 实例 %s 还有 %s 分钟到期，发送警告", instance_id, int(remaining/60))
+                card = _make_idle_warn_card(instance_id, instance_name,
+                                            ticket_key, settings.DSW_IDLE_STOP_MINUTES)
+                _send_card(open_id, chat_id, card)
+                state["warned"] = True
+                state["warn_ts"] = now
+                _redis_set(ticket_key, state)
 
-        elif warned and (now - warn_ts) >= stop_seconds:
-            # 警告后超时 → 自动停止
-            logger.info("[Scheduler] 实例 %s 警告超时，自动停止", instance_id)
-            stop_result = manage_pai_dsw(action="stop", instance_id=instance_id)
-            elapsed_h   = (now - float(state.get("start_ts", now))) / 3600
-            gpu_cnt     = int(state.get("gpu_count", 1))
-            _send_text(open_id, chat_id,
-                       f"🛑 实例 {instance_name}（{instance_id}）已自动停止。\n"
-                       f"实际使用 {elapsed_h:.1f}h，费用 {_cost_str(gpu_cnt, elapsed_h)}\n"
-                       f"数据已保留，如需继续使用可重新启动。工单：{ticket_key}")
-            transition_ticket(ticket_key, "完成")
-            add_comment(ticket_key, f"实例已自动停止（超时无响应）。\n{stop_result}")
-            _redis_delete(ticket_key)
+            elif warned and (now - warn_ts) >= stop_seconds:
+                # 警告后超时 → 自动停止
+                logger.info("[Scheduler] 实例 %s 警告超时，自动停止", instance_id)
+                stop_result = manage_pai_dsw(action="stop", instance_id=instance_id)
+                elapsed_h   = (now - float(state.get("start_ts", now))) / 3600
+                gpu_cnt     = int(state.get("gpu_count", 1))
+                _send_text(open_id, chat_id,
+                           f"🛑 实例 {instance_name}（{instance_id}）已自动停止。\n"
+                           f"实际使用 {elapsed_h:.1f}h，费用 {_cost_str(gpu_cnt, elapsed_h)}\n"
+                           f"数据已保留，如需继续使用可重新启动。工单：{ticket_key}")
+                transition_ticket(ticket_key, "完成")
+                add_comment(ticket_key, f"实例已自动停止（超时无响应）。\n{stop_result}")
+                _redis_delete(ticket_key)
 
-        # ── GPU 空转检测（仅在超时警告前执行）────────────────────────────────────
+        # ── GPU 空转检测（保留：仅提醒、不关机；不受 DSW_IDLE_STOP_ENABLED 影响）──────
         if not warned and instance_name:
             gpu_util = _get_instance_gpu_util(instance_name)
             if gpu_util is not None:
@@ -709,7 +715,8 @@ class DSWScheduler:
             )
             self._reconcile_thread.start()
             extra += " + 数据流动/迁移对账"
-        logger.info("[Scheduler] 启动：Jira 轮询 + DSW 超时监控 + GPU 空转检测 + 每日早报(实例+集群)%s", extra)
+        idle_stop = "DSW到期自动停止 + " if settings.DSW_IDLE_STOP_ENABLED else ""
+        logger.info("[Scheduler] 启动：Jira 轮询 + %sGPU 空转提醒 + 每日早报(实例+集群)%s", idle_stop, extra)
 
     def stop(self) -> None:
         self._running = False
@@ -905,7 +912,8 @@ def _reconcile_dataflow_once() -> None:
             if not _claim_dataflow_notify(job_id):
                 continue
             try:
-                _send_card("", spec["chat"](), spec["cards"].result_card(fresh))
+                # 优先推给发起人本人（created_by），空则降级配置频道；须与在线线程同目标，NX 闸门才一致。
+                _send_card(fresh.get("created_by", ""), spec["chat"](), spec["cards"].result_card(fresh))
                 logger.info("[Reconcile] %s 任务 %s 完成后自动补通知(%s)",
                             spec["name"], job_id, fresh["stage"])
             except Exception:

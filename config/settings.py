@@ -135,6 +135,9 @@ class Config:
     GITHUB_ORG   = os.environ.get("GITHUB_ORG", "")     # 组织名，如 wuji-technology
     DSW_IDLE_WARN_HOURS   = float(os.environ.get("DSW_IDLE_WARN_HOURS", "1"))   # 空闲多久发警告（小时）
     DSW_IDLE_STOP_MINUTES = int(os.environ.get("DSW_IDLE_STOP_MINUTES", "30"))  # 警告后多久自动停止（分钟）
+    # 到期警告 + 到期自动关机：默认关（阿里云工作空间已有利用率关机，别重复造轮子）。
+    # 置 true 才恢复「即将到期」警告卡 + 无响应自动 stop 实例。GPU 空转提醒不受此开关影响。
+    DSW_IDLE_STOP_ENABLED = os.environ.get("DSW_IDLE_STOP_ENABLED", "false").lower() == "true"
 
     # Grafana
     GRAFANA_URL            = os.environ.get("GRAFANA_URL", "")           # e.g. https://grafana.example.com

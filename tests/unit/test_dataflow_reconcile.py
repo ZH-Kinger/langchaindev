@@ -197,6 +197,40 @@ def test_claim_dataflow_notify_redis_down_passthrough(monkeypatch):
 
 # ── 真实 specs 契约：四个命名空间必须齐备对账所依赖的属性 ─────────────────────────
 
+# ── #41 对账终态推送优先发起人（created_by），空则降级配置频道 ────────────────────
+
+@pytest.fixture
+def sched_full(monkeypatch):
+    """像 sched，但捕获 _send_card 的完整三参 (target, chat, card) 以断言首参=created_by。"""
+    from core import dsw_scheduler as s
+    sent = []
+    monkeypatch.setattr(s, "_send_card", lambda o, c, card: sent.append((o, c, card)))
+    return s, sent
+
+
+def test_reconcile_pushes_to_created_by(sched_full, monkeypatch):
+    """孤儿完成补推：_send_card 首参=job.created_by（发起人 open_id），而非空串。"""
+    s, sent = sched_full
+    old = time.time() - 10_000
+    store = {"j1": {"job_id": "j1", "stage": "RUNNING", "updated_ts": old,
+                    "created_by": "ou_creator"}}
+    orch = _Orch(store, refresh_to="DONE")
+    _run(monkeypatch, s, orch, _Cards, {"RUNNING"})
+    assert sent and sent[0][0] == "ou_creator"     # 目标=发起人
+    assert sent[0][1] == "oc_chat"                  # 降级频道仍作第二参（target or chat）
+
+
+def test_reconcile_missing_created_by_falls_back_to_empty(sched_full, monkeypatch):
+    """无 created_by → 首参为 ""（_send_card 内部 target or chat 会回落配置频道）。"""
+    s, sent = sched_full
+    old = time.time() - 10_000
+    store = {"j2": {"job_id": "j2", "stage": "RUNNING", "updated_ts": old}}
+    orch = _Orch(store, refresh_to="DONE")
+    _run(monkeypatch, s, orch, _Cards, {"RUNNING"})
+    assert sent and sent[0][0] == ""                # 降级：空目标
+    assert sent[0][1] == "oc_chat"
+
+
 def test_real_reconcile_specs_contract():
     """对账把 _dataflow_reconcile_specs 全 mock 掉了；这里断言真实 specs 的四个命名空间
     (transfer/cpfs/vepfs/bucket) 各自 orchestrator/cards 都真有对账依赖的属性——

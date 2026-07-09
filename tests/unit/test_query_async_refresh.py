@@ -173,6 +173,59 @@ def test_async_terminal_pushes_even_if_prev_already_terminal(monkeypatch, push_c
     assert sent == [("oc_chat", {"RESULT": "DONE"})]
 
 
+# ── #41 _async_refresh_and_push 推送目标优先 created_by ──────────────────────────
+
+class _OrchCreatedBy:
+    STAGE_DONE = "DONE"
+    STAGE_FAILED = "FAILED"
+
+    def __init__(self, prev, new, created_by):
+        self._prev, self._new, self._cb = prev, new, created_by
+
+    def get_job(self, jid):
+        return {"job_id": jid, "stage": self._prev}
+
+    def refresh(self, jid):
+        j = {"job_id": jid, "stage": self._new}
+        if self._cb is not None:
+            j["created_by"] = self._cb
+        return j
+
+
+@pytest.fixture
+def push_capture_target(monkeypatch):
+    """捕获 _send_card 完整三参，用于断言首参=推送目标（created_by）。"""
+    import core.dsw_scheduler as s
+    sent = []
+    monkeypatch.setattr(s, "_send_card", lambda o, c, card: sent.append((o, c, card)))
+    return s, sent
+
+
+def test_async_terminal_target_is_created_by(monkeypatch, push_capture_target):
+    s, sent = push_capture_target
+    monkeypatch.setattr(s, "_claim_dataflow_notify", lambda jid: True)
+    orch = _OrchCreatedBy(prev="RUNNING", new="DONE", created_by="ou_creator")
+    actions._async_refresh_and_push(orch, "j-t", _prog, _res, "oc_chat")
+    assert sent and sent[0][0] == "ou_creator"      # 终态推给发起人
+    assert sent[0][1] == "oc_chat"
+
+
+def test_async_progress_target_is_created_by(monkeypatch, push_capture_target):
+    s, sent = push_capture_target
+    orch = _OrchCreatedBy(prev="SINKING", new="CROSSING", created_by="ou_creator")
+    actions._async_refresh_and_push(orch, "j-p", _prog, _res, "oc_chat")
+    assert sent and sent[0][0] == "ou_creator"      # 进度也推给发起人
+    assert sent[0][2] == {"PROGRESS": "CROSSING"}
+
+
+def test_async_target_falls_back_empty_when_no_created_by(monkeypatch, push_capture_target):
+    s, sent = push_capture_target
+    monkeypatch.setattr(s, "_claim_dataflow_notify", lambda jid: True)
+    orch = _OrchCreatedBy(prev="RUNNING", new="DONE", created_by=None)
+    actions._async_refresh_and_push(orch, "j-e", _prog, _res, "oc_chat")
+    assert sent and sent[0][0] == ""                 # 降级：空目标→配置频道
+
+
 # ── _h_query_progress_by_id：前缀校验 + 秒回 toast + 后台推送 ─────────────────────
 
 class _SyncThread:

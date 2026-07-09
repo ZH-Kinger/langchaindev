@@ -554,11 +554,11 @@ def _h_confirm_transfer(action_val, open_id, chat_id, form_value, *, reply_v2=Tr
             def _on_update(j):
                 if j["stage"] in (orchestrator.STAGE_DONE, orchestrator.STAGE_FAILED) \
                         and _claim_dataflow_notify(j["job_id"]):
-                    _send_card("", _cfg_chat(), result_card(j))
+                    _send_card(j.get("created_by", ""), _cfg_chat(), result_card(j))
             orchestrator.run_to_completion(job, on_update=_on_update)
         except Exception as e:
             logger.error("[Transfer] execute failed job=%s", job_id, exc_info=True)
-            _send_text("", _cfg_chat(), f"\u274c \u8fc1\u79fb\u4efb\u52a1 {job_id} \u5931\u8d25\uff1a{e}")
+            _send_text(job.get("created_by", ""), _cfg_chat(), f"\u274c \u8fc1\u79fb\u4efb\u52a1 {job_id} \u5931\u8d25\uff1a{e}")
 
     threading.Thread(target=_do_transfer, daemon=True).start()
     # \u539f\u5730\u628a\u201c\u786e\u8ba4\u5361\u201d\u66ff\u6362\u6210\u201c\u8fdb\u884c\u4e2d\u201d\u5361\uff1a\u786e\u8ba4\u6309\u94ae\u968f\u4e4b\u6d88\u5931 \u2192 \u4e0d\u80fd\u518d\u8fde\u70b9\uff08\u4e0e CPFS \u4e00\u81f4\uff09\u3002
@@ -589,7 +589,7 @@ def _async_refresh_and_push(orch, job_id, progress_card, result_card, chat):
             return  # 无变化，别刷屏
         if terminal and not _claim_dataflow_notify(job["job_id"]):
             return  # 终态卡已被在线线程/对账推过
-        _send_card("", chat, result_card(job) if terminal else progress_card(job))
+        _send_card(job.get("created_by", ""), chat, result_card(job) if terminal else progress_card(job))
     except Exception:
         logger.error("[Query] 后台刷新失败 job=%s", job_id, exc_info=True)
 
@@ -809,13 +809,13 @@ def _h_confirm_cpfs_dataflow(action_val, open_id, chat_id, form_value):
             def _on_update(j):
                 if j["stage"] in (orchestrator.STAGE_DONE, orchestrator.STAGE_FAILED):
                     if _claim_dataflow_notify(j["job_id"]):   # 与对账共用去重闸门
-                        _send_card("", _cfg_cpfs_chat(), result_card(j))
+                        _send_card(j.get("created_by", ""), _cfg_cpfs_chat(), result_card(j))
                 else:
-                    _send_card("", _cfg_cpfs_chat(), progress_card(j))
+                    _send_card(j.get("created_by", ""), _cfg_cpfs_chat(), progress_card(j))
             orchestrator.run_to_completion(job, on_update=_on_update)
         except Exception as e:
             logger.error("[CPFS] execute failed job=%s", job_id, exc_info=True)
-            _send_text("", _cfg_cpfs_chat(), f"❌ 任务 {job_id} 失败：{e}")
+            _send_text(job.get("created_by", ""), _cfg_cpfs_chat(), f"❌ 任务 {job_id} 失败：{e}")
 
     threading.Thread(target=_do_run, daemon=True).start()
     from core.cpfs_dataflow.cards import progress_card
@@ -936,13 +936,13 @@ def _h_confirm_vepfs_dataflow(action_val, open_id, chat_id, form_value):
             def _on_update(j):
                 if j["stage"] in (orchestrator.STAGE_DONE, orchestrator.STAGE_FAILED):
                     if _claim_dataflow_notify(j["job_id"]):   # 与对账共用去重闸门
-                        _send_card("", _cfg_vepfs_chat(), result_card(j))
+                        _send_card(j.get("created_by", ""), _cfg_vepfs_chat(), result_card(j))
                 else:
-                    _send_card("", _cfg_vepfs_chat(), progress_card(j))
+                    _send_card(j.get("created_by", ""), _cfg_vepfs_chat(), progress_card(j))
             orchestrator.run_to_completion(job, on_update=_on_update)
         except Exception as e:
             logger.error("[VEPFS] execute failed job=%s", job_id, exc_info=True)
-            _send_text("", _cfg_vepfs_chat(), f"❌ 任务 {job_id} 失败：{e}")
+            _send_text(job.get("created_by", ""), _cfg_vepfs_chat(), f"❌ 任务 {job_id} 失败：{e}")
 
     threading.Thread(target=_do_run, daemon=True).start()
     from core.vepfs_dataflow.cards import progress_card
@@ -1107,13 +1107,13 @@ def _h_confirm_bucket_transfer(action_val, open_id, chat_id, form_value):
             def _upd(j):
                 if j["stage"] in (o.STAGE_DONE, o.STAGE_FAILED):
                     if _claim_dataflow_notify(j["job_id"]):   # 与对账共用去重闸门
-                        _send_card("", _cfg_bkt_chat(), result_card(j))
+                        _send_card(j.get("created_by", ""), _cfg_bkt_chat(), result_card(j))
                 else:
-                    _send_card("", _cfg_bkt_chat(), progress_card(j))
+                    _send_card(j.get("created_by", ""), _cfg_bkt_chat(), progress_card(j))
             o.run_to_completion(job, on_update=_upd)
         except Exception as e:
             logger.error("[BKT] execute failed job=%s", job_id, exc_info=True)
-            _send_text("", _cfg_bkt_chat(), f"❌ 任务 {job_id} 失败：{e}")
+            _send_text(job.get("created_by", ""), _cfg_bkt_chat(), f"❌ 任务 {job_id} 失败：{e}")
 
     threading.Thread(target=_run, daemon=True).start()
     return {"toast": {"type": "success", "content": f"已下发，任务 {job_id}；进度卡稍后推送"}}
