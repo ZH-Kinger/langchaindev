@@ -6,6 +6,7 @@ import time
 
 import requests
 
+from config.settings import settings
 from utils.logger import get_logger, clear_trace_id
 
 logger = get_logger(__name__)
@@ -703,6 +704,10 @@ def _process_message(message_id: str, chat_id: str, user_text: str, open_id: str
 
     # ④ GPU 申请意图 → 必须先注册个人 AK/SK
     if _is_gpu_intent(user_text):
+        # Jira 停用时优雅停用 GPU 申请（依赖 Jira 建工单→调度器建 DSW）：即时回提示、不弹卡、不置 state。
+        if not settings.JIRA_ENABLED:
+            messaging._feishu_reply(message_id, "GPU 申请暂停（工单系统 Jira 停用中），请联系运维人员。")
+            return
         if not _is_registered(open_id):
             gpu_flow._send_ak_register_card(message_id)
             gpu_flow._set_gpu_state(chat_id, open_id, {"pending_gpu": True, "open_id": open_id})
