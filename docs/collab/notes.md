@@ -9,7 +9,7 @@
 | **dev** | 主会话（编排者） | `core/** config/** tools/**` 源码、部署 | — |
 | **tester** | 队友 | 只写 `tests/**` | 不碰源码；要改源码 → 交给 dev |
 | **auditor** | 队友 | 什么都不写（只读） | 不 Edit/Write/提交；发现 → SendMessage 给 dev |
-| **researcher** | 队友 | 只写 `docs/collab/research/**` | 不碰源码；查阿里/火山/飞书/LangChain 文档+取证，结论带出处 SendMessage 给 dev |
+| **researcher** | 队友 | 只写 `docs/collab/research/**` | 不碰源码；**研究**(查阿里/火山/飞书/LangChain 文档+取证)+**侦察**(只读探查线上机器/环境/基建现状:SSH 盘点服务/容器/配置/依赖、连通性探测、环境取证)，结论带出处/证据 SendMessage 给 dev |
 | **planner** | 队友 | 只写 `docs/collab/planning/**` | 不碰源码/测试；维护路线图+backlog+任务板，拆 epic→task（带验收+owner+依赖），排优先级 |
 | **docwriter** | 队友 | 写 `README.md`/`CHANGELOG.md`/`docs/**`（不含 `docs/collab/**`） | 不碰源码/测试；以 CLAUDE.md 为事实源更新用户/项目文档，新功能靠前 |
 
@@ -18,6 +18,15 @@
 ## 标准流水线（每个功能都走，不跳步）
 **researcher 查资料 → planner 计划 → dev 开发 → tester 测试 → auditor 审计。**
 > **提交闸门（硬规）**：任何改动必须 **auditor 审计通过、无阻塞项** 才能 `git commit`。dev 不得跳过审计直接提交。文档类改动（docwriter）也要过一遍事实/准确性核验再提交。
+> **researcher 不只是"查资料的"**：摸清某台机/某套环境/某个线上系统的真实状态（迁移前盘点、排障取现场、上线前核对）也派 researcher 当**只读探针**（SSH 盘点、连通性探测、环境取证），产出"必搬/必改/风险/待确认"给 planner。
+
+### 验收流程（Definition of Done — 每个改动"完成"须全绿，tester 主责、dev 收口）
+1. **单测绿**：目标测试 + 全量 `pytest` 全通过（0 failed）；新增覆盖边界/对抗/回归（幂等/并发/重启/错误分支/边界值）。
+2. **既存失败甄别**：与本次无关的既存失败（如缺 matplotlib、gpu_distribution）单独指出并基线复现，不混入、不甩锅。
+3. **端到端验收**：有运行时面的改动用 `verify`/`run` 驱动真实流程（本项目常在容器 `aiops-bot` 里验），不只看单测。
+4. **审计过闸**：auditor 复审无阻塞（= 上面提交闸门硬规）。
+5. **回报可核**：通过数 + 覆盖点 + 未覆盖项/已知风险；bug 给 `file:line + 复现 + 期望/实际`。
+任一未过 → 任务留 `in_progress`、说清卡点，别标 completed、别提交。
 - **第一步永远是查资料**：researcher 先上各大平台查有没有现成项目/官方文档/API 规格/踩坑，产出带出处的结论（写 `docs/collab/research/`）。别一上来就写代码。
 - 再由 planner 据此拆任务、排优先级（写 `docs/collab/planning/`），dev 才动手；tester 补测、auditor 复审收口。
 - 例外：改动已有充分调研+规划的既有条目（如 backlog 里已成熟的项），dev 可从开发接续，但要在日志注明"研究/规划已在 XX 完成"。
