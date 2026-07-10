@@ -136,12 +136,15 @@ def _launch(job_id: str, stage: str, work_cmd: str) -> None:
     pid_path = _marker(job_id, stage, "pid")
     log_path = _marker(job_id, stage, "log")
     # work_cmd 跑完把退出码写进 rc；nohup 后台化；$! 记 pid。整条 redirection 在远端。
+    # 注意 `&` 优先级低于 `&&`：必须把「后台起任务 + 写 pid」用 { ...; } 组起来，否则
+    # `mkdir && rm && nohup ... & echo $!>pid` 会把整段 mkdir&&rm&&nohup 一起丢后台、
+    # echo $!>pid 不等 mkdir 就先跑 → 目录未建、写 pid 失败(rc=1)。分组确保 mkdir&&rm 先完成。
     inner = f"{work_cmd}; echo $? > {shlex.quote(rc_path)}"
     remote = (
         f"mkdir -p {shlex.quote(job_dir)} && "
         f"rm -f {shlex.quote(rc_path)} && "
-        f"nohup bash -c {shlex.quote(inner)} > {shlex.quote(log_path)} 2>&1 & "
-        f"echo $! > {shlex.quote(pid_path)}"
+        f"{{ nohup bash -c {shlex.quote(inner)} > {shlex.quote(log_path)} 2>&1 & "
+        f"echo $! > {shlex.quote(pid_path)}; }}"
     )
     rc, out, err = run(remote, timeout=30)
     if rc != 0:

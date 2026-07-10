@@ -76,6 +76,108 @@ def test_start_stage1_dst_is_sgp_mount(capture_run, monkeypatch):
     assert "/mnt/sgp_oss/p/" in cmd
 
 
+# ── _launch 分组结构（真机 bug 回归：& 优先级低于 &&，pid 写入必须在 mkdir 之后） ──
+#
+# 旧写法 `mkdir && rm && nohup ... & echo $!>pid` 会把整段 mkdir&&rm&&nohup 一起丢后台，
+# echo $!>pid 不等 mkdir 完成就先在前台跑 → pid 目录未建、写失败 rc=1 → 起任务报错。
+# 修复用 `{ ...; }` 组起「后台起任务 + 写 pid」，确保在 mkdir&&rm 之后才执行：
+#   mkdir -p JOB && rm -f RC && { nohup bash -c 'INNER' > LOG 2>&1 & echo $! > PID; }
+
+def _launch_via(engine, capture_run, stage):
+    """经公开入口触发 _launch，返回捕获到的 remote 命令串。"""
+    if stage == STAGE1:
+        engine.start_stage1("sgp-abc123", source_bucket="wuji-data-tran",
+                            source_prefix="team/data/")
+    else:
+        engine.start_stage2("sgp-abc123", source_prefix="team/data/")
+    return capture_run["last"]()
+
+
+@pytest.mark.parametrize("stage", [STAGE1, STAGE2])
+def test_launch_has_grouping_structure(capture_run, monkeypatch, stage):
+    """remote 串含分组结构：`{ nohup ... & echo $! > <pid>; }`。"""
+    monkeypatch.setattr(engine_ssh.settings, "THAI_RSYNC_SUDO", "false")
+    monkeypatch.setattr(engine_ssh.settings, "THAI_RSYNC_BWLIMIT", "")
+    remote = _launch_via(engine_ssh, capture_run, stage)
+    # 组开头/组内后台起任务/写 pid/组结尾
+    assert "{ nohup" in remote
+    assert "& echo $!" in remote
+    assert f"> {engine_ssh._marker('sgp-abc123', stage, 'pid')}" in remote
+    assert remote.rstrip().endswith("; }")
+
+
+@pytest.mark.parametrize("stage", [STAGE1, STAGE2])
+def test_launch_ordering_mkdir_before_pid(capture_run, monkeypatch, stage):
+    """顺序断言：mkdir 出现在 echo $! 之前（pid 写入不再抢先于建目录）。"""
+    monkeypatch.setattr(engine_ssh.settings, "THAI_RSYNC_SUDO", "false")
+    monkeypatch.setattr(engine_ssh.settings, "THAI_RSYNC_BWLIMIT", "")
+    remote = _launch_via(engine_ssh, capture_run, stage)
+    assert remote.index("mkdir") < remote.index("echo $!")
+
+
+@pytest.mark.parametrize("stage", [STAGE1, STAGE2])
+def test_launch_pid_write_inside_group_after_and(capture_run, monkeypatch, stage):
+    """结构正确性：`echo $! > <pid>` 在 `{ }` 组内、组在 `&&` 之后。
+
+    断言 `&& {` 子串存在且 `echo $!` 出现在 `&& {` 之后 —— 证明 pid 写入不再
+    先于 mkdir（旧写法 pid 写在最外层前台、不受 && 约束）。
+    """
+    monkeypatch.setattr(engine_ssh.settings, "THAI_RSYNC_SUDO", "false")
+    monkeypatch.setattr(engine_ssh.settings, "THAI_RSYNC_BWLIMIT", "")
+    remote = _launch_via(engine_ssh, capture_run, stage)
+    assert "&& {" in remote
+    assert remote.index("&& {") < remote.index("echo $!")
+
+
+@pytest.mark.parametrize("stage", [STAGE1, STAGE2])
+def test_launch_mkdir_rm_precede_group(capture_run, monkeypatch, stage):
+    """mkdir -p 在最前、&& rm -f 其次，且都在分组 `{ nohup` 之前。"""
+    monkeypatch.setattr(engine_ssh.settings, "THAI_RSYNC_SUDO", "false")
+    monkeypatch.setattr(engine_ssh.settings, "THAI_RSYNC_BWLIMIT", "")
+    remote = _launch_via(engine_ssh, capture_run, stage)
+    assert remote.index("mkdir -p") < remote.index("&& rm -f")
+    assert remote.index("&& rm -f") < remote.index("{ nohup")
+    # rc marker 在 rm -f 后被清理、且写在 inner 里（echo $? > rc）
+    rc_marker = engine_ssh._marker("sgp-abc123", stage, "rc")
+    assert f"rm -f {rc_marker}" in remote
+    assert f"echo $? > {rc_marker}" in remote
+
+
+def test_launch_inner_is_shlex_quoted_wrapper(capture_run, monkeypatch):
+    """注入防护未回归：work_cmd 整体经 `bash -c '<inner>'` 单引号包裹。
+
+    分组只在 inner 外层加 `{ }`，不改 inner 的 shlex.quote —— 即便含空格/元字符
+    的路径混进 work_cmd 也整体被引用、不会破 bash -c 参数边界。
+    """
+    import shlex
+    monkeypatch.setattr(engine_ssh.settings, "SGP_OSS_MOUNT", "/mnt/sgp_oss")
+    monkeypatch.setattr(engine_ssh.settings, "SGP_OSSUTIL_JOBS", 30)
+    # 含空格 + shell 元字符（正常经 paths 白名单挡住，此处直调 engine 验兜底引用）
+    prefix = "team/da ta; rm -rf x/"
+    engine_ssh.start_stage1("sgp-abc123", source_bucket="b", source_prefix=prefix)
+    remote = capture_run["last"]()
+    src = f"oss://b/{prefix}"
+    # src 被 shlex.quote 后（含空格→整体加单引号），再随 inner 一起被 bash -c 引用；
+    # 断言 quote 后的 src 片段出现（证明未裸拼），且 `bash -c '` 包裹存在。
+    assert shlex.quote(src) in remote
+    assert "bash -c '" in remote
+    # 危险片段 `; rm -rf x` 被夹在引号内、其后紧跟收尾引号或路径，不在顶层裸露
+    assert "rm -rf x" in remote  # 存在但被引用（下一断言证明未破坏分组结构）
+    assert remote.rstrip().endswith("; }")
+
+
+def test_launch_raises_on_nonzero_rc(monkeypatch):
+    """起任务 SSH 返回非 0 → SshTransferError（rc!=0 说明前台 pid 写入/建目录失败）。
+
+    这正是旧 bug 的现场：分组前 echo $!>pid 抢跑失败 → rc=1 → 起任务报错。
+    """
+    monkeypatch.setattr(engine_ssh, "run",
+                        lambda cmd, *, timeout=30: (1, "", "mkdir: cannot create"))
+    with pytest.raises(SshTransferError) as ei:
+        engine_ssh.start_stage1("sgp-x", source_bucket="b", source_prefix="p/")
+    assert "stage1" in str(ei.value)
+
+
 # ── start_stage2 命令生成 ─────────────────────────────────────────────────────
 
 def test_start_stage2_command_basic(capture_run, monkeypatch):
