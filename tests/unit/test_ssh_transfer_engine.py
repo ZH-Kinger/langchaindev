@@ -58,7 +58,11 @@ def test_start_stage1_command(capture_run):
     cmd = capture_run["last"]()
     assert "ossutil cp" in cmd
     assert "oss://wuji-data-tran/team/data/" in cmd
-    assert "--jobs" in cmd
+    # 真机 bug 回归：SGP ossutil 2.2.2 并发 flag 是 `-j/--job`（单数），
+    # `--jobs`（复数）报 unknown flag、段1 退出码 1 挂掉。断言用单数、且严禁复数。
+    assert "--jobs" not in cmd
+    assert "--job " in cmd            # 带空格：`--job 30`，不会误匹配到 `--jobs`
+    assert "-r" in cmd
     assert "-u" in cmd
     assert "--checkpoint-dir" in cmd
     assert "nohup" in cmd
@@ -67,6 +71,25 @@ def test_start_stage1_command(capture_run):
     assert "stage1.rc" in cmd
     assert "stage1.pid" in cmd
     assert "stage1.log" in cmd
+
+
+def test_start_stage1_concurrency_flag_singular_not_plural(capture_run, monkeypatch):
+    """专项回归：ossutil 并发 flag 必须是 `-j/--job`（单数），绝不是 `--jobs`（复数）。
+
+    真机实证：SGP ossutil 2.2.2 `cp --help` 里 `-j, --job int` 是并发任务数；
+    `--jobs` 不是合法 flag，段1 会报 `unknown flag: --jobs`、rc=1 挂掉。
+    用词边界正则确保匹配的是独立 token `--job`，且其后紧跟并发数（数字）。
+    """
+    import re
+    monkeypatch.setattr(engine_ssh.settings, "SGP_OSSUTIL_JOBS", 30)
+    engine_ssh.start_stage1("sgp-abc123", source_bucket="b", source_prefix="p/")
+    cmd = capture_run["last"]()
+    # 复数形式一律不得出现
+    assert "--jobs" not in cmd
+    # 单数 `--job` 作为独立 token 存在，且后跟并发数
+    assert re.search(r"(?<!\S)--job(?!s)\s+\d+", cmd), cmd
+    # 复用配置的并发数（默认 30）出现在 --job 之后
+    assert re.search(r"--job\s+30\b", cmd), cmd
 
 
 def test_start_stage1_dst_is_sgp_mount(capture_run, monkeypatch):

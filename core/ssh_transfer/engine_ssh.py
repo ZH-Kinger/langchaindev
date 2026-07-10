@@ -159,8 +159,9 @@ def start_stage1(job_id: str, *, source_bucket: str, source_prefix: str) -> None
     src = f"oss://{source_bucket}/{source_prefix}"
     dst = f"{mount}/{source_prefix}"
     ckpt = f"{_job_dir(job_id)}/ckpt1"
+    # ossutil 2.x 并发 flag 是 `-j/--job`（单数），非 `--jobs`（复数会报 unknown flag、段1挂）。
     work = (f"ossutil cp {shlex.quote(src)} {shlex.quote(dst)} "
-            f"-r --jobs {jobs} -u --checkpoint-dir {shlex.quote(ckpt)}")
+            f"-r --job {jobs} -u --checkpoint-dir {shlex.quote(ckpt)}")
     _launch(job_id, STAGE1, work)
 
 
