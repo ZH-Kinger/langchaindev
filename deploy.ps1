@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    一键部署 AIOps Feishu Bot 到 bot-server（代码已 bind-mount，免 rebuild）。
+    一键部署 AIOps Feishu Bot 到 bot-new（代码已 bind-mount，免 rebuild）。
 
 .DESCRIPTION
     流程：git archive 当前 HEAD → scp 到服务器 → 解压覆盖 → 清理已删文件和 __pycache__
@@ -29,7 +29,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$SERVER   = "bot-server"
+# 迁移后 bot-new(8.222.149.27) 为唯一在线机；旧机 bot-server(115.191.2.86) 已停 bot 作回滚。
+$SERVER   = "bot-new"
 $REMOTE   = "/root/langchaindev"
 $REPO     = "D:\code_python\langchaindev"
 $STAMP    = "$REMOTE/.deployed_commit"
