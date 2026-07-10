@@ -114,6 +114,10 @@ def _h_submit_ak_register(action_val, open_id, chat_id, form_value):
 def _h_submit_gpu_request(action_val, open_id, chat_id, form_value):
     if not form_value:
         return {}
+    # Jira 停用时优雅停用 GPU 申请（该流程依赖 Jira 建工单→调度器自动建 DSW）。不报错、不建工单。
+    if not settings.JIRA_ENABLED:
+        return {"toast": {"type": "info",
+                          "content": "GPU 申请暂停（工单系统 Jira 停用中），请联系运维人员。"}}
     instance_name  = (form_value.get("instance_name") or "").strip()
     gpu_count      = form_value.get("gpu_count", "1")
     duration_hours = form_value.get("duration_hours", "8")

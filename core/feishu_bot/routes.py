@@ -280,7 +280,9 @@ def health():
     try:
         import requests as _req
         from config.settings import settings
-        if settings.JIRA_URL and settings.JIRA_PAT:
+        if not settings.JIRA_ENABLED:
+            result["jira"] = "disabled"
+        elif settings.JIRA_URL and settings.JIRA_PAT:
             resp = _req.get(
                 f"{settings.JIRA_URL}/rest/api/2/serverInfo",
                 headers={"Authorization": f"Bearer {settings.JIRA_PAT}"},
@@ -360,10 +362,13 @@ def run(host: str = "0.0.0.0", port: int = 8088, debug: bool = False):
     except Exception as e:
         logger.error("Agent 初始化失败，Bot 将无法回复消息", exc_info=True)
 
-    try:
-        scheduler.start()
-    except Exception as e:
-        logger.error("调度器启动失败", exc_info=True)
+    if settings.SCHEDULER_ENABLED:
+        try:
+            scheduler.start()
+        except Exception as e:
+            logger.error("调度器启动失败", exc_info=True)
+    else:
+        logger.warning("SCHEDULER_ENABLED=false → 后台调度器未启动（热备/双跑期，避免与 live 机重复推送）")
 
     logger.info("飞书 Bot 服务启动 → http://%s:%s/feishu/event", host, port)
     logger.info("卡片回调地址     → http://%s:%s/feishu/card_action", host, port)

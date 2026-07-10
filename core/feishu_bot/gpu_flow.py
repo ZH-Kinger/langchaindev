@@ -192,6 +192,10 @@ def _parse_gpu_request(text: str) -> dict | None:
 
 def _handle_gpu_request(message_id: str, chat_id: str, open_id: str, parsed: dict) -> None:
     """解析成功后异步创建 Jira 工单，调度器负责后续创建 DSW 实例。"""
+    # Jira 停用兜底：文本解析路径也可能到这里建工单，堵住以防建孤儿工单+假成功回执。
+    if not settings.JIRA_ENABLED:
+        messaging._feishu_reply(message_id, "GPU 申请暂停（工单系统 Jira 停用中），请联系运维人员。")
+        return
     instance_name  = parsed.get("instance_name") or f"dsw-{int(time.time())}"
     gpu_count      = parsed.get("gpu_count", "1")
     duration_hours = parsed.get("duration_hours", "8")

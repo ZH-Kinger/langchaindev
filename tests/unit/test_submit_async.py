@@ -26,6 +26,10 @@ class _NoStartThread:
 def _reset(monkeypatch):
     _NoStartThread.made = []
     monkeypatch.setattr(actions.threading, "Thread", _NoStartThread)
+    # JIRA 现默认停用（settings.JIRA_ENABLED=false）→ _h_submit_gpu_request 会在校验前
+    # 直接回“申请暂停”toast。本文件测的是“提交不做同步网络”，需 Jira 启用才能走到原逻辑。
+    # （Jira 停用分支的覆盖见 test_jira_scheduler_switches.py。）
+    monkeypatch.setattr(actions.settings, "JIRA_ENABLED", True, raising=False)
     yield
     _NoStartThread.made = []
 

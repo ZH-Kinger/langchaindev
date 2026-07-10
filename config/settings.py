@@ -124,6 +124,9 @@ class Config:
     USER_AK_IDLE_TTL_SECONDS = int(os.environ.get("USER_AK_IDLE_TTL_SECONDS", str(30 * 86400)))
 
     # Jira（GPU 工单系统）
+    # 总开关：Jira 已停用（默认 false）→ 调度器不轮询工单、/health 不探 Jira、GPU 申请优雅停用。
+    # 以后重新启用把它设 true 即可（代码保留、可逆）。
+    JIRA_ENABLED          = os.environ.get("JIRA_ENABLED", "false").lower() == "true"
     JIRA_URL              = os.environ.get("JIRA_URL", "")               # e.g. https://jira.example.com
     JIRA_PAT              = os.environ.get("JIRA_PAT", "")               # Personal Access Token
     JIRA_PROJECT_KEY      = os.environ.get("JIRA_PROJECT_KEY", "GPU")    # GPU 工单项目 Key
@@ -291,6 +294,11 @@ class Config:
     # 扫描孤儿(在途且 updated_ts 过期)任务，实时重查、完成即自动补推结果卡。默认开启。
     DATAFLOW_RECONCILE_ENABLED       = os.environ.get("DATAFLOW_RECONCILE_ENABLED", "true").lower() == "true"
 
+    # 调度器总开关（默认 true）。热备/双跑期把它设 false → 整个后台调度器(Jira轮询/实例检查/
+    # 早报/容量巡检/OSS权限对账/数据流动对账)全部不启动，避免与另一台 live 机重复推送/重复写。
+    # cutover（切飞书回调到本机）后再设 true 开启。旧机保持默认 true 不受影响。
+    SCHEDULER_ENABLED                = os.environ.get("SCHEDULER_ENABLED", "true").lower() == "true"
+
     # SSH 迁移链：杭州 OSS →(CEN)→ 新加坡 ECS 挂载盘 →(rsync)→ 泰国服务器。bot 用 paramiko SSH 到
     # SGP 遥控 ossutil(段1)+rsync(段2)。私钥 SGP_SSH_KEY_ENC 是 Fernet 密文（绝不明文），其余为真机验证默认值。
     SSH_TRANSFER_ENABLED   = os.environ.get("SSH_TRANSFER_ENABLED", "false").lower() == "true"
@@ -364,6 +372,9 @@ class Config:
         """检查配置完整性，返回 [(缺失字段, 影响说明), ...] 列表。"""
         missing = []
         for field, impact in self._REQUIRED_FIELDS:
+            # Jira 停用时不为其缺失告警（JIRA_ENABLED=false 是预期状态，非配置遗漏）。
+            if field in ("JIRA_URL", "JIRA_PAT") and not self.JIRA_ENABLED:
+                continue
             val = getattr(self, field, None)
             if not val:
                 missing.append((field, impact))

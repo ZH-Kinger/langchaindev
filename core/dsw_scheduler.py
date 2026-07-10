@@ -678,16 +678,20 @@ class DSWScheduler:
         if self._running:
             return
         self._running = True
-        self._ticket_thread = threading.Thread(
-            target=self._ticket_loop, name="jira-poll", daemon=True
-        )
+        # Jira 停用时不启动工单轮询线程（否则会去打已停用的 Jira、并可能重复建 DSW/评论工单）。
+        jira_on = settings.JIRA_ENABLED
+        if jira_on:
+            self._ticket_thread = threading.Thread(
+                target=self._ticket_loop, name="jira-poll", daemon=True
+            )
         self._instance_thread = threading.Thread(
             target=self._instance_loop, name="dsw-check", daemon=True
         )
         self._morning_thread = threading.Thread(
             target=self._morning_loop, name="morning-report", daemon=True
         )
-        self._ticket_thread.start()
+        if jira_on:
+            self._ticket_thread.start()
         self._instance_thread.start()
         self._morning_thread.start()
         extra = ""
@@ -716,7 +720,8 @@ class DSWScheduler:
             self._reconcile_thread.start()
             extra += " + 数据流动/迁移对账"
         idle_stop = "DSW到期自动停止 + " if settings.DSW_IDLE_STOP_ENABLED else ""
-        logger.info("[Scheduler] 启动：Jira 轮询 + %sGPU 空转提醒 + 每日早报(实例+集群)%s", idle_stop, extra)
+        jira_seg = "Jira 轮询 + " if jira_on else "(Jira 停用) "
+        logger.info("[Scheduler] 启动：%s%sGPU 空转提醒 + 每日早报(实例+集群)%s", jira_seg, idle_stop, extra)
 
     def stop(self) -> None:
         self._running = False
