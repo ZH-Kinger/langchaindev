@@ -239,13 +239,19 @@ def estimate_source(source_bucket: str, source_prefix: str) -> tuple[int, int, b
     _, out, _ = run(f"ossutil du {shlex.quote(src)} 2>&1 | tail -30", timeout=180)
     text = out or ""
     b = n = 0
-    mb = (re.search(r"sum\s*size[^\d]*([\d,]+)", text, re.I)
-          or re.search(r"total[^\n]*?size[^\d]*([\d,]+)", text, re.I))
+    # ossutil 2.2.2 du 汇总行（真机反查，TAB 分隔、纯字节整数、无 MB 后缀/无逗号）：
+    #   total object count: 3 \t total object sum size: 23208637
+    #   total du size:23208637         （冒号后可能无空格）
+    # 必须锚定含 total 的**汇总串**抓其后数字。旧版 `sum size[^\d]*([\d,]+)` 会先命中**表头**
+    # `storage class\tobject count\tsum size`，且 `[^\d]*` 跨行一路吞到数据行第一个数字
+    # （object count=3）→ 把 22MB 误读成 3B。故这里锚定 `total object sum size`/`total du size`，
+    # 分隔用 `[:\s]+`（不再用会跨行乱吞的 `[^\d]*`）。
+    mb = (re.search(r"total\s+object\s+sum\s+size[:\s]+(\d[\d,]*)", text, re.I)
+          or re.search(r"total\s+du\s+size[:\s]+(\d[\d,]*)", text, re.I))
     if not mb:
         return 0, 0, False   # 没解析出大小 → 未知
     b = int(mb.group(1).replace(",", ""))
-    mn = (re.search(r"object\s*count[^\d]*([\d,]+)", text, re.I)
-          or re.search(r"total\s*count[^\d]*([\d,]+)", text, re.I))
+    mn = re.search(r"total\s+object\s+count[:\s]+(\d[\d,]*)", text, re.I)
     if mn:
         n = int(mn.group(1).replace(",", ""))
     return b, n, True

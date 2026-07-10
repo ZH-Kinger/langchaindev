@@ -294,19 +294,65 @@ def test_poll_stage_garbage_rc_defaults_fail(monkeypatch):
 
 
 # ── estimate_source 解析 ──────────────────────────────────────────────────────
+#
+# 真机 bug 回归（du 解析）：ossutil 2.2.2 `du` 输出（researcher 反查逐字，TAB 分隔、
+# 纯字节整数、无 MB 后缀/无逗号，报告见 docs/collab/research/ossutil_du_output_format.md）：
+#   storage class\tobject count\tsum size
+#   Standard\t3\t23208637
+#   total object count: 3\ttotal object sum size: 23208637
+#   total part count: 0\ttotal part sum size: 0
+#   total du size:23208637
+# 旧正则 `sum\s*size[^\d]*([\d,]+)` 会先命中**表头** `...sum size`，`[^\d]*` 跨行吞到
+# 数据行第一个数字（object count=3）→ 把 22MB 误读成 3B。新版锚定 `total object sum size`
+# / `total du size` 汇总行，杜绝误抓。
 
-def test_estimate_source_parses_du(monkeypatch):
-    """解析出 size → 3 元组 ok=True。"""
-    out = "total object count: 1,234\ntotal sum size: 5,678,900\n"
-    _run_returning(monkeypatch, out)
-    assert engine_ssh.estimate_source("bkt", "a/") == (5678900, 1234, True)
+# ossutil 2.2.2 du 真机逐字输出（TAB 分隔汇总行）
+_REAL_DU = (
+    "storage class\tobject count\tsum size\n"
+    "Standard\t3\t23208637\n"
+    "total object count: 3\ttotal object sum size: 23208637\n"
+    "total part count: 0\ttotal part sum size: 0\n"
+    "total du size:23208637\n"
+)
 
 
-def test_estimate_source_zero_size_but_parsed_ok_true(monkeypatch):
-    """空前缀 size=0 但确实解析到大小行 → ok=True（不当作未知）。"""
-    out = "total object count: 0\ntotal sum size: 0\n"
+def test_estimate_source_parses_real_du_bytes_not_object_count(monkeypatch):
+    """核心回归：真机 du 串 → (23208637, 3, True)。
+
+    **断言字节==23208637 而非 3** —— 锁死旧正则误把 object count(3) 当字节数的 bug 不复发。
+    """
+    _run_returning(monkeypatch, _REAL_DU)
+    b, n, ok = engine_ssh.estimate_source("wuji-data-tran", "ossutil_output/")
+    assert b == 23208637, f"字节被误读：期望 23208637(22MB) 实得 {b}"
+    assert b != 3, "回归失守：又把 object count(3) 当成字节数了"
+    assert n == 3
+    assert ok is True
+    assert engine_ssh.estimate_source("wuji-data-tran", "ossutil_output/") == (23208637, 3, True)
+
+
+def test_estimate_source_fallback_total_du_size_no_space_after_colon(monkeypatch):
+    """兜底行 `total du size:23208637`（冒号后无空格、无 object sum size 行）→ 仍解析出 23208637。"""
+    _run_returning(monkeypatch, "total du size:23208637\n")
+    b, n, ok = engine_ssh.estimate_source("bkt", "a/")
+    assert b == 23208637
+    assert ok is True
+
+
+def test_estimate_source_empty_prefix_zero_ok_true(monkeypatch):
+    """空前缀（total object sum size: 0 / total object count: 0）→ (0,0,True)（已知零，非未知）。"""
+    out = "total object count: 0\ttotal object sum size: 0\n"
     _run_returning(monkeypatch, out)
     assert engine_ssh.estimate_source("bkt", "a/") == (0, 0, True)
+
+
+def test_estimate_source_header_and_data_rows_only_no_total_not_ok(monkeypatch):
+    """防回归：只有表头 `...\tsum size` + 数据行 `Standard\t3\t23208637`、**无 total 汇总行**
+    → (0,0,False)。旧正则会误抓数据行的 object count(3) 返回 (3,..,True)。"""
+    out = "storage class\tobject count\tsum size\nStandard\t3\t23208637\n"
+    _run_returning(monkeypatch, out)
+    result = engine_ssh.estimate_source("bkt", "a/")
+    assert result == (0, 0, False), f"不该抓到值：{result}"
+    assert result[0] != 3, "回归失守：又误抓了数据行的 object count(3)"
 
 
 def test_estimate_source_unparseable_not_ok(monkeypatch):
@@ -316,6 +362,7 @@ def test_estimate_source_unparseable_not_ok(monkeypatch):
 
 
 def test_estimate_source_empty_not_ok(monkeypatch):
+    """SSH 不通/空输出 → (0,0,False)。"""
     _run_returning(monkeypatch, "")
     assert engine_ssh.estimate_source("bkt", "a/") == (0, 0, False)
 
