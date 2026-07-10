@@ -57,7 +57,8 @@ if ($dirty) {
 }
 
 # ── 2. 算出相对上次部署被删除的文件（等效 rsync --delete）──────────────────
-$lastDeployed = (ssh $SERVER "cat $STAMP 2>/dev/null").Trim()
+# "$(...)" 把 ssh 无输出时的 $null 归一成空串，再 Trim——否则首次部署到无 .deployed_commit 的新机会 NPE
+$lastDeployed = "$(ssh $SERVER "cat $STAMP 2>/dev/null")".Trim()
 $deleted = @()
 if ($lastDeployed) {
     Step "上次部署：$lastDeployed，计算删除文件…"
