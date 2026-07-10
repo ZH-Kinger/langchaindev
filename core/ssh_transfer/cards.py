@@ -13,20 +13,25 @@ def _pt(content):
 
 def entry_card():
     """录入卡：填源 OSS 路径 + 泰国目标子目录（可空=同源目录名）。"""
+    dest_root = (settings.THAI_DEST_ROOT or "").rstrip("/")
+    thai_host = settings.THAI_HOST or ""
+    thai_user = settings.THAI_USER or "wuji"
     return {
         "schema": "2.0",
         "config": {"wide_screen_mode": True},
         "header": {"title": _pt("\U0001f69a 数据迁移（泰国H200）"), "template": "orange"},
         "body": {"elements": [
             {"tag": "markdown",
-             "content": "把杭州 OSS 数据迁到泰国 H200 服务器（经新加坡中转，两段：ossutil→rsync）。"},
+             "content": "把杭州 OSS 数据迁到泰国 H200 服务器（经新加坡中转，两段：ossutil→rsync）。\n"
+                        f"**泰国目标根**：`{thai_user}@{thai_host}:{dest_root}/`\n"
+                        "你填的「目标子目录」会接在这根后面（留空则用源目录名）。"},
             {"tag": "form", "name": "ssh_transfer", "elements": [
                 {"tag": "input", "name": "source", "required": True,
                  "label": _pt("源 OSS 路径"),
                  "placeholder": _pt("oss://wuji-data-tran/子目录/")},
                 {"tag": "input", "name": "dest", "required": False,
                  "label": _pt("泰国目标子目录（留空=用源目录名）"),
-                 "placeholder": _pt("如 test（内容将铺进 <目标根>/test/）")},
+                 "placeholder": _pt(f"如 test → 落到 {dest_root}/test/")},
                 {"tag": "button", "text": _pt("下一步：确认"), "type": "primary",
                  "form_action_type": "submit", "name": "submit",
                  "behaviors": [{"type": "callback", "value": {"action": "submit_ssh_transfer"}}]},

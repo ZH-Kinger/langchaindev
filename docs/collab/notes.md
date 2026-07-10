@@ -391,3 +391,5 @@
   vePFS `_strip_mount('/vepfs/wzh/')=='/wzh/'` + 不误剥 `/vepfsdata`；make_plan(fs_id=) 双向 + plan_from_addresses 源/目的两方向
   经 make_plan 兜住、sub_path 均不含 /vepfs；settings 默认 `CPFS_MOUNT_PREFIX=/cpfs`、`VEPFS_MOUNT_PREFIX=/vepfs`。
   回归确认既有 test_cpfs_dataflow_orchestrator + test_vepfs_dataflow 45 passed。未发现新源码问题。
+
+[2026-07-09 TESTER] SSH迁移录入卡 entry_card 补测：tests/unit/test_ssh_transfer_cards_v2.py 新增4例(泰国目标根 user@host:root/ 拼接+placeholder+结构回归+空/None不炸)。目标文件 21 passed。全量 1024 passed / 2 failed。两处 failed 与本改动无关且在 /app 基线同样复现：test_gpu_distribution::test_dist_url_and_summary_card、test_wants_metrics_chart（utils/chart_builder.py 缺 matplotlib，容器未装该模块）。已告知 dev。

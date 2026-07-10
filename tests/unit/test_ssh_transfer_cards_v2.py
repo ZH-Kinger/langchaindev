@@ -5,7 +5,27 @@ FAILED 含 retry_ssh_transfer 按钮；缺字段不 KeyError。
 """
 import pytest
 
+from config.settings import settings
 from core.ssh_transfer import cards
+
+
+def _form_of(card_dict):
+    """从 entry_card body 里取出 tag==form 的元素（不假设固定下标）。"""
+    for el in card_dict["body"]["elements"]:
+        if el.get("tag") == "form":
+            return el
+    raise AssertionError("entry_card 里没有 form 元素")
+
+
+def _input_names(form):
+    return {el.get("name") for el in form["elements"] if el.get("tag") == "input"}
+
+
+def _submit_button(form):
+    for el in form["elements"]:
+        if el.get("tag") == "button":
+            return el
+    raise AssertionError("form 里没有 button")
 
 
 def _full_job(stage="STAGE1", **over):
@@ -29,6 +49,54 @@ def test_entry_card_schema_2_0():
     s = str(c)
     assert "source" in s and "dest" in s              # 源 + 目标子目录输入
     assert "submit_ssh_transfer" in s                 # 提交回调
+
+
+def test_entry_card_structure_regression():
+    """回归：form 的 input 名仍是 source/dest，提交按钮回调仍 submit_ssh_transfer。"""
+    c = cards.entry_card()
+    form = _form_of(c)
+    assert _input_names(form) == {"source", "dest"}
+    btn_el = _submit_button(form)
+    behaviors = btn_el["behaviors"]
+    assert behaviors[0]["value"]["action"] == "submit_ssh_transfer"
+
+
+def test_entry_card_shows_thai_dest_root(monkeypatch):
+    """正文含「泰国目标根」+ user@host:dest_root/ 拼接；placeholder 含 dest_root。"""
+    monkeypatch.setattr(settings, "THAI_USER", "wuji")
+    monkeypatch.setattr(settings, "THAI_HOST", "1.2.3.4")
+    monkeypatch.setattr(settings, "THAI_DEST_ROOT", "/mnt/data/team/")  # 带尾斜杠，验证 rstrip
+    c = cards.entry_card()
+    md = c["body"]["elements"][0]["content"]
+    assert "泰国目标根" in md
+    assert "/mnt/data/team" in md                      # dest_root 值出现（尾斜杠已 rstrip）
+    assert "wuji@1.2.3.4:/mnt/data/team/" in md        # user@host:dest_root/ 拼接（与确认卡 dest_uri 同形）
+    # placeholder 含 dest_root
+    form = _form_of(c)
+    dest_input = next(el for el in form["elements"]
+                      if el.get("tag") == "input" and el.get("name") == "dest")
+    placeholder = dest_input["placeholder"]["content"]
+    assert "/mnt/data/team" in placeholder
+    assert "/mnt/data/team/test/" in placeholder       # 「如 test → 落到 <root>/test/」
+
+
+def test_entry_card_empty_dest_root_no_crash(monkeypatch):
+    """THAI_DEST_ROOT 为空 → rstrip 空串安全、不炸，仍 schema 2.0。"""
+    monkeypatch.setattr(settings, "THAI_DEST_ROOT", "")
+    monkeypatch.setattr(settings, "THAI_HOST", "")
+    c = cards.entry_card()
+    assert c["schema"] == "2.0"
+    assert "泰国目标根" in c["body"]["elements"][0]["content"]
+    # 结构未坏：input 名仍在
+    assert _input_names(_form_of(c)) == {"source", "dest"}
+
+
+def test_entry_card_dest_root_none_no_crash(monkeypatch):
+    """THAI_DEST_ROOT / THAI_HOST 为 None → `(x or "")` 兜底、不炸。"""
+    monkeypatch.setattr(settings, "THAI_DEST_ROOT", None)
+    monkeypatch.setattr(settings, "THAI_HOST", None)
+    c = cards.entry_card()
+    assert c["schema"] == "2.0"
 
 
 # ── confirm_card ───────────────────────────────────────────────────────────────
