@@ -172,14 +172,27 @@ def handle_approval_event(payload: dict[str, Any]) -> dict[str, Any]:
     approval_comment_id = ""
     try:
         detail = fetch_approval_instance(instance_code) if instance_code else _event_obj(payload)
-        status = status or (_extract_status(detail) or "").upper()
-        if not status:
-            # 拉取实例后仍无状态：非终态/通知类事件，不可执行建号 → 静默忽略（不再误报失败）。
-            logger.info("[ram_approval] no status resolved for instance=%s; ignore", instance_code or "-")
-            return {"ignored": True, "reason": "no_status", "instance_code": instance_code}
-        if status not in APPROVED_STATUSES:
-            logger.info("[ram_approval] ignore non-approved status=%s", status)
-            return {"ignored": True, "reason": f"status={status}"}
+        # 建号判据必须以「实例整体状态」为唯一准绳，且只认【回拉实例详情的顶层实例级 status】：
+        # 事件 payload 里的 status 可能是某一级审批人点同意产生的【节点级】PASS/APPROVED，
+        # _extract_status 深搜会抓到它 → 据此建号会绕过后续审批节点。真机实例 1C854E42 即在第一级
+        # PASS 后 1.5s 就建了号、而第二级当时仍 PENDING、实例整体 status=PENDING。故：
+        #  ① 无 instance_code → 无法核实整单状态 → 绝不建号（fail-safe）；
+        #  ② 实例级 status（GET 实例响应顶层 status 字段）必须恰为 "APPROVED" 才建（详见下方）。
+        if not instance_code:
+            logger.info("[ram_approval] no instance_code; cannot verify instance-level approval; ignore")
+            return {"ignored": True, "reason": "no_instance_code"}
+        # 实例级 status 官方枚举只有 PENDING/APPROVED/REJECTED/CANCELED/DELETED（飞书审批 v4）。
+        # 建号只认单值 "APPROVED"——不用 APPROVED_STATUSES：那里混入了 PASS/AGREE/DONE 等
+        # 节点级/timeline 词，正是本 bug 的帮凶（approval_task 的节点 PASS 会被误当整单通过）。
+        instance_status = (str((detail or {}).get("status") or "").strip()).upper()
+        if instance_status != "APPROVED":
+            logger.info(
+                "[ram_approval] instance NOT fully approved (instance status=%s) instance=%s; skip create",
+                instance_status or "-", instance_code,
+            )
+            return {"ignored": True, "reason": f"instance_status={instance_status or 'none'}",
+                    "instance_code": instance_code}
+        status = instance_status
 
         target = getattr(settings, "FEISHU_RAM_APPROVAL_CODE", "")
         code = _extract_approval_code(detail) or _extract_approval_code(payload)

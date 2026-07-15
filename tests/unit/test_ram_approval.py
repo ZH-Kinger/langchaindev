@@ -832,3 +832,287 @@ def test_volcano_mobile_strips_aliyun_prefix():
     assert _volcano_mobile("13100000000") == "13100000000"
     assert _volcano_mobile("+86 131 0000 0000") == "13100000000"
     assert _volcano_mobile("") == ""
+
+
+# ---------------------------------------------------------------------------
+# 建号门禁：只认【回拉实例详情的顶层实例级 status】，不信事件 payload 的节点级 status
+# 背景 bug（真机实例 1C854E42）：两级审批只过第一级（节点 status=PASS）就建号、绕过第二级。
+# 修复：建号判据 = fetch_approval_instance 返回的顶层实例 status ∈ APPROVED_STATUSES。
+#   无 instance_code → ignore(no_instance_code)、绝不建号（fail-safe）。
+# 这些用例用 create_accounts_for_platforms 作哨兵探测"到底有没有建号"。
+# ---------------------------------------------------------------------------
+
+def _approval_env(monkeypatch, *, dry_run=False):
+    """公共装置：让 should_handle_event 通过 + 隔离建号后的落库/通知副作用。
+    返回 created 列表（哨兵：每次 create_accounts_for_platforms 被调用就 append 一次）。"""
+    from core import ram_approval
+    from core.ram_approval import RamAccountResult
+
+    fake = FakeRedis()
+    monkeypatch.setattr(ram_approval, "get_redis", lambda: fake)
+    monkeypatch.setattr(ram_approval.settings, "FEISHU_RAM_APPROVAL_CODE", "approval_code_x")
+    monkeypatch.setattr(ram_approval.settings, "FEISHU_RAM_APPROVAL_DRY_RUN", dry_run)
+    # 隔离建号成功后的落库 / 通知 / 交付校验（不碰网络、不影响哨兵）
+    monkeypatch.setattr(ram_approval, "save_approval_record", lambda *a, **k: None)
+    monkeypatch.setattr(ram_approval, "save_approval_result", lambda *a, **k: None)
+    monkeypatch.setattr(ram_approval, "save_approval_failure", lambda *a, **k: None)
+    monkeypatch.setattr(ram_approval, "_safe_notify_result", lambda *a, **k: None)
+    monkeypatch.setattr(ram_approval, "notify_processing", lambda *a, **k: "")
+    monkeypatch.setattr(ram_approval, "notify_failure", lambda *a, **k: None)
+    monkeypatch.setattr(ram_approval, "_assert_account_delivery_ready", lambda *a, **k: None)
+
+    created = []
+
+    def fake_create(req):
+        created.append(req.login_name)
+        return RamAccountResult(user_name=req.login_name, created_user=True)
+
+    monkeypatch.setattr(ram_approval, "create_accounts_for_platforms", fake_create)
+    return created
+
+
+def _valid_form():
+    """一份能通过 parse_ram_account_request 的最小表单（登录名/邮箱/手机）。"""
+    return [
+        {"id": "f1", "name": "登录名称", "value": "twolevel"},
+        {"id": "f2", "name": "安全邮箱", "value": "twolevel@example.com"},
+        {"id": "f3", "name": "安全手机", "value": "13800138000"},
+    ]
+
+
+def _node_pass_payload(instance_code="inst_two_level"):
+    """事件 payload 携带【节点级】status=PASS（第一级审批人点同意产生），
+    _extract_status 深搜会抓到它——绝不能据此建号。"""
+    event = {"approval_code": "approval_code_x", "status": "PASS"}
+    if instance_code:
+        event["instance_code"] = instance_code
+    return {
+        "header": {"event_type": "approval_instance.status_changed_v4"},
+        "event": event,
+    }
+
+
+def test_node_level_pass_but_instance_pending_does_not_create(monkeypatch):
+    """核心回归：事件节点 status=PASS，但实例整体仍 PENDING → 绝不建号。
+    锁死"第一级审批通过≠建号"，堵住绕过第二级的真机 bug 1C854E42。"""
+    from core import ram_approval
+
+    created = _approval_env(monkeypatch)
+    detail = _detail(_valid_form(), approval_code="approval_code_x",
+                     instance_code="inst_two_level", status="PENDING")
+    fetched = []
+    monkeypatch.setattr(ram_approval, "fetch_approval_instance",
+                        lambda code: fetched.append(code) or detail)
+
+    res = ram_approval.handle_approval_event(_node_pass_payload())
+
+    assert res == {"ignored": True, "reason": "instance_status=PENDING",
+                   "instance_code": "inst_two_level"}
+    assert created == []                     # 哨兵：一次都没建号
+    assert fetched == ["inst_two_level"]      # 确实以实例码回拉了实例详情核实
+
+
+def test_instance_approved_proceeds_to_create(monkeypatch):
+    """实例整体 status=APPROVED → 正常进入建号流程（哨兵恰一次）。"""
+    from core import ram_approval
+
+    created = _approval_env(monkeypatch)
+    detail = _detail(_valid_form(), approval_code="approval_code_x",
+                     instance_code="inst_ok", status="APPROVED")
+    monkeypatch.setattr(ram_approval, "fetch_approval_instance", lambda code: detail)
+
+    res = ram_approval.handle_approval_event(_node_pass_payload("inst_ok"))
+
+    assert res["ignored"] is False
+    assert res["user_name"] == "twolevel"
+    assert created == ["twolevel"]
+
+
+def test_no_instance_code_never_creates(monkeypatch):
+    """无 instance_code（payload 无实例码）→ 无法核实整单状态 → ignore(no_instance_code)、绝不建号。
+    即便事件 status=PASS 也不放行（fail-safe）。"""
+    from core import ram_approval
+
+    created = _approval_env(monkeypatch)
+    fetched = []
+    monkeypatch.setattr(ram_approval, "fetch_approval_instance",
+                        lambda code: fetched.append(code) or {})
+
+    res = ram_approval.handle_approval_event(_node_pass_payload(instance_code=None))
+
+    assert res == {"ignored": True, "reason": "no_instance_code"}
+    assert created == []
+    assert fetched == []      # 没有 instance_code 时压根不该回拉实例详情
+
+
+def test_instance_rejected_does_not_create(monkeypatch):
+    """实例整体 status=REJECTED → 不建号。"""
+    from core import ram_approval
+
+    created = _approval_env(monkeypatch)
+    detail = _detail(_valid_form(), approval_code="approval_code_x",
+                     instance_code="inst_rej", status="REJECTED")
+    monkeypatch.setattr(ram_approval, "fetch_approval_instance", lambda code: detail)
+
+    res = ram_approval.handle_approval_event(_node_pass_payload("inst_rej"))
+
+    assert res == {"ignored": True, "reason": "instance_status=REJECTED",
+                   "instance_code": "inst_rej"}
+    assert created == []
+
+
+def test_instance_status_missing_does_not_create(monkeypatch):
+    """实例详情顶层缺 status（None/缺字段）→ 归一成 'none' → 不建号（对抗：不能因空当通过）。"""
+    from core import ram_approval
+
+    created = _approval_env(monkeypatch)
+    # detail 无顶层 status 字段
+    detail = {
+        "approval_code": "approval_code_x",
+        "instance_code": "inst_nostatus",
+        "form": json.dumps(_valid_form(), ensure_ascii=False),
+    }
+    monkeypatch.setattr(ram_approval, "fetch_approval_instance", lambda code: detail)
+
+    res = ram_approval.handle_approval_event(_node_pass_payload("inst_nostatus"))
+
+    assert res == {"ignored": True, "reason": "instance_status=none",
+                   "instance_code": "inst_nostatus"}
+    assert created == []
+
+
+def test_instance_status_lowercase_is_normalized_and_creates(monkeypatch):
+    """对抗：实例 status 小写 'approved' → .upper() 归一后 ∈ APPROVED_STATUSES → 建号。"""
+    from core import ram_approval
+
+    created = _approval_env(monkeypatch)
+    detail = _detail(_valid_form(), approval_code="approval_code_x",
+                     instance_code="inst_lower", status="approved")
+    monkeypatch.setattr(ram_approval, "fetch_approval_instance", lambda code: detail)
+
+    res = ram_approval.handle_approval_event(_node_pass_payload("inst_lower"))
+
+    assert res["ignored"] is False
+    assert created == ["twolevel"]
+
+
+def test_instance_status_whitespace_padded_creates(monkeypatch):
+    """对抗：实例 status 带首尾空白 '  APPROVED  ' → strip 后 ∈ APPROVED_STATUSES → 建号。"""
+    from core import ram_approval
+
+    created = _approval_env(monkeypatch)
+    detail = _detail(_valid_form(), approval_code="approval_code_x",
+                     instance_code="inst_ws", status="  APPROVED  ")
+    monkeypatch.setattr(ram_approval, "fetch_approval_instance", lambda code: detail)
+
+    res = ram_approval.handle_approval_event(_node_pass_payload("inst_ws"))
+
+    assert res["ignored"] is False
+    assert created == ["twolevel"]
+
+
+def test_event_status_pass_never_overrides_pending_instance(monkeypatch):
+    """强化核心：即便事件 payload 里塞了多层节点级 PASS/APPROVED，
+    只要回拉的实例级 status 非通过（这里 PROCESSING）就绝不建号——事件 status 仅早期过滤用。"""
+    from core import ram_approval
+
+    created = _approval_env(monkeypatch)
+    detail = _detail(_valid_form(), approval_code="approval_code_x",
+                     instance_code="inst_proc", status="PROCESSING")
+    monkeypatch.setattr(ram_approval, "fetch_approval_instance", lambda code: detail)
+
+    # 深层嵌套一堆节点级 PASS，模拟多级审批里各节点的通过态
+    payload = {
+        "header": {"event_type": "approval_instance.status_changed_v4"},
+        "event": {
+            "approval_code": "approval_code_x",
+            "instance_code": "inst_proc",
+            "status": "PASS",
+            "task_list": [{"status": "PASS"}, {"status": "APPROVED"}],
+        },
+    }
+    res = ram_approval.handle_approval_event(payload)
+
+    assert res == {"ignored": True, "reason": "instance_status=PROCESSING",
+                   "instance_code": "inst_proc"}
+    assert created == []
+
+
+@pytest.mark.parametrize("bogus", ["PASS", "PASSED", "AGREE", "AGREED", "COMPLETED", "APPROVE"])
+def test_approved_statuses_members_other_than_APPROVED_do_not_create(monkeypatch, bogus):
+    """锁死收紧（证明 delta 价值）：实例顶层 status ∈ APPROVED_STATUSES 但 != 'APPROVED'
+    （PASS/AGREE/COMPLETED... 皆为节点级/timeline 词）→ 不建号。
+    **旧 `in APPROVED_STATUSES` 版会误建号，收紧成 != 'APPROVED' 后必须拒绝**——这些正是防回归的关键。
+    实例级枚举官方只有 PENDING/APPROVED/REJECTED/CANCELED/DELETED；混入词不该放行整单。"""
+    from core import ram_approval
+
+    # 前置健全性：这些串确实是 APPROVED_STATUSES 成员（否则失去"证明收紧价值"的意义——
+    # 旧版对非成员本就拒绝，只有"成员但非 APPROVED"才能区分新旧行为）
+    assert bogus in ram_approval.APPROVED_STATUSES
+    assert bogus != "APPROVED"
+
+    created = _approval_env(monkeypatch)
+    detail = _detail(_valid_form(), approval_code="approval_code_x",
+                     instance_code="inst_bogus", status=bogus)
+    monkeypatch.setattr(ram_approval, "fetch_approval_instance", lambda code: detail)
+
+    res = ram_approval.handle_approval_event(_node_pass_payload("inst_bogus"))
+
+    assert res == {"ignored": True, "reason": f"instance_status={bogus}",
+                   "instance_code": "inst_bogus"}
+    assert created == []
+
+
+def test_instance_status_DONE_does_not_create(monkeypatch):
+    """实例顶层 status='DONE' → 不建号、reason=instance_status=DONE。
+    注：'DONE' 其实不在 APPROVED_STATUSES（成员是 APPROVED/APPROVE/PASS/PASSED/AGREE/AGREED/COMPLETED），
+    故新旧两版都拒绝它；此例作防御性回归，锁死 DONE 这类 timeline 词永不放行整单。"""
+    from core import ram_approval
+
+    assert "DONE" not in ram_approval.APPROVED_STATUSES   # 事实核对
+    created = _approval_env(monkeypatch)
+    detail = _detail(_valid_form(), approval_code="approval_code_x",
+                     instance_code="inst_done", status="DONE")
+    monkeypatch.setattr(ram_approval, "fetch_approval_instance", lambda code: detail)
+
+    res = ram_approval.handle_approval_event(_node_pass_payload("inst_done"))
+
+    assert res == {"ignored": True, "reason": "instance_status=DONE",
+                   "instance_code": "inst_done"}
+    assert created == []
+
+
+def test_instance_canceled_does_not_create(monkeypatch):
+    """实例级枚举 CANCELED（撤销）→ 不建号（补齐官方枚举的负路径）。"""
+    from core import ram_approval
+
+    created = _approval_env(monkeypatch)
+    detail = _detail(_valid_form(), approval_code="approval_code_x",
+                     instance_code="inst_cancel", status="CANCELED")
+    monkeypatch.setattr(ram_approval, "fetch_approval_instance", lambda code: detail)
+
+    res = ram_approval.handle_approval_event(_node_pass_payload("inst_cancel"))
+
+    assert res == {"ignored": True, "reason": "instance_status=CANCELED",
+                   "instance_code": "inst_cancel"}
+    assert created == []
+
+
+def test_dry_run_still_gated_by_instance_status(monkeypatch):
+    """回归：dry-run 模式同样受实例级门禁约束——实例 PENDING 时连 dry-run 结果都不产出。"""
+    from core import ram_approval
+
+    created = _approval_env(monkeypatch, dry_run=True)
+    dry_calls = []
+    monkeypatch.setattr(ram_approval, "dry_run_account_result",
+                        lambda req: dry_calls.append(req.login_name))
+    detail = _detail(_valid_form(), approval_code="approval_code_x",
+                     instance_code="inst_dry", status="PENDING")
+    monkeypatch.setattr(ram_approval, "fetch_approval_instance", lambda code: detail)
+
+    res = ram_approval.handle_approval_event(_node_pass_payload("inst_dry"))
+
+    assert res == {"ignored": True, "reason": "instance_status=PENDING",
+                   "instance_code": "inst_dry"}
+    assert created == []
+    assert dry_calls == []
