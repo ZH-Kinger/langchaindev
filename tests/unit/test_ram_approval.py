@@ -1116,3 +1116,124 @@ def test_dry_run_still_gated_by_instance_status(monkeypatch):
                    "instance_code": "inst_dry"}
     assert created == []
     assert dry_calls == []
+
+
+# ---------------------------------------------------------------------------
+# 火山主账号 ID account_id 规范成 str（bug #55 次 bug）
+# 火山 IAM SDK 返回 account_id 为 int → RamAccountResult.account_id 声明是 str，
+# 若原样存 int，_account_delivery_text 拼 "\n".join(section_lines) 时报
+#   TypeError: sequence item 9: expected str instance, int found
+# → 建号成功但"结果通知/凭证下发"崩、申请人收不到账号信息。
+# 修复：create_volcano_iam_account 两处 account_id 外包 str(...)（line 527/539）。
+# ---------------------------------------------------------------------------
+
+_VOLC_INT_ACCOUNT_ID = 2111674479  # 火山真机返回形态：纯数字 int
+
+
+class _VolcanoClientIntCreate(FakeVolcanoIamClient):
+    """create_user 返回 account_id 为 int（模拟火山 SDK 真实返回）。
+    get_user 沿用父类：抛 NotFound.User → 走 create 分支（line 539）。"""
+
+    def create_user(self, req):
+        self.calls.append(("create_user", req.user_name))
+        self.create_user_req = req
+        return SimpleNamespace(user=SimpleNamespace(
+            account_id=_VOLC_INT_ACCOUNT_ID, user_name=req.user_name))
+
+
+class _VolcanoClientIntExisting(FakeVolcanoIamClient):
+    """get_user 命中已存在用户、account_id 为 int（覆盖 line 527 existing 分支）。"""
+
+    def get_user(self, req):
+        self.calls.append(("get_user", req.user_name))
+        return SimpleNamespace(user=SimpleNamespace(
+            account_id=_VOLC_INT_ACCOUNT_ID, user_name=req.user_name))
+
+
+def _volc_req():
+    from core.ram_approval import RamAccountRequest
+    return RamAccountRequest(
+        login_name="volcuser",
+        display_name="Volc User",
+        email="volc@example.com",
+        mobile_phone="86-13800138000",
+        password="P@ssw0rd123",
+        platforms=("volcano_iam",),
+        console_access=True,
+        permanent_access_key=True,
+    )
+
+
+def test_volcano_create_coerces_int_account_id_to_str():
+    """核心回归：火山 SDK create_user 返回 int account_id → 结果里必须是 str。
+    旧版（无 str() 包裹）此处 account_id 会是 int 2111674479，下游 join 崩。"""
+    from core.ram_approval import create_volcano_iam_account
+
+    result = create_volcano_iam_account(_volc_req(), client=_VolcanoClientIntCreate())
+
+    assert result.created_user is True
+    assert isinstance(result.account_id, str)
+    assert result.account_id == "2111674479"
+
+
+def test_volcano_existing_coerces_int_account_id_to_str():
+    """回归：已存在用户分支（line 527）同样把 int account_id 规范成 str。"""
+    from core.ram_approval import create_volcano_iam_account
+
+    result = create_volcano_iam_account(_volc_req(), client=_VolcanoClientIntExisting())
+
+    assert "volcano_iam_user_exists" in result.skipped
+    assert isinstance(result.account_id, str)
+    assert result.account_id == "2111674479"
+
+
+def test_account_delivery_text_survives_numeric_account_id():
+    """锁死 bug：走 create_volcano_iam_account 拿到含数字主账号 ID 的 result，
+    再拼结果通知文本——旧版（account_id 为 int）这一步会
+    TypeError: sequence item 9: expected str instance, int found；
+    修复后返回是 str、含账号 ID 文本、且带"所属主账号ID"行、不抛异常。"""
+    from core import ram_approval
+    from core.ram_approval import create_volcano_iam_account
+
+    req = _volc_req()
+    result = create_volcano_iam_account(req, client=_VolcanoClientIntCreate())
+
+    # 前置健全性：确认 account_id 已被规范成 str（若回退成 int，下面 join 会崩）
+    assert isinstance(result.account_id, str)
+
+    text = ram_approval._account_delivery_text(req, result)
+
+    assert isinstance(text, str)
+    assert "2111674479" in text
+    assert "所属主账号ID" in text          # account_id 非空 → 出现该行（index 9 即此值）
+    assert "volc_ak" in text              # AccessKey 段仍在，join 未中断
+
+
+def test_account_delivery_text_skips_empty_account_id():
+    """回归：account_id 为空（""）时 `if item.account_id:` 分支跳过——
+    不出现"所属主账号ID"行、不崩。"""
+    from core import ram_approval
+    from core.ram_approval import RamAccountRequest, RamAccountResult
+
+    req = RamAccountRequest(
+        login_name="volcuser",
+        email="volc@example.com",
+        mobile_phone="86-13800138000",
+        password="pw",
+        platforms=("volcano_iam",),
+        console_access=True,
+    )
+    result = RamAccountResult(
+        user_name="volcuser",
+        platform=ram_approval.PLATFORM_VOLCANO_IAM,
+        platform_label=ram_approval.PLATFORM_LABELS[ram_approval.PLATFORM_VOLCANO_IAM],
+        account_id="",                    # 空 → 应跳过主账号 ID 行
+        access_key_id="volc_ak",
+        access_key_secret="volc_sk",
+    )
+
+    text = ram_approval._account_delivery_text(req, result)
+
+    assert isinstance(text, str)
+    assert "所属主账号ID" not in text
+    assert "volc_ak" in text

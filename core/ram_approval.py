@@ -524,7 +524,7 @@ def create_volcano_iam_account(
     try:
         resp = client.get_user(models.GetUserRequest(user_name=req.login_name))
         existing_user = getattr(resp, "user", None)
-        result.account_id = getattr(existing_user, "account_id", "") or ""
+        result.account_id = str(getattr(existing_user, "account_id", "") or "")
         result.skipped.append("volcano_iam_user_exists")
     except Exception as exc:
         if _volcano_is_not_exist(exc):
@@ -536,7 +536,7 @@ def create_volcano_iam_account(
                 description=_comments(req) or None,
             ))
             user = getattr(resp, "user", None)
-            result.account_id = getattr(user, "account_id", "") or ""
+            result.account_id = str(getattr(user, "account_id", "") or "")  # 火山返回 int，规范成 str 免 join 崩
             result.created_user = True
         elif _volcano_is_already_exists(exc):
             result.skipped.append("volcano_iam_user_exists")
