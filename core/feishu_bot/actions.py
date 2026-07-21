@@ -1302,6 +1302,118 @@ def _h_retry_ssh_transfer(action_val, open_id, chat_id, form_value):
     return _h_confirm_ssh_transfer({"job_id": job_id}, open_id, chat_id, form_value, reply_v2=False)
 
 
+def _cfg_pfs_chat() -> str:
+    return settings.PFS_TRANSFER_CHAT_ID or settings.FEISHU_CHAT_ID
+
+
+def _h_submit_pfs_transfer(action_val, open_id, chat_id, form_value):
+    """PFS 直传录入卡提交 → 后台解析 + 审批判定 → 推确认卡。PFS 无测大小工具，用用户填的预估量；空=未知→需审批。"""
+    fv = form_value or {}
+    source = (fv.get("source") or "").strip()
+    dest = (fv.get("dest") or "").strip()
+    size_tb_raw = (fv.get("size_tb") or "").strip()
+    if not source or not dest:
+        return {"toast": {"type": "error", "content": "请填写源和目的 PFS 地址"}}
+
+    def _do() -> None:
+        from core.dsw_scheduler import _send_card, _send_text
+        from core.pfs_transfer import orchestrator, paths
+        from core.pfs_transfer.cards import confirm_card
+        try:
+            plan = paths.build_plan(source, dest)
+            job = orchestrator.create_job_record(plan, open_id=open_id)
+            try:
+                size_tb = float(size_tb_raw) if size_tb_raw else None
+            except ValueError:
+                size_tb = None
+            job["approx_bytes"] = int(size_tb * (1024 ** 4)) if size_tb is not None else 0
+            job["size_known"] = size_tb is not None
+            orchestrator._save(job)
+            # 治理收紧：确认一律需管理员 → 卡片恒标"仅管理员可确认"（自报量只作显示，不作门禁）。
+            _send_card(open_id, _cfg_pfs_chat(), confirm_card(job, need_approval=True))
+        except paths.PfsPathError as e:
+            _send_text(open_id, _cfg_pfs_chat(), f"❌ 路径/配置错误：{e}")
+        except Exception as e:
+            logger.error("[PFS] submit failed", exc_info=True)
+            _send_text(open_id, _cfg_pfs_chat(), f"❌ 请求处理失败：{e}")
+
+    threading.Thread(target=_do, daemon=True).start()
+    return {"toast": {"type": "success", "content": "正在解析，稍候推送确认卡"}}
+
+
+def _h_confirm_pfs_transfer(action_val, open_id, chat_id, form_value, *, reply_v2=True):
+    """确认下发：NX 锁防连点 + 后台跑 3 段链 + 终态经闸门推结果卡。确认卡(2.0)→progress_card_v2(2.0)；
+    retry(1.0 结果卡)→reply_v2=False 只回 toast（避 200830）。"""
+    job_id = action_val.get("job_id", "") if isinstance(action_val, dict) else ""
+    if not job_id:
+        return {"toast": {"type": "error", "content": "缺少任务 ID"}}
+    from core.pfs_transfer import orchestrator
+    from core.pfs_transfer.cards import progress_card_v2
+    job = orchestrator.get_job(job_id)
+    if not job:
+        return {"toast": {"type": "error", "content": "任务不存在或已过期"}}
+    if job["stage"] not in (orchestrator.STAGE_NEW, orchestrator.STAGE_FAILED):
+        return {"toast": {"type": "info", "content": f"任务已在 {job['stage']}，无需重复"}}
+    # 治理收紧（用户拍板 MED-2）：自报预估量可篡改、不可信 → 确认下发**一律**需管理员，
+    # 不论自报大小；自报量只用于卡片显示。堵住"非管理员自报小值绕过审批"。
+    if open_id != settings.ADMIN_FEISHU_OPEN_ID:
+        return {"toast": {"type": "error", "content": "PFS 跨云直传需管理员确认下发，请联系管理员。"}}
+    try:
+        from utils.redis_client import get_redis
+        if not get_redis().set(f"pfs:transfer:launch:{job_id}", 1, nx=True, ex=120):
+            return {"toast": {"type": "info", "content": "任务已下发，请勿重复点击"}}
+    except Exception:
+        pass
+    if open_id and not job.get("created_by"):
+        job["created_by"] = open_id
+    job["launched"] = True
+    job["stage"] = orchestrator.STAGE_NEW       # run_to_completion 跳过已成功段续跑
+    orchestrator._save(job)
+
+    def _do_run() -> None:
+        from core.dsw_scheduler import _send_card, _send_text, _claim_dataflow_notify
+        from core.pfs_transfer.cards import result_card, progress_card_v2 as _pc
+        try:
+            def _on_update(j):
+                if j["stage"] in (orchestrator.STAGE_DONE, orchestrator.STAGE_FAILED):
+                    if _claim_dataflow_notify(j["job_id"]):
+                        _send_card(j.get("created_by", ""), _cfg_pfs_chat(), result_card(j))
+                else:
+                    _send_card(j.get("created_by", ""), _cfg_pfs_chat(), _pc(j))
+            orchestrator.run_to_completion(job, on_update=_on_update)
+        except Exception as e:
+            logger.error("[PFS] execute failed job=%s", job_id, exc_info=True)
+            _send_text(job.get("created_by", ""), _cfg_pfs_chat(), f"❌ 任务 {job_id} 失败：{e}")
+
+    threading.Thread(target=_do_run, daemon=True).start()
+    if not reply_v2:
+        return {"toast": {"type": "success", "content": f"已重新下发，任务 {job_id}"}}
+    disp = dict(job)
+    disp["stage"] = orchestrator.STAGE_SINKING
+    return {"toast": {"type": "success",
+                      "content": f"已下发，任务 {job_id}；发送「查询进度 {job_id}」看进度"},
+            "card": {"type": "raw", "data": progress_card_v2(disp)}}
+
+
+def _h_retry_pfs_transfer(action_val, open_id, chat_id, form_value):
+    job_id = action_val.get("job_id", "") if isinstance(action_val, dict) else ""
+    from core.pfs_transfer import orchestrator
+    job = orchestrator.get_job(job_id) if job_id else None
+    if not job:
+        return {"toast": {"type": "error", "content": "任务不存在或已过期"}}
+    # 保留 sink_done/cross_done/preheat_done：从失败段续跑，不重跑已成功段。
+    job["stage"] = orchestrator.STAGE_NEW
+    job["error"] = ""
+    job["launched"] = False
+    orchestrator._save(job)
+    try:
+        from utils.redis_client import get_redis
+        get_redis().delete(f"pfs:transfer:launch:{job_id}", f"dataflow:notified:{job_id}")
+    except Exception:
+        pass
+    return _h_confirm_pfs_transfer({"job_id": job_id}, open_id, chat_id, form_value, reply_v2=False)
+
+
 _ACTION_HANDLERS = {
     "mfu_region":         _h_mfu_region,
     "submit_ak_register": _h_submit_ak_register,
@@ -1324,6 +1436,9 @@ _ACTION_HANDLERS = {
     "submit_ssh_transfer":  _h_submit_ssh_transfer,
     "confirm_ssh_transfer": _h_confirm_ssh_transfer,
     "retry_ssh_transfer":   _h_retry_ssh_transfer,
+    "submit_pfs_transfer":  _h_submit_pfs_transfer,
+    "confirm_pfs_transfer": _h_confirm_pfs_transfer,
+    "retry_pfs_transfer":   _h_retry_pfs_transfer,
     "pick_cloud_aliyun":     _h_pick_cloud_aliyun,
     "pick_cloud_volcano":    _h_pick_cloud_volcano,
     "pick_region_aliyun":    _h_pick_region_aliyun,

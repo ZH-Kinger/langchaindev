@@ -262,6 +262,18 @@ class Config:
     # 剥掉它避免把 `vepfs` 当真实目录名拼进去（多套一层 vepfs/）。同 CPFS_MOUNT_PREFIX。
     VEPFS_MOUNT_PREFIX      = os.environ.get("VEPFS_MOUNT_PREFIX", "/vepfs")
 
+    # PFS↔PFS 跨云直传（vePFS↔CPFS 三段链编排：源 PFS 沉降→跨云→目的 PFS 预热）。
+    # 物理无直连，编排层串已有三段引擎（vepfs_dataflow / transfer / cpfs_dataflow）。
+    PFS_TRANSFER_ENABLED    = os.environ.get("PFS_TRANSFER_ENABLED", "false").lower() == "true"
+    # PFS fs → 本云 staging 桶+region+prefix[+dataflow_id]（JSON）。key=<pfs-scheme>://<fs-id>。
+    # 现有 TRANSFER_BUCKET_MAP（桶→桶）不适配，直传需 PFS→桶+region+prefix 维度。示例：
+    # {"vepfs://fs-xx":{"region":"cn-beijing","tos_bucket":"b","tos_prefix":"pfs-staging/"},
+    #  "cpfs://fs-yy":{"region":"cn-hangzhou","oss_bucket":"o","oss_prefix":"pfs-staging/","dataflow_id":"df-x"}}
+    PFS_STAGING_MAP_RAW     = os.environ.get("PFS_STAGING_MAP", "{}")
+    PFS_TRANSFER_APPROVAL_TB = float(os.environ.get("PFS_TRANSFER_APPROVAL_TB", "1"))   # 整链入口审批阈值（TB）
+    PFS_TRANSFER_STAGING_CLEANUP = os.environ.get("PFS_TRANSFER_STAGING_CLEANUP", "false").lower() == "true"
+    PFS_TRANSFER_CHAT_ID    = os.environ.get("PFS_TRANSFER_CHAT_ID", "")                # 留空回退 FEISHU_CHAT_ID
+
     # 容量巡检（OSS + TOS 目录大小定时盘点 → 飞书主动推送）
     # 默认关闭，opt-in；TARGETS 为 JSON 数组，每项 {vendor,bucket,prefix[,region]}
     CAPACITY_MONITOR_ENABLED = os.environ.get("CAPACITY_MONITOR_ENABLED", "false").lower() == "true"
@@ -378,6 +390,15 @@ class Config:
             val = getattr(self, field, None)
             if not val:
                 missing.append((field, impact))
+        # PFS 直传启用但 staging map 实为空 → 告警（默认 "{}" 是非空串，_REQUIRED_FIELDS 的 not val 抓不到）。
+        if self.PFS_TRANSFER_ENABLED:
+            import json
+            try:
+                _m = json.loads(self.PFS_STAGING_MAP_RAW or "{}")
+            except Exception:
+                _m = {}
+            if not _m:
+                missing.append(("PFS_STAGING_MAP", "PFS↔PFS 直传无法定位中转桶，功能不可用"))
         return missing
 
     def print_validate(self) -> None:

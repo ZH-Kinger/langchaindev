@@ -204,6 +204,18 @@ def _is_ssh_transfer_intent(text: str) -> bool:
     return "泰国" in compact and ("迁移" in compact or "h200" in compact)
 
 
+# PFS 跨云直传（vePFS↔CPFS）：同时提到两种 PFS 名 = 明确 PFS↔PFS（区别于只提一个 PFS+对象存储的
+# 预热/沉降）；或含明确直传词。须排在预热/沉降入口之前，避免被 _is_sink_preheat_entry_intent 吃掉。
+_PFS_TRANSFER_WORDS = ("pfs直传", "pfs跨云", "跨云pfs", "pfs互传", "pfs之间")
+
+
+def _is_pfs_transfer_intent(text: str) -> bool:
+    compact = re.sub(r"\s+", "", text or "").lower()
+    if "vepfs" in compact and "cpfs" in compact:
+        return True
+    return any(w in compact for w in _PFS_TRANSFER_WORDS)
+
+
 def _is_transfer_entry_intent(text: str) -> bool:
     """命中录入关键词且没带路径（带路径走 _is_transfer_intent 直接解析）。"""
     if _extract_transfer_paths(text)[0]:
@@ -257,7 +269,7 @@ def _is_volcano_account_query_entry_intent(text: str) -> bool:
 
 # 进度查询：拦在 Agent 之前，避免 LLM 劫持 + 吃旧会话历史
 _PROGRESS_QUERY_RE = re.compile(r"(查询进度|进度查询|查进度|任务进度|查询任务)")
-_JOB_ID_RE = re.compile(r"\b(vepfs-[0-9a-fA-F]{6,}|cpfs-[0-9a-fA-F]{6,}|tr-[0-9a-fA-F]{6,}|sgp-[0-9a-fA-F]{6,})\b")
+_JOB_ID_RE = re.compile(r"\b(vepfs-[0-9a-fA-F]{6,}|cpfs-[0-9a-fA-F]{6,}|tr-[0-9a-fA-F]{6,}|sgp-[0-9a-fA-F]{6,}|xpfs-[0-9a-fA-F]{6,})\b")
 
 
 def _is_progress_query_text(text: str) -> bool:
@@ -283,6 +295,9 @@ def _push_terminal_result_card(chain: str, jid: str, job: dict) -> None:
         elif chain == "ssh":
             from core.ssh_transfer.cards import result_card
             chat = actions._cfg_ssh_chat()
+        elif chain == "pfs":
+            from core.pfs_transfer.cards import result_card
+            chat = actions._cfg_pfs_chat()
         else:
             from core.transfer.cards import result_card
             chat = actions._cfg_chat()
@@ -331,6 +346,17 @@ def _handle_progress_query(message_id: str, text: str, open_id: str = "") -> Non
                 messaging._feishu_reply(message_id, f"未找到任务 `{jid}`（可能已过期）。")
                 return
             msg = (f"任务 `{jid}`：**{job['stage']}** {o.stage_label(job['stage'])}\n"
+                   f"进度 {o.progress_line(job)}"
+                   + (f"\n错误：{job['error']}" if job.get('error') else ""))
+        elif jid.lower().startswith("xpfs-"):
+            from core.pfs_transfer import orchestrator as o
+            chain = "pfs"
+            job = o.refresh(jid) or o.get_job(jid)   # 实时重查（定位当前段续推，自愈重启死掉的线程）
+            if not job:
+                messaging._feishu_reply(message_id, f"未找到任务 `{jid}`（可能已过期）。")
+                return
+            msg = (f"任务 `{jid}`：**{job['stage']}** {job.get('direction','')}\n"
+                   f"段完成 沉降={job.get('sink_done')} 跨云={job.get('cross_done')} 预热={job.get('preheat_done')}\n"
                    f"进度 {o.progress_line(job)}"
                    + (f"\n错误：{job['error']}" if job.get('error') else ""))
         else:  # tr-
@@ -655,6 +681,13 @@ def _process_message(message_id: str, chat_id: str, user_text: str, open_id: str
         return
 
     # ③ 跨云迁移录入意图（纯关键词、无路径）→ 弹录入卡让用户填地址
+    # PFS 跨云直传（vePFS↔CPFS）：排在预热/沉降与 transfer/ssh 意图之前——「同时提到两种 PFS」
+    # 是 PFS↔PFS 直传的明确信号，须先拦，避免被单 PFS 的预热/沉降或泛「迁移」词抢走。
+    if settings.PFS_TRANSFER_ENABLED and _is_pfs_transfer_intent(user_text):
+        from core.pfs_transfer.cards import entry_card
+        messaging._feishu_reply_card(message_id, entry_card())
+        return
+
     # 桶间迁移（同云一次性搬运）→ 弹桶间迁移卡（排在跨云迁移意图之前，避免"迁移"被抢）
     # SSH 迁移链（泰国H200）：排在跨云 transfer 意图之前——「数据迁移」会被 transfer 入口误抢。
     if _is_ssh_transfer_intent(user_text):

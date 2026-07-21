@@ -15,6 +15,7 @@ from .aliyun import (
 from .volcano import tos_tool, vepfs_dataflow_tool
 from .transfer import transfer_tool
 from .cpfs import cpfs_dataflow_tool
+from .pfs_transfer import pfs_transfer_tool
 from .feishu import feishu_tool
 from .jira import jira_tool, jira_workflow_tool
 from .github import github_workflow_tool
@@ -46,6 +47,8 @@ ALL_TOOLS = [
     transfer_tool,
     # ── CPFS 预热/沉降 ───────────────────────────────────────
     cpfs_dataflow_tool,
+    # ── PFS 跨云直传（vePFS↔CPFS 3 段链）─────────────────────
+    pfs_transfer_tool,
     # ── 飞书 / Jira / GitHub ─────────────────────────────────
     feishu_tool,
     jira_tool,
@@ -80,6 +83,7 @@ TOOL_GROUPS = {
     "transfer":  {"manage_transfer"},
     "cpfs":      {"manage_cpfs_dataflow"},
     "vepfs":     {"manage_vepfs_dataflow"},
+    "pfs_transfer": {"manage_pfs_transfer"},
 }
 
 # 启动时校验 TOOL_GROUPS 中的名字与 ALL_TOOLS 一致，防止静默路由失效

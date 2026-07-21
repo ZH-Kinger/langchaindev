@@ -844,6 +844,7 @@ def _dataflow_reconcile_specs() -> list[dict]:
     from core.vepfs_dataflow import orchestrator as ve, cards as vec
     from core.bucket_transfer import orchestrator as bk, cards as bkc
     from core.ssh_transfer import orchestrator as sh, cards as shc
+    from core.pfs_transfer import orchestrator as pf, cards as pfc
     return [
         {"name": "transfer", "o": tr, "cards": trc, "active": {tr.STAGE_CROSSING},
          "chat": lambda: settings.TRANSFER_CHAT_ID or settings.FEISHU_CHAT_ID, "cleanup": None},
@@ -856,6 +857,10 @@ def _dataflow_reconcile_specs() -> list[dict]:
          "chat": lambda: settings.TRANSFER_CHAT_ID or settings.FEISHU_CHAT_ID, "cleanup": None},
         {"name": "ssh", "o": sh, "cards": shc, "active": {sh.STAGE_STAGE1, sh.STAGE_STAGE2},
          "chat": lambda: settings.SSH_TRANSFER_CHAT_ID or settings.FEISHU_CHAT_ID, "cleanup": None},
+        # pfs（三段链）：refresh 定位当前段续推，同 ssh 例外——重启后续跑靠 stale 门 + NX 锁，幂等安全。
+        {"name": "pfs", "o": pf, "cards": pfc,
+         "active": {pf.STAGE_SINKING, pf.STAGE_CROSSING, pf.STAGE_PREHEATING},
+         "chat": lambda: settings.PFS_TRANSFER_CHAT_ID or settings.FEISHU_CHAT_ID, "cleanup": None},
     ]
 
 
