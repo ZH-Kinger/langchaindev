@@ -24,6 +24,8 @@ def enabled_full(monkeypatch):
     monkeypatch.setattr(settings, "TEMP_AK_APPROVAL_CODE", "code")
     monkeypatch.setattr(settings, "TEMP_AK_OSS_ROLE_ARN", "acs:ram::1:role/w")
     monkeypatch.setattr(settings, "ALIYUN_ACCESS_KEY_ID", "LTAI_x")
+    # STS 分支默认启用（>0）→ OSS_ROLE_ARN 参与校验（部分用例依赖，固定住不受 .env 影响）
+    monkeypatch.setattr(settings, "TEMP_AK_STS_MAX_SECONDS", 43200)
 
 
 def _temp_ak_missing(missing):
@@ -62,6 +64,29 @@ def test_enabled_all_empty_warns_all(enabled_full, monkeypatch):
     for f in _CHECKS:
         monkeypatch.setattr(settings, f, "")
     assert _temp_ak_missing(settings.validate()) == set(_CHECKS)
+
+
+def test_oss_role_not_validated_when_sts_disabled(enabled_full, monkeypatch):
+    """用户放弃 STS：TEMP_AK_STS_MAX_SECONDS=0（全走方案B）→ 不校验 TEMP_AK_OSS_ROLE_ARN。"""
+    monkeypatch.setattr(settings, "TEMP_AK_STS_MAX_SECONDS", 0)
+    monkeypatch.setattr(settings, "TEMP_AK_OSS_ROLE_ARN", "")   # 缺角色也不告警
+    fields = {f for f, _ in settings.validate()}
+    assert "TEMP_AK_OSS_ROLE_ARN" not in fields
+    # APPROVAL_CODE / ALIYUN_ACCESS_KEY_ID 仍恒查：空则仍告警
+    monkeypatch.setattr(settings, "TEMP_AK_APPROVAL_CODE", "")
+    monkeypatch.setattr(settings, "ALIYUN_ACCESS_KEY_ID", "")
+    fields2 = {f for f, _ in settings.validate()}
+    assert "TEMP_AK_APPROVAL_CODE" in fields2
+    assert "ALIYUN_ACCESS_KEY_ID" in fields2
+    assert "TEMP_AK_OSS_ROLE_ARN" not in fields2
+
+
+def test_oss_role_validated_when_sts_enabled(enabled_full, monkeypatch):
+    """STS 启用（STS_MAX>0）→ 缺 TEMP_AK_OSS_ROLE_ARN 仍告警。"""
+    monkeypatch.setattr(settings, "TEMP_AK_STS_MAX_SECONDS", 43200)
+    monkeypatch.setattr(settings, "TEMP_AK_OSS_ROLE_ARN", "")
+    fields = {f for f, _ in settings.validate()}
+    assert "TEMP_AK_OSS_ROLE_ARN" in fields
 
 
 def test_smtp_host_no_longer_validated(enabled_full, monkeypatch):

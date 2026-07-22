@@ -18,6 +18,19 @@ from . import actions, messages, messaging
 app = Flask(__name__)
 
 
+def _approval_allowlist() -> set:
+    """允许 bot 处理的审批 definitionCode 白名单。其余审批事件（含无 code）一律丢弃——安全硬门，
+    防"收到指定之外的审批"。含：RAM 建号审批 + （启用时）临时 AK 发放/延期审批。"""
+    codes = set()
+    if settings.FEISHU_RAM_APPROVAL_CODE:
+        codes.add(settings.FEISHU_RAM_APPROVAL_CODE)
+    if settings.TEMP_AK_ENABLED:
+        for c in (settings.TEMP_AK_APPROVAL_CODE, settings.TEMP_AK_EXTEND_APPROVAL_CODE):
+            if c:
+                codes.add(c)
+    return codes
+
+
 @app.route("/feishu/event", methods=["GET", "POST"])
 def feishu_event():
     data = request.get_json(silent=True) or {}
@@ -71,17 +84,29 @@ def feishu_event():
             should_handle_approval,
             settings.FEISHU_RAM_APPROVAL_CODE or "-",
         )
-    # 临时 AK/SK 发放审批（独立模板 TEMP_AK_APPROVAL_CODE，严格 code 匹配）：排在 RAM 建号审批分发**之前**。
-    # ram_approval.should_handle_event 有 no-code 兜底(not code or code==target)，极端下(事件未 surface
-    # approval_code)会抢走本流→静默丢发放。temp_ak 严格 code==target 不会误抢 ram 事件，故先判、更安全。
+        # 审批白名单硬门（用户要求）：只处理明确配置的审批 definitionCode，其余审批事件——**包括未带
+        # approval_code 的**——一律记日志丢弃。这也收紧了 ram_approval 的无-code 兜底：凡不在白名单内的
+        # 审批一概不进任何处理器，杜绝"收到我给你之外的审批"。
+        _allow = _approval_allowlist()
+        _ev_code = approval_summary.get("approval_code") or ""
+        if _ev_code not in _allow:
+            logger.info("[approval_event] 非白名单审批 code=%s 已丢弃（白名单 %d 项）",
+                        _ev_code or "-", len(_allow))
+            return jsonify({"code": 0})
+
+    # 临时 AK/SK 发放 + 延期审批（独立模板，严格 code 匹配）：排在 RAM 建号审批分发**之前**，
+    # temp_ak 严格 code==target 不会误抢 ram 事件。
     if settings.TEMP_AK_ENABLED:
         try:
             from core.temp_ak_issuance import approval as temp_ak_approval
             if temp_ak_approval.should_handle_event(data):
                 threading.Thread(
-                    target=temp_ak_approval.handle_temp_ak_event,
-                    args=(data,),
-                    daemon=True,
+                    target=temp_ak_approval.handle_temp_ak_event, args=(data,), daemon=True,
+                ).start()
+                return jsonify({"code": 0})
+            if temp_ak_approval.should_handle_extend_event(data):
+                threading.Thread(
+                    target=temp_ak_approval.handle_temp_ak_extend_event, args=(data,), daemon=True,
                 ).start()
                 return jsonify({"code": 0})
         except Exception:

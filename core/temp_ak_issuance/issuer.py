@@ -46,17 +46,17 @@ def plan(grant: dict) -> dict:
     mode = grant.get("mode") or classify_mode(grant["expire"])
     nb, exp = grant["not_before"], grant["expire"]
     src_ips = grant.get("source_ips") or None
-    reads = grant.get("read_prefixes") or []
-    writes = grant.get("write_prefixes") or []
+    prefix = grant.get("prefix", "")
+    caps = grant.get("caps") or []
     if mode == STS_MODE:
         doc = policy.build_session_policy(
-            grant["bucket"], read_prefixes=reads, write_prefixes=writes,
+            grant["bucket"], prefix=prefix, caps=caps,
             not_before=nb, expire=exp, source_ips=src_ips)
         return {"mode": STS_MODE, "duration_seconds": _sts_duration(exp),
                 "role_arn": settings.TEMP_AK_OSS_ROLE_ARN, "policy": doc,
                 "has_token": True}
     doc = policy.build_policy_with_window(
-        grant["bucket"], read_prefixes=reads, write_prefixes=writes,
+        grant["bucket"], prefix=prefix, caps=caps,
         not_before=nb, expire=exp, source_ips=src_ips)
     return {"mode": RAM_MODE, "user_name": grant["user_name"],
             "policy_name": grant["policy_name"], "policy": doc, "has_token": False}
@@ -79,8 +79,7 @@ def _issue_sts(grant: dict) -> dict:
     if not settings.TEMP_AK_OSS_ROLE_ARN:
         raise IssueError("STS 分支缺 TEMP_AK_OSS_ROLE_ARN（宽 OSS 角色）")
     doc = policy.build_session_policy(
-        grant["bucket"], read_prefixes=grant.get("read_prefixes") or [],
-        write_prefixes=grant.get("write_prefixes") or [],
+        grant["bucket"], prefix=grant.get("prefix", ""), caps=grant.get("caps") or [],
         not_before=grant["not_before"], expire=grant["expire"],
         source_ips=grant.get("source_ips") or None)
     cred = aliyun_sts.assume_role_with_policy(
@@ -111,8 +110,7 @@ def _issue_ram(grant: dict) -> dict:
 
     # 2) 建/更新时间窗 policy（不存在建、存在则新增默认版本，rotate 清旧）
     doc = policy.build_policy_with_window(
-        grant["bucket"], read_prefixes=grant.get("read_prefixes") or [],
-        write_prefixes=grant.get("write_prefixes") or [],
+        grant["bucket"], prefix=grant.get("prefix", ""), caps=grant.get("caps") or [],
         not_before=grant["not_before"], expire=grant["expire"],
         source_ips=grant.get("source_ips") or None)
     import json as _json
@@ -148,6 +146,22 @@ def _issue_ram(grant: dict) -> dict:
         "expire_ts":         float(grant["expire"]),
         "mode":              RAM_MODE,
     }
+
+
+def rewrite_ram_window(grant: dict) -> None:
+    """方案 B 延期：只改写自定义 policy 的时间窗（新版本设默认，rotate 清旧），AK/user 不变、不重发凭证。"""
+    from alibabacloud_ram20150501 import models as m
+    import json as _json
+    if not grant.get("policy_name"):
+        raise IssueError("方案 B 延期缺 policy_name")
+    client = permsync_client()
+    doc = policy.build_policy_with_window(
+        grant["bucket"], prefix=grant.get("prefix", ""), caps=grant.get("caps") or [],
+        not_before=grant["not_before"], expire=grant["expire"],
+        source_ips=grant.get("source_ips") or None)
+    client.create_policy_version(m.CreatePolicyVersionRequest(
+        policy_name=grant["policy_name"], policy_document=_json.dumps(doc, ensure_ascii=False),
+        set_as_default=True, rotate_strategy="DeleteOldestNonDefaultVersionWhenLimitExceeded"))
 
 
 def permsync_client():

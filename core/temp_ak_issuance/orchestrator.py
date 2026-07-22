@@ -125,7 +125,7 @@ def create_grant_record(spec: dict, *, instance_code: str, requester: str = "",
                         approver: str = "") -> dict:
     """据审批表单 spec 建 grant 记录（幂等：同实例返回已有记录）。
 
-    spec: {bucket(display), region?, read_prefixes, write_prefixes, not_before, expire,
+    spec: {bucket(display), region?, prefix, caps⊆{read,download,write}, not_before, expire,
            recipient_email, source_ips?, reason?}
     """
     gid = grant_id_for(instance_code)
@@ -146,8 +146,8 @@ def create_grant_record(spec: dict, *, instance_code: str, requester: str = "",
         "bucket": real_bucket,
         "bucket_display": spec["bucket"],
         "region": spec.get("region") or region,
-        "read_prefixes": sorted(set(spec.get("read_prefixes") or [])),
-        "write_prefixes": sorted(set(spec.get("write_prefixes") or [])),
+        "prefix": spec.get("prefix", ""),
+        "caps": list(spec.get("caps") or []),
         "not_before": float(spec["not_before"]),
         "expire": float(spec["expire"]),
         "recipient_email": spec.get("recipient_email", ""),
@@ -189,6 +189,44 @@ def fail_grant(grant: dict, error: str) -> None:
     _save(grant)
 
 
+def extend_grant(grant: dict, not_before, expire, *, extend_instance: str = "") -> tuple[dict, dict | None]:
+    """延期一个已发放的 grant（仅 ISSUED 可延）。返回 (grant, creds)。
+
+    方案 B（长期 AK）：只改写 policy 时间窗，AK/SK 不变 → creds=None（不重发）。
+    STS：原 token 已自灭，按新窗重签发（新窗 >12h 自动转方案 B）→ creds=新凭证（需重发）。
+    """
+    if grant["stage"] != STAGE_ISSUED:
+        raise TempAkError(f"凭证当前状态 {grant['stage']}，仅 ISSUED 可延期")
+    now = time.time()
+    if float(expire) <= now:
+        raise TempAkError("新到期时间已过")
+    if not_before and float(not_before) >= float(expire):
+        raise TempAkError("新生效时间必须早于到期时间")
+    if not not_before:
+        not_before = grant.get("not_before") or now
+    old_expire = grant.get("expire")
+    grant["not_before"] = float(not_before)
+    grant["expire"] = float(expire)
+
+    if grant["mode"] == issuer.RAM_MODE:
+        issuer.rewrite_ram_window(grant)          # 同 AK 改写时间窗，不重发凭证
+        creds = None
+    else:  # STS：原 token 已自灭 → 按新窗重签发（新窗 >12h 自动转方案 B 发长期 AK）
+        grant["mode"] = issuer.classify_mode(grant["expire"], now)
+        if grant["mode"] == issuer.RAM_MODE and not grant.get("policy_name"):
+            grant["policy_name"] = issuer.policy.POLICY_PREFIX + grant["user_name"]
+        creds = issuer.issue(grant)
+        if grant["mode"] == issuer.RAM_MODE:
+            grant["ak_id"] = creds.get("access_key_id", "")
+
+    grant.setdefault("extends", []).append(
+        {"at": now, "old_expire": old_expire, "new_expire": grant["expire"]})
+    if extend_instance:
+        grant.setdefault("extend_instances", []).append(extend_instance)
+    _save(grant)
+    return grant, creds
+
+
 # ── 展示助手（供卡片/CLI/工具）──────────────────────────────────────────────────
 
 def fmt_ts(epoch: float) -> str:
@@ -201,7 +239,10 @@ def fmt_window(grant: dict) -> str:
     return f"{fmt_ts(grant.get('not_before'))} → {fmt_ts(grant.get('expire'))}"
 
 
+_CAP_CN = {"read": "列", "download": "下载", "write": "上传"}
+
+
 def scope_line(grant: dict) -> str:
-    r = ", ".join(x or "<整桶>" for x in grant.get("read_prefixes") or []) or "—"
-    w = ", ".join(x or "<整桶>" for x in grant.get("write_prefixes") or []) or "—"
-    return f"桶 `{grant.get('bucket')}` 读[{r}] 写[{w}]"
+    caps = "/".join(_CAP_CN.get(c, c) for c in (grant.get("caps") or [])) or "—"
+    p = grant.get("prefix") or "<整桶>"
+    return f"桶 `{grant.get('bucket')}` 目录 `{p}` 权限[{caps}]"

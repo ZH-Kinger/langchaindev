@@ -26,6 +26,13 @@ _FIELDS = {
     "directory":     ("TEMP_AK_FIELD_DIRECTORY",     ("申请目录", "目录", "路径", "directory", "widget17846402564230001")),
 }
 
+# 延期审批「访问凭证延长申请」3 控件：凭证ID / 使用企业信息 / DateInterval（含真机 widget id）。
+_EXTEND_FIELDS = {
+    "grant_id":      ("TEMP_AK_FIELD_GRANT_ID",      ("凭证ID", "凭证编号", "任务ID", "grant_id", "widget17846399101070001")),
+    "enterprise":    ("TEMP_AK_FIELD_ENTERPRISE",    ("使用企业信息", "使用企业名称", "企业信息", "企业名称", "enterprise", "widget17846914004480001")),
+    "date_interval": ("TEMP_AK_FIELD_DATE_INTERVAL", ("DateInterval", "有效期", "生效到期", "date_interval", "widget17846911942480001")),
+}
+
 
 def should_handle_event(payload: dict[str, Any]) -> bool:
     """精确匹配 TEMP_AK_APPROVAL_CODE。要求 code 恰等于本模板（不做 no-code 兜底），
@@ -99,6 +106,107 @@ def handle_temp_ak_event(payload: dict[str, Any]) -> dict[str, Any]:
         orchestrator.release(lock)
 
 
+# ── 延期审批（独立模板 TEMP_AK_EXTEND_APPROVAL_CODE「访问凭证延长申请」）────────────────
+
+def should_handle_extend_event(payload: dict[str, Any]) -> bool:
+    from core import ram_approval
+    target = settings.TEMP_AK_EXTEND_APPROVAL_CODE
+    if not target:
+        return False
+    et = ram_approval._event_type(payload).lower()
+    code = ram_approval._extract_approval_code(payload)
+    if "approval" not in et and not code:
+        return False
+    return code == target
+
+
+def handle_temp_ak_extend_event(payload: dict[str, Any]) -> dict[str, Any]:
+    from core import ram_approval
+    if not should_handle_extend_event(payload):
+        return {"ignored": True, "reason": "not_temp_ak_extend"}
+    status = (ram_approval._extract_status(payload) or "").upper()
+    if status and status not in ram_approval.APPROVED_STATUSES:
+        return {"ignored": True, "reason": f"status={status}"}
+    instance_code = ram_approval._extract_instance_code(payload)
+    if not status and not instance_code:
+        return {"ignored": True, "reason": "no_status_no_instance"}
+    lock = orchestrator.claim(instance_code)
+    if instance_code and not lock:
+        return {"ignored": True, "reason": "already_processing"}
+    try:
+        # 门禁同发放：只认回拉实例详情顶层实例级 status=="APPROVED"、无 instance_code fail-safe 不动。
+        if not instance_code:
+            return {"ignored": True, "reason": "no_instance_code"}
+        detail = ram_approval.fetch_approval_instance(instance_code)
+        instance_status = str((detail or {}).get("status") or "").strip().upper()
+        if instance_status != "APPROVED":
+            logger.info("[temp_ak] extend instance NOT approved (status=%s) instance=%s; skip",
+                        instance_status or "-", instance_code)
+            return {"ignored": True, "reason": f"instance_status={instance_status or 'none'}"}
+        code = ram_approval._extract_approval_code(detail) or ram_approval._extract_approval_code(payload)
+        if code and code != settings.TEMP_AK_EXTEND_APPROVAL_CODE:
+            return {"ignored": True, "reason": "approval_code_mismatch"}
+
+        grant_id, enterprise, not_before, expire = parse_temp_ak_extend_request(detail, payload)
+        grant = orchestrator.get_grant(grant_id)
+        if not grant:
+            raise orchestrator.TempAkError(f"未找到凭证 {grant_id}（可能已过期/清理，请重新发起发放）")
+        if grant.get("stage") == orchestrator.STAGE_REVOKED:
+            raise orchestrator.TempAkError(f"凭证 {grant_id} 已到期清理，请重新发起发放审批")
+        _verify_enterprise(grant, enterprise)
+        if instance_code in (grant.get("extend_instances") or []):
+            return {"ignored": True, "reason": "extend_already_applied", "grant_id": grant_id}
+
+        grant, creds = orchestrator.extend_grant(grant, not_before, expire, extend_instance=instance_code)
+        delivery.deliver_extend(grant, creds)
+        return {"ignored": False, "grant_id": grant_id, "mode": grant["mode"]}
+    except Exception as exc:
+        logger.error("[temp_ak] extend failed instance=%s", instance_code, exc_info=True)
+        _notify_internal_failure(instance_code, exc)
+        return {"ignored": False, "error": str(exc)}
+    finally:
+        orchestrator.release(lock)
+
+
+def parse_temp_ak_extend_request(detail: dict[str, Any], payload: dict[str, Any]):
+    from core import ram_approval
+    values = ram_approval.extract_form_values(detail)
+
+    def field(key: str):
+        env_name, aliases = _EXTEND_FIELDS[key]
+        specs = ram_approval._split_specs(getattr(settings, env_name, ""))
+        for spec in specs + list(aliases):
+            if spec in values.by_id:
+                return values.by_id[spec]
+            if spec in values.by_name:
+                return values.by_name[spec]
+        return None
+
+    grant_id = ram_approval._as_text(field("grant_id")).strip()
+    enterprise = ram_approval._as_text(field("enterprise")).strip()
+    not_before, expire = _parse_date_interval(field("date_interval"))
+    if not grant_id:
+        raise orchestrator.TempAkError("延期审批缺少凭证ID")
+    if not expire:
+        raise orchestrator.TempAkError("延期审批缺少新的到期时间（DateInterval）")
+    return grant_id, enterprise, not_before, expire
+
+
+def _verify_enterprise(grant: dict, enterprise: str) -> None:
+    """防串企业：延期表单的使用企业信息须与原凭证一致（宽松包含匹配容错格式差异）。
+
+    fail-safe：原凭证有企业名而延期表单留空 → 无法核实归属 → 拒（否则引用别家 grant_id + 留空即绕过防串）。
+    仅当原凭证本身无企业名时才跳过（无可比对象）。"""
+    orig = (grant.get("enterprise") or "").strip()
+    ent = (enterprise or "").strip()
+    if not orig:
+        return
+    if not ent:
+        raise orchestrator.TempAkError("延期申请缺少使用企业信息，无法核实凭证归属，拒绝延期")
+    if orig != ent and orig not in ent and ent not in orig:
+        raise orchestrator.TempAkError(f"使用企业信息与原凭证不符（原：{orig}），拒绝延期")
+
+
 # ── 表单解析（真机 5 控件：平台/使用企业名称/权限设置/DateInterval/申请目录）──────────
 
 def parse_temp_ak_request(detail: dict[str, Any], payload: dict[str, Any]) -> dict:
@@ -117,19 +225,16 @@ def parse_temp_ak_request(detail: dict[str, Any], payload: dict[str, Any]) -> di
 
     platform = _parse_platform(field("platform"))
     enterprise = ram_approval._as_text(field("enterprise")).strip()
-    perm = _parse_perm(field("perm"))                 # {"read":bool,"write":bool}
+    caps = _parse_perm(field("perm"))                 # ⊆ {read(列), download(下载), write(上传)}
     not_before, expire = _parse_date_interval(field("date_interval"))
     bucket, prefix = _parse_directory(field("directory"))
-    # 单一「申请目录」+ read/write 多选 → 同一前缀分别授读/写。
-    reads = [prefix] if perm.get("read") else []
-    writes = [prefix] if perm.get("write") else []
 
     spec = {
         "platform": platform,
         "enterprise": enterprise,
         "bucket": bucket,
-        "read_prefixes": reads,
-        "write_prefixes": writes,
+        "prefix": prefix,
+        "caps": caps,
         "not_before": not_before,
         "expire": expire,
         # 模板无邮箱字段：凭证定向发给审批发起人(内部申请人)，由其转交外采企业（见 delivery）。
@@ -149,8 +254,8 @@ def _validate_spec(spec: dict) -> None:
         raise orchestrator.TempAkError("无法识别申请平台，请在审批表单选择阿里云")
     if not spec["bucket"]:
         raise orchestrator.TempAkError("申请目录缺少桶名（形如 oss://<桶>/<目录>/ 或 <桶>/<目录>/）")
-    if not spec["read_prefixes"] and not spec["write_prefixes"]:
-        raise orchestrator.TempAkError("权限设置未选 read/write，未发放")
+    if not spec.get("caps"):
+        raise orchestrator.TempAkError("权限设置未勾选任何项（read/download/write），未发放")
     if not spec["expire"]:
         raise orchestrator.TempAkError("缺少有效期（DateInterval 未取到到期时间）")
     now = _t.time()
@@ -175,13 +280,24 @@ def _parse_platform(raw) -> str:
     return "unknown"   # 未知平台不默认 aliyun（避免给非 OSS 目录误发无用 OSS 凭证）→ validate 拒
 
 
-def _parse_perm(raw) -> dict:
-    """权限设置多选(read/write/read&write) → {read,write}。'read&write' 同时含两子串→两者。"""
+def _parse_perm(raw) -> list:
+    """权限设置多选 → 能力集 caps ⊆ {read,download,write}（三者正交）。
+
+    选项：read(只列)/download(下载 GetObject)/write(上传)/read&write(=read+write)。
+    子串判定安全：'download' 不含 read/write；'read&write' 含 read+write。
+    """
     from core import ram_approval
     items = ram_approval._as_list(raw)
     text = " ".join(ram_approval._as_text(x) for x in items).lower() if items \
         else ram_approval._as_text(raw).lower()
-    return {"read": "read" in text, "write": "write" in text}
+    caps = []
+    if "download" in text:
+        caps.append("download")
+    if "write" in text:
+        caps.append("write")
+    if "read" in text:
+        caps.append("read")
+    return caps
 
 
 def _parse_directory(raw) -> tuple[str, str]:

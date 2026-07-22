@@ -91,7 +91,7 @@ def test_plan_sts_no_cloud_call(monkeypatch):
     now = time.time()
     grant = {
         "grant_id": "tak-x", "bucket": "b",
-        "read_prefixes": ["r/"], "write_prefixes": ["w/"],
+        "prefix": "r/", "caps": ["read", "download", "write"],
         "not_before": now, "expire": now + 3600,
         "user_name": "tempak-x", "policy_name": "temp-ak-auto-tempak-x",
     }
@@ -108,8 +108,8 @@ def test_plan_sts_duration_capped_at_max(monkeypatch):
     _fail_if_cloud_called(monkeypatch)
     now = time.time()
     # 强制 STS 分支(mode 显式)，窗口远超封顶 → duration 确定性封到 43200（避免 now 重取的 off-by-one）
-    grant = {"grant_id": "g", "bucket": "b", "read_prefixes": ["r/"],
-             "write_prefixes": [], "not_before": now, "expire": now + 100000,
+    grant = {"grant_id": "g", "bucket": "b", "prefix": "r/", "caps": ["read"],
+             "not_before": now, "expire": now + 100000,
              "user_name": "u", "policy_name": "p", "mode": issuer.STS_MODE}
     p = issuer.plan(grant)
     assert p["duration_seconds"] == 43200
@@ -121,7 +121,7 @@ def test_plan_ram_no_cloud_call(monkeypatch):
     now = time.time()
     grant = {
         "grant_id": "tak-y", "bucket": "b",
-        "read_prefixes": ["r/"], "write_prefixes": [],
+        "prefix": "r/", "caps": ["read"],
         "not_before": now, "expire": now + 5 * 86400,   # 5 天 → ram
         "user_name": "tempak-y", "policy_name": "temp-ak-auto-tempak-y",
     }
@@ -149,8 +149,8 @@ def test_issue_sts_passes_policy_and_duration(monkeypatch):
     monkeypatch.setattr(sts, "assume_role_with_policy", fake_assume)
 
     now = time.time()
-    grant = {"grant_id": "tak-sess", "bucket": "b", "read_prefixes": ["r/"],
-             "write_prefixes": [], "not_before": now, "expire": now + 3600,
+    grant = {"grant_id": "tak-sess", "bucket": "b", "prefix": "r/", "caps": ["read"],
+             "not_before": now, "expire": now + 3600,
              "mode": issuer.STS_MODE}
     creds = issuer.issue(grant)
     assert creds["mode"] == issuer.STS_MODE
@@ -166,8 +166,8 @@ def test_issue_sts_passes_policy_and_duration(monkeypatch):
 def test_issue_sts_missing_role_raises(monkeypatch):
     monkeypatch.setattr(issuer.settings, "TEMP_AK_OSS_ROLE_ARN", "")
     now = time.time()
-    grant = {"grant_id": "g", "bucket": "b", "read_prefixes": ["r/"],
-             "write_prefixes": [], "not_before": now, "expire": now + 100,
+    grant = {"grant_id": "g", "bucket": "b", "prefix": "r/", "caps": ["read"],
+             "not_before": now, "expire": now + 100,
              "mode": issuer.STS_MODE}
     with pytest.raises(issuer.IssueError):
         issuer.issue(grant)
@@ -178,8 +178,8 @@ def test_issue_sts_assume_returns_none_raises(monkeypatch):
     import utils.aliyun_sts as sts
     monkeypatch.setattr(sts, "assume_role_with_policy", lambda *a, **k: None)
     now = time.time()
-    grant = {"grant_id": "g", "bucket": "b", "read_prefixes": ["r/"],
-             "write_prefixes": [], "not_before": now, "expire": now + 100,
+    grant = {"grant_id": "g", "bucket": "b", "prefix": "r/", "caps": ["read"],
+             "not_before": now, "expire": now + 100,
              "mode": issuer.STS_MODE}
     with pytest.raises(issuer.IssueError):
         issuer.issue(grant)

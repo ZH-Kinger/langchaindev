@@ -33,9 +33,11 @@ def test_grant_id_differs_per_instance():
 def _spec(**over):
     now = time.time()
     base = {
+        "platform": "aliyun",
+        "enterprise": "外采公司A",
         "bucket": "wuji-sing",
-        "read_prefixes": ["r/", "r/"],   # 含重复，验去重
-        "write_prefixes": ["w/"],
+        "prefix": "team/data/",
+        "caps": ["read", "download"],
         "not_before": now,
         "expire": now + 3600,            # 1h → sts
         "recipient_email": "ext@example.com",
@@ -54,8 +56,25 @@ def test_create_record_new_fields(monkeypatch):
     assert g["user_name"].startswith("tempak-")
     assert g["instance_code"] == "inst_A"
     assert g["requester"] == "ou_req"
-    assert g["read_prefixes"] == ["r/"]            # 去重排序
+    assert g["prefix"] == "team/data/"
+    assert g["caps"] == ["read", "download"]
     assert g["bucket"] == "wuji-sing"
+    assert g["platform"] == "aliyun"
+    assert g["enterprise"] == "外采公司A"
+
+
+def test_scope_line_shows_dir_and_caps():
+    g = {"bucket": "wuji-sing", "prefix": "team/data/", "caps": ["read", "download", "write"]}
+    line = o.scope_line(g)
+    assert "wuji-sing" in line
+    assert "team/data/" in line
+    # 权限中文：列/下载/上传
+    assert "列" in line and "下载" in line and "上传" in line
+
+
+def test_scope_line_whole_bucket_empty_caps():
+    line = o.scope_line({"bucket": "b", "prefix": "", "caps": []})
+    assert "<整桶>" in line
 
 
 def test_create_record_has_no_secret_or_token_keys(monkeypatch):

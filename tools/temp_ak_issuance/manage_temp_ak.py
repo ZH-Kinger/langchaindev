@@ -14,15 +14,15 @@ logger = logging.getLogger(__name__)
 class TempAkSchema(BaseModel):
     action: str = Field(description="plan / status / revoke")
     bucket: str = Field(default="", description="plan 用：OSS 桶展示名或真实桶名")
-    read_prefixes: str = Field(default="", description="plan 用：读前缀，逗号分隔（空=不授读）")
-    write_prefixes: str = Field(default="", description="plan 用：写前缀，逗号分隔（空=不授写）")
+    prefix: str = Field(default="", description="plan 用：目录前缀（空=整桶）")
+    caps: str = Field(default="", description="plan 用：能力，逗号分隔 read(列)/download(下载)/write(上传)")
     not_before: str = Field(default="", description="plan 用：生效时间 YYYY-MM-DD HH:MM:SS 或时间戳（空=立即）")
     expire: str = Field(default="", description="plan 用：到期时间 YYYY-MM-DD HH:MM:SS 或时间戳")
     grant_id: str = Field(default="", description="status/revoke 用：任务 ID（tak-…）")
     open_id: str = Field(default="", description="飞书 open_id，系统自动注入")
 
 
-def manage_temp_ak(action: str, bucket: str = "", read_prefixes: str = "", write_prefixes: str = "",
+def manage_temp_ak(action: str, bucket: str = "", prefix: str = "", caps: str = "",
                    not_before: str = "", expire: str = "", grant_id: str = "", open_id: str = "") -> str:
     action = (action or "").strip().lower()
     from core.temp_ak_issuance import orchestrator, issuer, cleanup, policy
@@ -37,9 +37,11 @@ def manage_temp_ak(action: str, bucket: str = "", read_prefixes: str = "", write
             if not exp:
                 return "❌ expire 无法解析（用 YYYY-MM-DD HH:MM:SS 或时间戳）。"
             nb = _parse_dt(not_before) or now
+            cap_list = [c.strip().lower() for c in (caps or "").replace(";", ",").split(",")
+                        if c.strip().lower() in ("read", "download", "write")]
             grant = {
                 "grant_id": "tak-plan", "bucket": bucket,
-                "read_prefixes": _csv(read_prefixes), "write_prefixes": _csv(write_prefixes),
+                "prefix": prefix.strip().lstrip("/"), "caps": cap_list,
                 "not_before": nb, "expire": exp, "source_ips": [],
                 "mode": issuer.classify_mode(exp, now),
                 "user_name": "tempak-plan", "policy_name": policy.POLICY_PREFIX + "tempak-plan",

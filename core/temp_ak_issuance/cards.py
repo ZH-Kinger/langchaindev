@@ -41,6 +41,19 @@ def receipt_card(grant: dict):
     ], color=color)
 
 
+def extended_card(grant: dict):
+    """延期成功通知（方案B 同 AK，无 secret）。"""
+    from . import orchestrator as o
+    return card("⏰ 访问凭证有效期已延长", [
+        fields(("凭证ID", f"`{grant.get('grant_id')}`"),
+               ("外采企业", grant.get("enterprise") or "-"),
+               ("模式", _MODE_CN.get(grant.get("mode"), grant.get("mode", "")))),
+        div(f"**授权**：{o.scope_line(grant)}\n"
+            f"**新有效期**：{o.fmt_window(grant)}\n"
+            "AccessKey 不变、无需更换；到期后自动失效。"),
+    ], color="green")
+
+
 def status_card(grant: dict):
     from . import orchestrator as o
     stage = _STAGE_CN.get(grant.get("stage"), grant.get("stage", ""))

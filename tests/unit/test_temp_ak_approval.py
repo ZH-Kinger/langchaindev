@@ -282,26 +282,37 @@ def test_parse_directory_control_char_bucket_no_prefix_raises():
         approval._parse_directory("bad\x01bucket")
 
 
-# ── _parse_perm ───────────────────────────────────────────────────────────────
-
-def test_parse_perm_list_read_write():
-    assert approval._parse_perm(["read", "write"]) == {"read": True, "write": True}
-
-
-def test_parse_perm_read_and_write_string():
-    assert approval._parse_perm("read&write") == {"read": True, "write": True}
-
+# ── _parse_perm → caps list（真实三原子项 read/write/download，正交）──────────────
 
 def test_parse_perm_read_only():
-    assert approval._parse_perm("read") == {"read": True, "write": False}
+    assert approval._parse_perm(["read"]) == ["read"]
 
 
-def test_parse_perm_write_only_list():
-    assert approval._parse_perm(["write"]) == {"read": False, "write": True}
+def test_parse_perm_write_only():
+    assert approval._parse_perm(["write"]) == ["write"]
+
+
+def test_parse_perm_download_only():
+    """download 独立 → 只 [download]，不含 read（子串判定 'download' 不含 'read'）。"""
+    assert approval._parse_perm(["download"]) == ["download"]
+
+
+def test_parse_perm_read_download_multi():
+    """真实多选 read+download → 合并 [download, read]（顺序：download/write/read）。"""
+    assert set(approval._parse_perm(["read", "download"])) == {"read", "download"}
+
+
+def test_parse_perm_all_three():
+    assert set(approval._parse_perm(["read", "write", "download"])) == {"read", "write", "download"}
 
 
 def test_parse_perm_empty():
-    assert approval._parse_perm("") == {"read": False, "write": False}
+    assert approval._parse_perm("") == []
+
+
+def test_parse_perm_read_and_write_defensive():
+    """防御性解析：旧 'read&write' 已非真实选项，但 parser 仍拆成 read+write（无害）。"""
+    assert set(approval._parse_perm("read&write")) == {"read", "write"}
 
 
 # ── _parse_platform ───────────────────────────────────────────────────────────
@@ -359,23 +370,28 @@ def test_parse_request_full(monkeypatch, by_id):
     assert spec["platform"] == "aliyun"
     assert spec["enterprise"] == "外采公司A"
     assert spec["bucket"] == "wuji-sing"
-    # 单目录 + read&write → 同一前缀分别授读/写
-    assert spec["read_prefixes"] == ["team/data/"]
-    assert spec["write_prefixes"] == ["team/data/"]
+    # 单目录 + caps（新模型：prefix + caps，无 read_prefixes/write_prefixes）
+    assert spec["prefix"] == "team/data/"
+    assert set(spec["caps"]) == {"read", "write"}      # _detail 默认 perm=["read","write"]
+    assert "read_prefixes" not in spec and "write_prefixes" not in spec
     assert spec["expire"] > 0
     assert spec["not_before"] > 0 and spec["not_before"] < spec["expire"]
 
 
-def test_parse_request_read_only_derives_only_read(monkeypatch):
-    spec = approval.parse_temp_ak_request(_detail("APPROVED", perm="read"), {})
-    assert spec["read_prefixes"] == ["team/data/"]
-    assert spec["write_prefixes"] == []
+def test_parse_request_read_only(monkeypatch):
+    spec = approval.parse_temp_ak_request(_detail("APPROVED", perm=["read"]), {})
+    assert spec["prefix"] == "team/data/"
+    assert spec["caps"] == ["read"]
+
+
+def test_parse_request_download_only(monkeypatch):
+    spec = approval.parse_temp_ak_request(_detail("APPROVED", perm=["download"]), {})
+    assert spec["caps"] == ["download"]
 
 
 def test_parse_request_write_only(monkeypatch):
     spec = approval.parse_temp_ak_request(_detail("APPROVED", perm=["write"]), {})
-    assert spec["read_prefixes"] == []
-    assert spec["write_prefixes"] == ["team/data/"]
+    assert spec["caps"] == ["write"]
 
 
 # ── _parse_dt 容错 ───────────────────────────────────────────────────────────
@@ -421,7 +437,7 @@ def _valid_spec(**over):
     now = time.time()
     s = {
         "platform": "aliyun", "enterprise": "E", "bucket": "b",
-        "read_prefixes": ["r/"], "write_prefixes": [],
+        "prefix": "team/data/", "caps": ["read"],
         "not_before": 0.0, "expire": now + 3600,
         "recipient_email": "", "source_ips": [], "reason": "",
     }
@@ -451,9 +467,10 @@ def test_validate_missing_bucket_raises():
         approval._validate_spec(_valid_spec(bucket=""))
 
 
-def test_validate_missing_both_prefixes_raises():
+def test_validate_empty_caps_raises():
+    """caps 空（权限设置未勾任何项）→ 拒。"""
     with pytest.raises(orchestrator.TempAkError):
-        approval._validate_spec(_valid_spec(read_prefixes=[], write_prefixes=[]))
+        approval._validate_spec(_valid_spec(caps=[]))
 
 
 def test_validate_expire_past_raises():

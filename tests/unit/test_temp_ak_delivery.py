@@ -27,7 +27,7 @@ def _grant(**over):
     g = {
         "grant_id": "tak-deliv", "stage": o.STAGE_ISSUED, "mode": "sts",
         "platform": "aliyun", "enterprise": "外采公司A", "bucket": "wuji-sing",
-        "read_prefixes": ["team/data/"], "write_prefixes": ["team/data/"],
+        "prefix": "team/data/", "caps": ["read", "download", "write"],
         "not_before": now, "expire": now + 3600, "region": "oss-ap-southeast-1",
         "user_name": "tempak-ext-abc", "ak_id": "", "requester": "ou_requester",
         "source_ips": [],
@@ -83,7 +83,7 @@ def test_grant_record_has_no_secret_keys(monkeypatch):
     now = time.time()
     g = o.create_grant_record({
         "platform": "aliyun", "enterprise": "E", "bucket": "b",
-        "read_prefixes": ["r/"], "write_prefixes": [], "not_before": now,
+        "prefix": "r/", "caps": ["read"], "not_before": now,
         "expire": now + 3600, "recipient_email": "", "source_ips": [], "reason": "",
     }, instance_code="inst_deliv")
     banned = {"access_key_secret", "security_token", "secret", "token"}

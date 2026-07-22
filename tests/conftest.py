@@ -100,6 +100,59 @@ def mock_ram_api(monkeypatch):
     yield state
 
 
+# ── 全局硬兜底：任何测试都不得命中真实飞书/网络 ───────────────────────────────
+#   历史事故：调真实 handler 的错误分支（temp_ak handle_*）→ approval._notify_internal_failure
+#   → dsw_scheduler._send_text → 真往用户飞书群发消息（跑在真实 .env 上）。
+#   这里 autouse 把所有对外发送/取 token/裸 HTTP 出口打桩成安全空操作，杜绝真实发送。
+#   需要断言具体响应的测试可在自己的 monkeypatch 里覆盖（autouse 先跑，测试的 setattr 后跑→生效）。
+
+class _FakeHTTPResponse:
+    status_code = 200
+    text = ""
+
+    def json(self):
+        return {"code": 0, "msg": "stubbed"}
+
+    def raise_for_status(self):
+        return None
+
+
+@pytest.fixture(autouse=True)
+def _no_real_feishu_or_network(monkeypatch):
+    calls = {"send_text": [], "send_card": [], "http": []}
+
+    # 1) 飞书发送出口（dsw_scheduler 共享发送 + notify 取 token）
+    try:
+        import core.dsw_scheduler as _sched
+        monkeypatch.setattr(_sched, "_send_text",
+                            lambda *a, **k: calls["send_text"].append((a, k)), raising=False)
+        monkeypatch.setattr(_sched, "_send_card",
+                            lambda *a, **k: calls["send_card"].append((a, k)), raising=False)
+    except Exception:
+        pass
+    # 注：不全局桩 notify._get_access_token —— test_notify_token_cache 要测真函数。
+    #     下面的 requests 兜底已挡住取 token 的真实 HTTP，网络安全不依赖桩掉它。
+
+    # 2) 裸 HTTP 兜底：requests.post/get 返回安全假响应（不出网）。测试可自行覆盖。
+    try:
+        import requests
+
+        def _fake_post(*a, **k):
+            calls["http"].append(("post", a, k))
+            return _FakeHTTPResponse()
+
+        def _fake_get(*a, **k):
+            calls["http"].append(("get", a, k))
+            return _FakeHTTPResponse()
+
+        monkeypatch.setattr(requests, "post", _fake_post, raising=False)
+        monkeypatch.setattr(requests, "get", _fake_get, raising=False)
+    except Exception:
+        pass
+
+    yield calls
+
+
 # ── 飞书消息：默认拦截不发 ───────────────────────────────────────────────────
 
 @pytest.fixture

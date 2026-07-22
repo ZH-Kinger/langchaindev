@@ -68,6 +68,33 @@ def _feishu_send_interactive_checked(open_id: str, card: dict) -> None:
         raise RuntimeError(f"飞书私信失败 status={resp.status_code} code={data.get('code')} msg={data.get('msg')}")
 
 
+def deliver_extend(grant: dict, creds: dict | None) -> None:
+    """延期下发：方案B 同 AK（creds=None）→ 只发"已延长"通知(无 secret)；STS 重签发（creds）→ 发新凭证卡。"""
+    delivered = True
+    try:
+        if creds:
+            _send_creds_to_requester(grant, creds)          # 重签发：新凭证卡（含 secret，一次）
+        else:
+            _send_extended_notice(grant)                    # 同 AK：仅通知有效期已延长（无 secret）
+    except Exception:
+        delivered = False
+        logger.error("[temp_ak] 延期下发失败 grant=%s", grant.get("grant_id"), exc_info=True)
+    try:
+        _send_internal_receipt(grant)
+    except Exception:
+        logger.error("[temp_ak] 延期内部回执失败 grant=%s", grant.get("grant_id"), exc_info=True)
+    if creds and not delivered and grant.get("mode") == "ram":
+        _alert_creds_undelivered(grant)
+
+
+def _send_extended_notice(grant: dict) -> None:
+    target = (grant.get("requester") or "").strip()
+    if not target:
+        raise RuntimeError("无审批发起人 open_id，延期通知无法定向下发")
+    from . import cards
+    _feishu_send_interactive_checked(target, cards.extended_card(grant))
+
+
 def _send_internal_receipt(grant: dict) -> None:
     """内部回执：脱敏卡（企业/平台/桶目录/权限/有效期/模式），推 TEMP_AK_CHAT_ID（回退 FEISHU_CHAT_ID）。"""
     chat = settings.TEMP_AK_CHAT_ID or settings.FEISHU_CHAT_ID

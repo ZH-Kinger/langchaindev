@@ -43,8 +43,8 @@ def _cmd_plan(a) -> None:
     grant = {
         "grant_id": "tak-dryrun",
         "bucket": a.bucket,
-        "read_prefixes": a.read or [],
-        "write_prefixes": a.write or [],
+        "prefix": (a.prefix or "").lstrip("/"),
+        "caps": a.cap or [],
         "not_before": nb,
         "expire": exp,
         "source_ips": a.source_ip or [],
@@ -108,8 +108,9 @@ def main() -> None:
 
     p = sub.add_parser("plan", help="dry-run 预览分流 + policy")
     p.add_argument("--bucket", required=True)
-    p.add_argument("--read", action="append", help="读前缀（可多次）")
-    p.add_argument("--write", action="append", help="写前缀（可多次）")
+    p.add_argument("--prefix", default="", help="目录前缀（空=整桶）")
+    p.add_argument("--cap", action="append", choices=["read", "download", "write"],
+                   help="能力（可多次）：read=列 / download=下载 / write=上传")
     p.add_argument("--not-before", default="", dest="not_before")
     p.add_argument("--expire", required=True)
     p.add_argument("--source-ip", action="append", dest="source_ip")

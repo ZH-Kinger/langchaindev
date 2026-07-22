@@ -88,7 +88,7 @@ def _ram_grant(**over):
         "bucket": "b", "user_name": "tempak-ext-abc",
         "policy_name": "temp-ak-auto-tempak-ext-abc", "ak_id": "ak1",
         "expire": now - 100, "not_before": now - 200,
-        "read_prefixes": ["r/"], "write_prefixes": [],
+        "prefix": "r/", "caps": ["read"],
     }
     g.update(over)
     return g

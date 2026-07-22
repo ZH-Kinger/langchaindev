@@ -1,12 +1,10 @@
-"""#57 临时 AK 发放 —— policy.py 时间窗 policy 生成。
+"""#58 续 —— policy.py 权限模型重构（read/download/write 三者正交）+ 时间窗。
 
-覆盖：
-  · iso8601_bj 时区正确（+08:00）。
-  · build_policy_with_window：每条 statement 含 DateGreaterThan/DateLessThan（值为 ISO8601 +08:00）；
-    同 statement 多运算符共存(AND)；List 语句非整桶时带 oss:Prefix、桶级动作含 GetBucketAcl；
-    对象写动作集不含 DeleteObject；source_ips 注入 IpAddress(acs:SourceIp)；
-    read/write 空集不出对应 statement；'' 前缀=整桶(无 oss:Prefix)。
-  · build_session_policy：≤2048 通过、超限抛 PolicyTooLargeError。
+权限模型（用户拍板）：
+  · read     → 只给 List（ListObjects+桶信息/ACL），**无 GetObject（不能下载）**。
+  · download → 只给 GetObject/GetObjectAcl，**无 ListObjects**。
+  · write    → 只给 PutObject/Abort/ListParts，**绝无 DeleteObject、无 GetObject**。
+每条 statement 叠时间窗（DateGreaterThan/DateLessThan +08:00 AND）+ 可选 IpAddress。
 """
 import json
 from datetime import datetime, timedelta, timezone
@@ -16,13 +14,23 @@ import pytest
 from core.temp_ak_issuance import policy
 
 _BJ = timezone(timedelta(hours=8))
-# 固定生效/到期 epoch（北京墙钟）
 NB = datetime(2026, 8, 1, 0, 0, 0, tzinfo=_BJ).timestamp()
 EXP = datetime(2026, 8, 2, 0, 0, 0, tzinfo=_BJ).timestamp()
 
 
+def _doc(caps, prefix="team/data/", **kw):
+    return policy.build_policy_with_window(
+        "b", prefix=prefix, caps=caps, not_before=NB, expire=EXP, **kw)
+
+
+def _all_actions(doc):
+    out = set()
+    for s in doc["Statement"]:
+        out.update(s["Action"])
+    return out
+
+
 def _stmt_by_action(doc, action):
-    """返回第一条 Action 含指定动作的 statement。"""
     for s in doc["Statement"]:
         if action in s["Action"]:
             return s
@@ -33,151 +41,154 @@ def _stmt_by_action(doc, action):
 
 def test_iso8601_bj_offset_and_format():
     assert policy.iso8601_bj(NB) == "2026-08-01T00:00:00+08:00"
-    assert policy.iso8601_bj(EXP) == "2026-08-02T00:00:00+08:00"
-    # 带时区解析回来 epoch 一致
     parsed = datetime.strptime(policy.iso8601_bj(NB), "%Y-%m-%dT%H:%M:%S%z")
     assert int(parsed.timestamp()) == int(NB)
 
 
-# ── 时间窗条件（每条 statement）──────────────────────────────────────────────
+# ── 三类能力正交 ─────────────────────────────────────────────────────────────
 
-def test_every_statement_has_date_window_conditions():
-    doc = policy.build_policy_with_window(
-        "wuji-sing", read_prefixes=["r/"], write_prefixes=["w/"],
-        not_before=NB, expire=EXP)
-    assert doc["Version"] == "1"
-    assert doc["Statement"], "至少一条 statement"
+def test_read_gives_list_not_getobject():
+    acts = _all_actions(_doc(["read"]))
+    assert "oss:ListObjects" in acts
+    assert "oss:GetBucketAcl" in acts          # 桶级读含 ACL
+    assert "oss:GetObject" not in acts         # read 不能下载
+    assert "oss:PutObject" not in acts
+
+
+def test_download_gives_getobject_not_list():
+    acts = _all_actions(_doc(["download"]))
+    assert "oss:GetObject" in acts
+    assert "oss:GetObjectAcl" in acts
+    assert "oss:ListObjects" not in acts       # download 不含列举
+    assert "oss:PutObject" not in acts
+
+
+def test_write_gives_upload_no_delete_no_get():
+    acts = _all_actions(_doc(["write"]))
+    assert acts == {"oss:PutObject", "oss:AbortMultipartUpload", "oss:ListParts"}
+    assert "oss:DeleteObject" not in acts       # 外部绝不给删
+    assert "oss:GetObject" not in acts
+    assert "oss:ListObjects" not in acts
+
+
+def test_combo_all_three_no_delete():
+    acts = _all_actions(_doc(["read", "download", "write"]))
+    assert "oss:ListObjects" in acts
+    assert "oss:GetObject" in acts
+    assert "oss:PutObject" in acts
+    assert "oss:DeleteObject" not in acts       # 组合也永不含删
+
+
+def test_read_download_combo():
+    """真实多选 read+download → 有 List + GetObject，无上传/删除。"""
+    acts = _all_actions(_doc(["read", "download"]))
+    assert "oss:ListObjects" in acts
+    assert "oss:GetObject" in acts
+    assert "oss:PutObject" not in acts
+    assert "oss:DeleteObject" not in acts
+
+
+def test_read_plus_write_without_download_has_no_getobject():
+    """read + write（无 download）→ 有 List + Put，但仍无 GetObject（下载须单独勾 download）。"""
+    acts = _all_actions(_doc(["read", "write"]))
+    assert "oss:ListObjects" in acts
+    assert "oss:PutObject" in acts
+    assert "oss:GetObject" not in acts
+
+
+def test_empty_caps_empty_policy():
+    doc = _doc([])
+    assert doc["Statement"] == []
+
+
+def test_module_action_sets_never_delete_or_cross_contaminate():
+    assert "oss:DeleteObject" not in policy.WRITE_ACTIONS
+    assert "oss:GetObject" not in policy.LIST_ACTIONS      # read 集不含下载
+    assert "oss:ListObjects" not in policy.DOWNLOAD_ACTIONS
+    assert "oss:GetBucketAcl" in policy.LIST_ACTIONS
+
+
+# ── Resource / prefix ────────────────────────────────────────────────────────
+
+def test_read_statement_bucket_resource_with_prefix_condition():
+    doc = _doc(["read"], prefix="team/data/")
+    st = _stmt_by_action(doc, "oss:ListObjects")
+    assert st["Resource"] == ["acs:oss:*:*:b"]
+    conds = st["Condition"]["StringLike"]["oss:Prefix"]
+    assert "team/data/" in conds and "team/data/*" in conds
+
+
+def test_read_whole_bucket_no_prefix_condition():
+    doc = _doc(["read"], prefix="")
+    st = _stmt_by_action(doc, "oss:ListObjects")
+    assert "StringLike" not in st["Condition"]
+
+
+def test_download_object_arn_with_prefix():
+    doc = _doc(["download"], prefix="team/data/")
+    st = _stmt_by_action(doc, "oss:GetObject")
+    assert st["Resource"] == ["acs:oss:*:*:b/team/data/*"]
+
+
+def test_download_object_arn_whole_bucket():
+    doc = _doc(["download"], prefix="")
+    st = _stmt_by_action(doc, "oss:GetObject")
+    assert st["Resource"] == ["acs:oss:*:*:b/*"]
+
+
+def test_write_object_arn_with_prefix():
+    doc = _doc(["write"], prefix="drop/")
+    st = _stmt_by_action(doc, "oss:PutObject")
+    assert st["Resource"] == ["acs:oss:*:*:b/drop/*"]
+
+
+# ── 时间窗（每条 statement）──────────────────────────────────────────────────
+
+def test_every_statement_has_time_window():
+    doc = _doc(["read", "download", "write"])
+    assert doc["Statement"]
     for s in doc["Statement"]:
         cond = s["Condition"]
         assert cond["DateGreaterThan"]["acs:CurrentTime"] == policy.iso8601_bj(NB)
         assert cond["DateLessThan"]["acs:CurrentTime"] == policy.iso8601_bj(EXP)
 
 
-def test_conditions_coexist_in_same_statement_as_AND():
-    """同一 Condition dict 内 DateGreaterThan+DateLessThan(+StringLike/IpAddress) 即 AND。"""
-    doc = policy.build_policy_with_window(
-        "b", read_prefixes=["team/"], not_before=NB, expire=EXP,
-        source_ips=["1.2.3.4"])
-    list_stmt = _stmt_by_action(doc, "oss:GetBucketAcl")
-    cond = list_stmt["Condition"]
-    # 三类运算符共存于同一 Condition = AND
-    assert "DateGreaterThan" in cond
-    assert "DateLessThan" in cond
-    assert "StringLike" in cond            # 非整桶前缀
-    assert "IpAddress" in cond             # source_ips
+def test_conditions_and_in_read_statement():
+    """read 非整桶 statement 同 Condition 内 Date* + StringLike + IpAddress 共存 = AND。"""
+    doc = _doc(["read"], prefix="p/", source_ips=["1.2.3.4"])
+    st = _stmt_by_action(doc, "oss:ListObjects")
+    cond = st["Condition"]
+    assert "DateGreaterThan" in cond and "DateLessThan" in cond
+    assert "StringLike" in cond and "IpAddress" in cond
 
 
-# ── 桶级动作 / GetBucketAcl / DeleteObject ───────────────────────────────────
-
-def test_bucket_statement_includes_getbucketacl():
-    doc = policy.build_policy_with_window(
-        "b", read_prefixes=["r/"], not_before=NB, expire=EXP)
-    bucket_stmt = _stmt_by_action(doc, "oss:GetBucketAcl")
-    assert bucket_stmt is not None
-    # 桶级 Resource 只到桶（无对象通配）
-    assert bucket_stmt["Resource"] == ["acs:oss:*:*:b"]
-    # 仍含既有列举动作
-    assert "oss:ListObjects" in bucket_stmt["Action"]
+def test_source_ips_inject_ipaddress_all_statements():
+    doc = _doc(["read", "download", "write"], source_ips=["203.0.113.7"])
+    for s in doc["Statement"]:
+        assert s["Condition"]["IpAddress"]["acs:SourceIp"] == ["203.0.113.7"]
 
 
-def test_write_actions_exclude_delete_object():
-    doc = policy.build_policy_with_window(
-        "b", write_prefixes=["w/"], not_before=NB, expire=EXP)
-    write_stmt = _stmt_by_action(doc, "oss:PutObject")
-    assert write_stmt is not None
-    assert "oss:DeleteObject" not in write_stmt["Action"]
-    # 外部写只给上传/分片
-    assert set(write_stmt["Action"]) == {
-        "oss:PutObject", "oss:AbortMultipartUpload", "oss:ListParts"}
-
-
-def test_module_write_action_set_never_has_delete():
-    assert "oss:DeleteObject" not in policy.WRITE_OBJECT_ACTIONS
-    assert "oss:GetBucketAcl" in policy.BUCKET_ACTIONS
-
-
-# ── source_ips → IpAddress ───────────────────────────────────────────────────
-
-def test_source_ips_inject_ipaddress_condition():
-    doc = policy.build_policy_with_window(
-        "b", read_prefixes=["r/"], not_before=NB, expire=EXP,
-        source_ips=["203.0.113.7", "198.51.100.0/24"])
-    read_stmt = _stmt_by_action(doc, "oss:GetObject")
-    assert read_stmt["Condition"]["IpAddress"]["acs:SourceIp"] == \
-        ["203.0.113.7", "198.51.100.0/24"]
-
-
-def test_no_source_ips_no_ipaddress_condition():
-    doc = policy.build_policy_with_window(
-        "b", read_prefixes=["r/"], not_before=NB, expire=EXP)
+def test_no_source_ips_no_ipaddress():
+    doc = _doc(["download"])
     for s in doc["Statement"]:
         assert "IpAddress" not in s["Condition"]
-
-
-# ── read/write 空集 ───────────────────────────────────────────────────────────
-
-def test_empty_read_no_read_statement():
-    doc = policy.build_policy_with_window(
-        "b", write_prefixes=["w/"], not_before=NB, expire=EXP)
-    assert _stmt_by_action(doc, "oss:GetObject") is None
-    assert _stmt_by_action(doc, "oss:PutObject") is not None
-
-
-def test_empty_write_no_write_statement():
-    doc = policy.build_policy_with_window(
-        "b", read_prefixes=["r/"], not_before=NB, expire=EXP)
-    assert _stmt_by_action(doc, "oss:PutObject") is None
-    assert _stmt_by_action(doc, "oss:GetObject") is not None
-
-
-def test_both_empty_only_bucket_statement():
-    doc = policy.build_policy_with_window("b", not_before=NB, expire=EXP)
-    # 只剩桶级 List 语句
-    assert len(doc["Statement"]) == 1
-    assert _stmt_by_action(doc, "oss:GetBucketAcl") is not None
-    # 无前缀 → 无 oss:Prefix
-    assert "StringLike" not in doc["Statement"][0]["Condition"]
-
-
-# ── '' 前缀 = 整桶（无 oss:Prefix）───────────────────────────────────────────
-
-def test_empty_prefix_means_whole_bucket_no_prefix_condition():
-    doc = policy.build_policy_with_window(
-        "b", read_prefixes=[""], not_before=NB, expire=EXP)
-    read_stmt = _stmt_by_action(doc, "oss:GetObject")
-    # 整桶对象 ARN
-    assert read_stmt["Resource"] == ["acs:oss:*:*:b/*"]
-    bucket_stmt = _stmt_by_action(doc, "oss:GetBucketAcl")
-    assert "StringLike" not in bucket_stmt["Condition"]
-
-
-def test_nonempty_prefix_adds_oss_prefix_condition():
-    doc = policy.build_policy_with_window(
-        "b", read_prefixes=["team/"], write_prefixes=["drop/"],
-        not_before=NB, expire=EXP)
-    bucket_stmt = _stmt_by_action(doc, "oss:GetBucketAcl")
-    conds = bucket_stmt["Condition"]["StringLike"]["oss:Prefix"]
-    assert "team/" in conds and "team/*" in conds
-    assert "drop/" in conds and "drop/*" in conds
 
 
 # ── session policy 上限 ───────────────────────────────────────────────────────
 
 def test_session_policy_within_limit_ok():
     doc = policy.build_session_policy(
-        "b", read_prefixes=["r/"], write_prefixes=["w/"],
+        "b", prefix="team/data/", caps=["read", "download", "write"],
         not_before=NB, expire=EXP)
     assert len(json.dumps(doc, ensure_ascii=False)) <= policy.SESSION_POLICY_MAX
-    # 与 build_policy_with_window 同结构
     assert doc["Version"] == "1"
 
 
 def test_session_policy_too_large_raises():
-    # 灌大量长前缀撑爆 2048
-    big = [f"very/long/prefix/segment/number-{i:04d}/data/" for i in range(200)]
+    huge_prefix = "seg/" * 700   # 撑爆 2048
     with pytest.raises(policy.PolicyTooLargeError):
         policy.build_session_policy(
-            "bucket-name", read_prefixes=big, write_prefixes=big,
+            "bucket-name", prefix=huge_prefix, caps=["read", "download", "write"],
             not_before=NB, expire=EXP)
 
 

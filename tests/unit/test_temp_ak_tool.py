@@ -42,11 +42,29 @@ def test_plan_no_cloud_call(monkeypatch):
     import core.temp_ak_issuance.issuer as issuer_mod
     monkeypatch.setattr(issuer_mod, "permsync_client",
                         lambda *a, **k: pytest.fail("plan 不该建 RAM 客户端"))
-    out = manage_temp_ak("plan", bucket="wuji-sing", read_prefixes="team/",
+    out = manage_temp_ak("plan", bucket="wuji-sing", prefix="team/", caps="read,download",
                          expire="2099-01-01 00:00:00")
     assert "dry-run" in out
     assert "policy" in out
     assert "本工具不发凭证" in out
+
+
+def test_plan_caps_reflected_in_policy(monkeypatch):
+    """plan 的 caps 精确反映到 policy：read+download → 有 List + GetObject、无 delete。"""
+    monkeypatch.setattr(o.settings, "TEMP_AK_BUCKET_MAP_RAW", "{}")
+    out = manage_temp_ak("plan", bucket="b", prefix="p/", caps="read,download",
+                         expire="2099-01-01 00:00:00")
+    assert "oss:ListObjects" in out
+    assert "oss:GetObject" in out
+    assert "oss:DeleteObject" not in out
+
+
+def test_plan_read_only_no_getobject(monkeypatch):
+    monkeypatch.setattr(o.settings, "TEMP_AK_BUCKET_MAP_RAW", "{}")
+    out = manage_temp_ak("plan", bucket="b", prefix="p/", caps="read",
+                         expire="2099-01-01 00:00:00")
+    assert "oss:ListObjects" in out
+    assert "oss:GetObject" not in out
 
 
 def test_plan_requires_bucket_and_expire():
@@ -65,7 +83,7 @@ def test_status_reads_grant(monkeypatch):
     monkeypatch.setattr(o.settings, "TEMP_AK_BUCKET_MAP_RAW", "{}")
     now = time.time()
     g = o.create_grant_record({
-        "bucket": "wuji-sing", "read_prefixes": ["r/"], "write_prefixes": [],
+        "bucket": "wuji-sing", "prefix": "r/", "caps": ["read"],
         "not_before": now, "expire": now + 3600, "recipient_email": "e@x.com",
         "source_ips": [], "reason": "",
     }, instance_code="inst_tool")
@@ -105,7 +123,7 @@ def test_revoke_admin_calls_cleanup(monkeypatch):
     monkeypatch.setattr(o.settings, "TEMP_AK_BUCKET_MAP_RAW", "{}")
     now = time.time()
     g = o.create_grant_record({
-        "bucket": "b", "read_prefixes": ["r/"], "write_prefixes": [],
+        "bucket": "b", "prefix": "r/", "caps": ["read"],
         "not_before": now, "expire": now + 3600, "recipient_email": "e@x.com",
         "source_ips": [], "reason": "",
     }, instance_code="inst_rev_tool")

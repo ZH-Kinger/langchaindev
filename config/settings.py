@@ -281,6 +281,8 @@ class Config:
     TEMP_AK_ENABLED         = os.environ.get("TEMP_AK_ENABLED", "false").lower() == "true"
     # 独立审批模板 code（务必与 RAM 建号审批 FEISHU_RAM_APPROVAL_CODE 分开，避免混流）
     TEMP_AK_APPROVAL_CODE   = os.environ.get("TEMP_AK_APPROVAL_CODE", "")
+    # 延期审批模板 code（「访问凭证延长申请」，与发放模板再分开）
+    TEMP_AK_EXTEND_APPROVAL_CODE = os.environ.get("TEMP_AK_EXTEND_APPROVAL_CODE", "")
     # STS 宽 OSS 角色 ARN：信任 Master AK、MaxSessionDuration=43200；STS 分支现场用 session policy 收窄到桶/前缀
     TEMP_AK_OSS_ROLE_ARN    = os.environ.get("TEMP_AK_OSS_ROLE_ARN", "")
     # STS 单发上限秒（阿里 AssumeRole 硬顶 43200=12h）。expire-now ≤ 此值走 STS，超出走方案 B
@@ -298,6 +300,8 @@ class Config:
     TEMP_AK_FIELD_PERM          = os.environ.get("TEMP_AK_FIELD_PERM", "")
     TEMP_AK_FIELD_DATE_INTERVAL = os.environ.get("TEMP_AK_FIELD_DATE_INTERVAL", "")
     TEMP_AK_FIELD_DIRECTORY     = os.environ.get("TEMP_AK_FIELD_DIRECTORY", "")
+    # 延期审批「访问凭证延长申请」3 控件：凭证ID / 使用企业信息 / DateInterval（后两者复用上面的别名）。
+    TEMP_AK_FIELD_GRANT_ID      = os.environ.get("TEMP_AK_FIELD_GRANT_ID", "")
 
     # 容量巡检（OSS + TOS 目录大小定时盘点 → 飞书主动推送）
     # 默认关闭，opt-in；TARGETS 为 JSON 数组，每项 {vendor,bucket,prefix[,region]}
@@ -424,16 +428,19 @@ class Config:
                 _m = {}
             if not _m:
                 missing.append(("PFS_STAGING_MAP", "PFS↔PFS 直传无法定位中转桶，功能不可用"))
-        # 临时 AK 发放启用时校验：审批模板 + STS 宽角色 + RAM 可写 AK（方案 B 建号）+ SMTP（外部下发）。
+        # 临时 AK 发放启用时校验：审批模板 + RAM 可写 AK（方案 B 建号）。STS 宽角色仅在 STS 分支启用
+        # （TEMP_AK_STS_MAX_SECONDS>0）时才需要——设 0 即全走方案 B、不建角色，此时不为缺角色告警。
         if self.TEMP_AK_ENABLED:
             checks = [
                 ("TEMP_AK_APPROVAL_CODE", self.TEMP_AK_APPROVAL_CODE,
                  "临时 AK 发放不可用：缺独立审批模板 code"),
-                ("TEMP_AK_OSS_ROLE_ARN", self.TEMP_AK_OSS_ROLE_ARN,
-                 "临时 AK 的 STS 分支(≤12h)不可用：缺宽 OSS 角色 ARN"),
                 ("ALIYUN_ACCESS_KEY_ID", self.ALIYUN_ACCESS_KEY_ID,
                  "临时 AK 的方案 B(跨天)建号不可用：缺 RAM 可写 AK"),
             ]
+            if self.TEMP_AK_STS_MAX_SECONDS > 0:
+                checks.append(("TEMP_AK_OSS_ROLE_ARN", self.TEMP_AK_OSS_ROLE_ARN,
+                               "临时 AK 的 STS 分支(≤12h)不可用：缺宽 OSS 角色 ARN"
+                               "（若不用 STS 设 TEMP_AK_STS_MAX_SECONDS=0）"))
             for fld, val, impact in checks:
                 if not val:
                     missing.append((fld, impact))
