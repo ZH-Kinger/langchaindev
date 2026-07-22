@@ -198,6 +198,22 @@ Aliyun NAS DataFlow (product `NAS`, version `2017-06-26`, RPC): **预热**(`Task
 - **前置条件（控制台一次性）**: vePFS 与 TOS 同地域; 开通 **vePFS→TOS 服务访问授权**; `ConfigDataFlowBandwidth` 带宽>0; vePFS 已建 Fileset/目标目录. 调用 AK 需 `vepfs:CreateDataFlowTask`/`DescribeDataFlowTasks` 等.
 - **待真机验证 (dry-run 反查, 同当初反查 DMS `StorageVendorTOS`)**: ① `DataStorage` 桶串格式 (`tos://bucket` vs 裸名); ② task `status` 终态枚举串; ③ `vepfs:*` IAM 动作精确名; ④ 智算版是否必须 `FilesetId`.
 
+### 临时 AK/SK 发放 — 外部数据外采/卖数据 (`core/temp_ak_issuance/`)
+
+飞书审批「数据外采访问凭证申请」通过后，为**外部方**发一组时限 OSS 凭证。加法式独立包，复用 `ram_approval` 审批门 + `oss_perm.permsync` policy 生成 + `aliyun_sts`，**零改现有引擎**。已上线 bot-new（阿里 OSS）。
+
+- **按有效期分流** (`issuer.classify_mode`)：`到期−now ≤ TEMP_AK_STS_MAX_SECONDS`(默认 12h/43200s) → **STS 单发**(含 SecurityToken，到点自灭，`aliyun_sts.assume_role_with_policy` 现场 session policy 收窄)；超出 → **方案 B**(RAM 子用户 + 长期 AK + policy 内嵌时间窗 + 到期硬删)。**设 `TEMP_AK_STS_MAX_SECONDS=0` 即全走方案 B、不需 STS 宽角色**（当前线上即此配置）。
+- **权限模型 read/download/write 三者正交** (`policy.build_policy_with_window(bucket,*,prefix,caps,not_before,expire,source_ips)`)：`read`→只 `ListObjects`+桶信息(不含下载)；`download`→`GetObject`(才给下载)；`write`→`PutObject/AbortMultipartUpload/ListParts`(**无任何 delete**)。每条 statement 叠时间窗条件 `DateGreaterThan`(生效)/`DateLessThan`(到期)(`acs:CurrentTime` ISO8601 +08:00，AND)——服务端逐调用判时间，泄漏也随到期自动失效。`build_session_policy` 供 STS，≤2048 字符硬校验。真机实测：下载/删除/越界前缀全 403。
+- **审批门禁** (`approval.handle_temp_ak_event`)：复用 #55 硬化门——回拉实例详情、只认**实例级 `status=="APPROVED"`**(整单全批)才发、无 `instance_code` fail-safe 不发；`should_handle_event` 精确匹配 `TEMP_AK_APPROVAL_CODE`。表单 5 控件：平台(火山云/阿里云，火山暂拒→P1)/使用企业名称/权限设置(read/write/download 多选)/DateInterval(生效+到期)/申请目录(`oss://桶/前缀` 或 `桶/前缀`)。
+- **延长/撤销** (延期审批 `TEMP_AK_EXTEND_APPROVAL_CODE`「访问凭证延长/撤销 申请」，`handle_temp_ak_extend_event`)：凭证ID + 撤销·延长单选 + 使用企业信息(防串，`_verify_enterprise` fail-safe) + DateInterval。**延长**方案 B 改写 policy 时间窗(同 AK 不重发)、STS 重签发(>12h 转方案 B)；**撤销**走 `cleanup.revoke_grant`(删 AK+policy+user)。`extend_instances`/`revoke_instances` 幂等。
+- **命名** (`orchestrator._ascii_slug`/`display_name_for`)：RAM 登录名 `tempak-<企业名 ASCII/拼音,否则 ext>-<hash>`(中文经 pypinyin)；显示名 `<企业>-临时外采用户`(可中文)。
+- **下发**：凭证(含 secret)作为**审批评论**贴到审批实例(`delivery`，复用 `ram_approval._send_approval_comment`)，评论身份=`ram_approval._approval_comment_user_id()`(管理员，与 RAM 建号审批一致)；凭证ID 也写进评论供延长/撤销回填。**secret/token 只在评论正文出现一次，绝不落 Redis/日志/内部群卡**(grant 记录只存 ak_id)。
+- **到期硬删**：`dsw_scheduler._temp_ak_cleanup_loop` 每日北京 `TEMP_AK_CLEANUP_HOUR`:35 扫 `temp_ak:grant:*`，对 ISSUED 且 `expire<now` 的方案 B grant 走 `cleanup.revoke_grant`。
+- **建号凭证**：STS 用 Master AK；方案 B 用 `permsync.make_ram_client`(RAM 可写 AK `ALIYUN_ACCESS_KEY_*`)。**发凭证唯一路径 = 审批**——Agent 工具 `manage_temp_ak`(`plan`/`status`/`revoke`，无 `issue`) + CLI 都不能绕审批发凭证。
+- **全局审批白名单** (`routes._approval_allowlist`)：bot 只处理配置内的审批 code(RAM 建号 + 发放 + 延期)，其余(含无 code 的组织审批如补卡)一律记日志丢弃。
+- **Config**: `TEMP_AK_ENABLED`, `TEMP_AK_APPROVAL_CODE`, `TEMP_AK_EXTEND_APPROVAL_CODE`, `TEMP_AK_STS_MAX_SECONDS`(=0 全方案B), `TEMP_AK_OSS_ROLE_ARN`(仅 STS), `TEMP_AK_BUCKET_MAP`, `TEMP_AK_CLEANUP_ENABLED/HOUR`, `TEMP_AK_CHAT_ID`, `TEMP_AK_FIELD_*`(表单字段映射)。凭证下发身份复用 `ADMIN_FEISHU_OPEN_ID`。
+- **前置(飞书侧一次性)**：两个审批定义须调 `POST /approval/v4/approvals/{code}/subscribe` **订阅**才会推事件给 bot(否则收不到)；评论作者 open_id 须是本 app 下的。
+
 ### Redis Usage (`utils/redis_client.py`)
 
 Single client, `decode_responses=True`. Failures degrade silently. Key namespaces in use:

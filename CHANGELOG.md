@@ -7,6 +7,7 @@
 ## [Unreleased]
 
 ### Added
+- **临时 AK/SK 发放**（`core/temp_ak_issuance`）：飞书审批「数据外采访问凭证申请」通过 → 给**外部方**发一组时限 OSS 凭证。权限 `read`/`download`/`write` 三者正交（read=列不下载 / download=才给下载 / write=上传无删除）；policy 内嵌生效 + 到期时间窗，服务端逐调用判时间、到期自动失效。按有效期分流：`到期−now ≤ TEMP_AK_STS_MAX_SECONDS`（默认 12h）走 **STS 单发**（含 Token 到点自灭），超出走 **方案 B**（RAM 长期 AK + policy 时间窗 + 到期硬删）；线上置 `0` 全走方案 B。延长/撤销二合一审批（`TEMP_AK_EXTEND_APPROVAL_CODE`）；企业名→拼音登录名 + 中文显示名；凭证走审批评论、以管理员身份下发，secret 不落盘/日志（`temp_ak:grant` 只存 ak_id）；全局审批白名单只处理指定审批 code。三入口：飞书审批（**唯一发凭证路径**）+ Agent 工具 `manage_temp_ak`（`plan`/`status`/`revoke`）+ CLI；调度器 `temp-ak-cleanup` 每日硬删到期凭证。已上线阿里 OSS，火山云 TOS P1 规划中
 - 对话**滚动摘要记忆**（`core/agent`）：逐字保留最近 20 条，更早对话由 GLM 压成滚动摘要存 `agent:chat_summary:{sid}`（上限 1200 字），下轮作前缀注入，长对话不再硬截断。压缩批量异步（约每 5 轮一次）在回复发出后收尾，不拖慢感知；失败保留旧摘要
 - 数据流动/迁移**在途任务对账**（`dsw_scheduler` `dataflow-reconcile` 循环，每 2 分钟）：后台轮询线程随容器重启会死，对账线程随容器复活兜底——重启后任务完成也自动补推结果卡（跑完必通知）。在线推送与对账推送共用 Redis `SET NX dataflow:notified:{job_id}` 闸门，跨线程只推一次
 - 火山 vePFS/TOS 数据流动（`core/vepfs_dataflow`）：**预热**（TOS→vePFS）/**沉降**（vePFS→TOS）。无持久 DataFlow 对象，提交任务直接带桶/前缀，方向由地址类型自动判断；与 CPFS 共用三步级联向导卡（选云→选地区→表单）。Agent 工具 `manage_vepfs_dataflow` + CLI 三入口，`vepfs:dataflow:job:{id}` 状态机

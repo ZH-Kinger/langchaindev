@@ -6,7 +6,8 @@
 
 ## 功能特性
 
-### 数据搬运与存储流动（最新）
+### 数据外采与数据搬运（最新）
+- **临时 AK/SK 发放**（`core/temp_ak_issuance`）：飞书审批「数据外采访问凭证申请」通过 → 给**外部方**发一组时限 OSS 凭证（生效 + 到期时间窗，policy 内嵌、服务端逐调用判时间，泄漏也随到期自动失效 + 到期硬删）。权限 `read`/`download`/`write` 三者正交（read=列不下载 / download=才给下载 / write=上传无删除）。按有效期分流：`到期−now ≤ TEMP_AK_STS_MAX_SECONDS`（默认 12h）走 **STS 单发**（含 Token 到点自灭），超出走 **方案 B**（RAM 长期 AK + policy 时间窗 + 到期硬删）；线上 `TEMP_AK_STS_MAX_SECONDS=0` 全走方案 B。延长/撤销二合一审批；企业名自动转拼音登录名 + 中文显示名；凭证走审批评论、以管理员身份下发，secret 不落盘/日志。全局审批白名单只处理指定审批 code。三入口：飞书审批（**唯一发凭证路径**）+ Agent 工具 `manage_temp_ak`（`plan`/`status`/`revoke`，无 `issue`）+ CLI。当前仅阿里 OSS，火山云 TOS 为 P1 规划中。
 - **跨云数据迁移**（`core/transfer`）：给一条路径自动判方向、推目的桶。方向决定引擎——搬入 OSS 用阿里「在线迁移服务」(hcs_mgw)，搬入 TOS 用火山「迁移服务」。一期打通 `TOS→OSS`；>1TB 走管理员审批。
 - **同云桶间迁移**（`core/bucket_transfer`）：同账号跨 region/桶搬运，阿里 `oss://→oss://`、火山 `tos://→tos://`；OSS 自动探测源/目的 region，跨 region 走公网。与跨云迁移独立命名空间，仅复用其引擎。
 - **CPFS/NAS 数据流动**（`core/cpfs_dataflow`）：阿里 NAS DataFlow **预热**（OSS→CPFS，Import）/**沉降**（CPFS→OSS，Export）。只查现有 DataFlow + 提交任务，按目标子目录匹配最长前缀绑定；智算版/通用版自动分支。飞书选择器从发现的 CPFS↔OSS 绑定里选。
@@ -63,6 +64,7 @@ langchaindev/
 │   ├── multi_agent_system.py   # 多智能体协作（诊断 + 执行）
 │   ├── feishu_bot/             # 飞书 Webhook 服务（Flask，含 routes/actions/messages/gpu_flow）
 │   ├── dsw_scheduler.py        # 后台调度器（工单轮询/实例监控/早报/巡检/对账…）
+│   ├── temp_ak_issuance/       # 临时 AK/SK 发放（审批门/policy 时间窗/STS 或方案B/清理）
 │   ├── transfer/               # 跨云迁移（paths/engine_mgw/engine_tos/orchestrator/cli）
 │   ├── bucket_transfer/        # 同云桶间迁移（oss→oss / tos→tos）
 │   ├── cpfs_dataflow/          # 阿里 CPFS/NAS 数据流动（预热/沉降）
@@ -84,6 +86,7 @@ langchaindev/
 │   │                           #   gpu_advisor / gpu_training_advisor / dsw_inspector /
 │   │                           #   cluster_health / cluster_mfu / gpu_distribution
 │   ├── volcano/                # tos（容量）/ vepfs_dataflow
+│   ├── temp_ak_issuance/       # manage_temp_ak
 │   ├── transfer/               # manage_transfer
 │   ├── cpfs/                   # manage_cpfs_dataflow
 │   ├── feishu/                 # notify（消息卡片）+ cards（卡片原语）
@@ -306,6 +309,7 @@ python main.py --mode bot               # 飞书机器人（端口 8088）
 | `capacity-monitor` | N 小时（对齐整点，opt-in） | 扫 OSS/TOS 容量 + 增量推卡 + 写多维表格 |
 | `dataset-dashboard` | N 小时（对齐整点，opt-in） | 维护飞书「数据集大盘」多维表格 |
 | `oss-perm-push` | 每天北京 HOUR:20（opt-in） | OSS 权限对账，把待同步权限推群（带批准按钮） |
+| `temp-ak-cleanup` | 每天北京 HOUR:35（opt-in） | 扫临时外采凭证，对已到期的方案 B 凭证硬删 AK+policy+user |
 
 对账线程随容器一起重启复活，因此后台轮询线程即使随重启死掉，任务跑完仍会被对账补推——在线推送与对账推送共用 Redis `SET NX` 闸门，跨线程只推一次。
 
@@ -322,6 +326,7 @@ transfer:job:{job_id}                  → 跨云迁移状态机（30 天 TTL）
 bkt:transfer:job:{job_id}              → 同云桶间迁移状态机
 cpfs:dataflow:job:{job_id}             → CPFS 预热/沉降任务状态
 vepfs:dataflow:job:{job_id}            → vePFS 预热/沉降任务状态
+temp_ak:grant:{grant_id}               → 临时外采凭证发放记录（只存 ak_id，绝不存 secret）
 dataflow:notified:{job_id}             → 对账/在线推送共用的 SET NX 闸门
 capacity:snapshot:{vendor}:{bucket}:{prefix}  → 上次容量巡检快照（算增量）
 mfu:snapshot / gpu:dist:snapshot       → MFU / GPU 卡分布快照（区域切换、大盘秒回）
@@ -334,6 +339,7 @@ Agent 通过 `TOOL_GROUPS` 按意图选挂 1–2 组工具（`tools/__init__.py`
 
 | 工具名 | 子包 | 功能 |
 |--------|------|------|
+| `manage_temp_ak` | temp_ak_issuance | 临时外采凭证 plan/status/revoke（发凭证仅走审批） |
 | `manage_transfer` | transfer | 跨云迁移 plan/apply/status（TOS↔OSS） |
 | `manage_cpfs_dataflow` | cpfs | 阿里 CPFS/NAS 数据流动 list/preheat/sink/status |
 | `manage_vepfs_dataflow` | volcano | 火山 vePFS/TOS 数据流动 preheat/sink/status |
