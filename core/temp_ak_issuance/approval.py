@@ -26,9 +26,10 @@ _FIELDS = {
     "directory":     ("TEMP_AK_FIELD_DIRECTORY",     ("申请目录", "目录", "路径", "directory", "widget17846402564230001")),
 }
 
-# 延期审批「访问凭证延长申请」3 控件：凭证ID / 使用企业信息 / DateInterval（含真机 widget id）。
+# 延期/撤销审批「访问凭证延长/撤销 申请」4 控件：凭证ID / 撤销·延长 / 使用企业信息 / DateInterval。
 _EXTEND_FIELDS = {
     "grant_id":      ("TEMP_AK_FIELD_GRANT_ID",      ("凭证ID", "凭证编号", "任务ID", "grant_id", "widget17846399101070001")),
+    "action":        ("TEMP_AK_FIELD_EXTEND_ACTION", ("撤销/延长", "撤销·延长", "操作", "action", "widget17847115181700001")),
     "enterprise":    ("TEMP_AK_FIELD_ENTERPRISE",    ("使用企业信息", "使用企业名称", "企业信息", "企业名称", "enterprise", "widget17846914004480001")),
     "date_interval": ("TEMP_AK_FIELD_DATE_INTERVAL", ("DateInterval", "有效期", "生效到期", "date_interval", "widget17846911942480001")),
 }
@@ -147,19 +148,37 @@ def handle_temp_ak_extend_event(payload: dict[str, Any]) -> dict[str, Any]:
         if code and code != settings.TEMP_AK_EXTEND_APPROVAL_CODE:
             return {"ignored": True, "reason": "approval_code_mismatch"}
 
-        grant_id, enterprise, not_before, expire = parse_temp_ak_extend_request(detail, payload)
+        action, grant_id, enterprise, not_before, expire = parse_temp_ak_extend_request(detail, payload)
         grant = orchestrator.get_grant(grant_id)
         if not grant:
             raise orchestrator.TempAkError(f"未找到凭证 {grant_id}（可能已过期/清理，请重新发起发放）")
+        _verify_enterprise(grant, enterprise)   # 撤销也要防串：不能拿别家 grant_id 来撤
+
+        # 撤销分支：走 cleanup.revoke_grant（同到期硬删：删 AK+policy+user），幂等
+        if action == "revoke":
+            if instance_code in (grant.get("revoke_instances") or []):
+                return {"ignored": True, "reason": "revoke_already_applied", "grant_id": grant_id}
+            if grant.get("stage") == orchestrator.STAGE_REVOKED:
+                _notify_internal_action(grant, "该凭证已是撤销状态，无需重复撤销")
+                return {"ignored": True, "reason": "already_revoked", "grant_id": grant_id}
+            from . import cleanup
+            ok = cleanup.revoke_grant(grant)
+            grant.setdefault("revoke_instances", []).append(instance_code)
+            orchestrator._save(grant)
+            _notify_internal_action(grant, "✅ 凭证已按审批撤销（AK/用户/策略已删除）" if ok
+                                    else "⚠️ 凭证撤销执行有部分失败，请人工核查")
+            return {"ignored": False, "grant_id": grant_id, "action": "revoke", "ok": ok}
+
+        # 延长分支
         if grant.get("stage") == orchestrator.STAGE_REVOKED:
-            raise orchestrator.TempAkError(f"凭证 {grant_id} 已到期清理，请重新发起发放审批")
-        _verify_enterprise(grant, enterprise)
+            raise orchestrator.TempAkError(f"凭证 {grant_id} 已到期/撤销清理，请重新发起发放审批")
+        if not expire:
+            raise orchestrator.TempAkError("延长申请缺少新的到期时间（DateInterval）")
         if instance_code in (grant.get("extend_instances") or []):
             return {"ignored": True, "reason": "extend_already_applied", "grant_id": grant_id}
-
         grant, creds = orchestrator.extend_grant(grant, not_before, expire, extend_instance=instance_code)
         delivery.deliver_extend(grant, creds)
-        return {"ignored": False, "grant_id": grant_id, "mode": grant["mode"]}
+        return {"ignored": False, "grant_id": grant_id, "action": "extend", "mode": grant["mode"]}
     except Exception as exc:
         logger.error("[temp_ak] extend failed instance=%s", instance_code, exc_info=True)
         _notify_internal_failure(instance_code, exc)
@@ -184,12 +203,32 @@ def parse_temp_ak_extend_request(detail: dict[str, Any], payload: dict[str, Any]
 
     grant_id = ram_approval._as_text(field("grant_id")).strip()
     enterprise = ram_approval._as_text(field("enterprise")).strip()
+    action = _parse_extend_action(field("action"))
     not_before, expire = _parse_date_interval(field("date_interval"))
     if not grant_id:
-        raise orchestrator.TempAkError("延期审批缺少凭证ID")
-    if not expire:
-        raise orchestrator.TempAkError("延期审批缺少新的到期时间（DateInterval）")
-    return grant_id, enterprise, not_before, expire
+        raise orchestrator.TempAkError("延长/撤销审批缺少凭证ID")
+    # 到期时间由 handler 按 action 校验（撤销不需要，延长才需要）
+    return action, grant_id, enterprise, not_before, expire
+
+
+def _parse_extend_action(raw) -> str:
+    """撤销/延长 单选 → 'revoke' / 'extend'。默认延长（无该字段时向后兼容旧模板）。"""
+    from core import ram_approval
+    t = ram_approval._as_text(raw)
+    if "撤销" in t or "revoke" in t.lower() or "撤回" in t or "吊销" in t:
+        return "revoke"
+    return "extend"
+
+
+def _notify_internal_action(grant: dict, text: str) -> None:
+    chat = settings.TEMP_AK_CHAT_ID or settings.FEISHU_CHAT_ID
+    if not chat:
+        return
+    try:
+        from core.dsw_scheduler import _send_text
+        _send_text("", chat, f"[临时AK] `{grant.get('grant_id')}`（{grant.get('enterprise') or '-'}）：{text}")
+    except Exception:
+        logger.error("[temp_ak] 内部通知发送失败 grant=%s", grant.get("grant_id"), exc_info=True)
 
 
 def _verify_enterprise(grant: dict, enterprise: str) -> None:

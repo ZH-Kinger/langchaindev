@@ -24,10 +24,7 @@ def deliver(grant: dict, creds: dict | None) -> None:
         except Exception:
             delivered = False
             logger.error("[temp_ak] 凭证评论下发失败 grant=%s", grant.get("grant_id"), exc_info=True)
-    try:
-        _send_internal_receipt(grant)
-    except Exception:
-        logger.error("[temp_ak] 内部回执推送失败 grant=%s", grant.get("grant_id"), exc_info=True)
+    # 不再推内部回执卡（用户要求：信息只在审批评论里，不单独推群/推人）。
     if creds and not delivered and grant.get("mode") == "ram":
         _alert_creds_undelivered(grant)
 
@@ -44,10 +41,6 @@ def deliver_extend(grant: dict, creds: dict | None) -> None:
     except Exception:
         delivered = False
         logger.error("[temp_ak] 延期评论下发失败 grant=%s", grant.get("grant_id"), exc_info=True)
-    try:
-        _send_internal_receipt(grant)
-    except Exception:
-        logger.error("[temp_ak] 延期内部回执失败 grant=%s", grant.get("grant_id"), exc_info=True)
     if creds and not delivered and grant.get("mode") == "ram":
         _alert_creds_undelivered(grant)
 
@@ -72,16 +65,6 @@ def _post_credential_comment(grant: dict, creds: dict, instance_code: str) -> No
     logger.info("[temp_ak] 凭证已评论下发到审批实例 grant=%s", grant.get("grant_id"))
 
 
-def _send_internal_receipt(grant: dict) -> None:
-    """内部群脱敏回执（不含 secret/token），推 TEMP_AK_CHAT_ID（回退 FEISHU_CHAT_ID）。"""
-    chat = settings.TEMP_AK_CHAT_ID or settings.FEISHU_CHAT_ID
-    if not chat:
-        return
-    from core.dsw_scheduler import _send_card
-    from . import cards
-    _send_card("", chat, cards.receipt_card(grant))
-
-
 def _alert_creds_undelivered(grant: dict) -> None:
     chat = settings.TEMP_AK_CHAT_ID or settings.FEISHU_CHAT_ID
     if not chat:
@@ -104,6 +87,7 @@ def credential_text(grant: dict, creds: dict) -> str:
                else "长期 AccessKey（权限内嵌生效/到期时间，到期后调用被拒并自动清理）")
     lines = [
         "数据外采访问凭证（请妥善保存并转交外采企业）",
+        f"凭证ID：{grant.get('grant_id')}（延长/撤销时填此 ID）",
         f"外采企业：{grant.get('enterprise') or '-'}",
         f"授权范围：{o.scope_line(grant)}",
         f"有效期：{o.fmt_window(grant)}",

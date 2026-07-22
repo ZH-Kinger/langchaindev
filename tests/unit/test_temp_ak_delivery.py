@@ -67,9 +67,8 @@ def test_deliver_posts_credential_comment_to_issue_instance(spy):
     assert ic == "issue_inst_1"                    # 贴到发放审批实例
     assert "SECRET_SK_XYZ" in text                 # 评论正文含 secret
     assert "TOKEN_ABC" in text
-    # 内部群回执脱敏
-    group_card = next(c[2] for c in spy["cards"] if c[1] == "oc_group")
-    assert "SECRET_SK_XYZ" not in _flat(group_card)
+    # #60：不再推内部群回执卡（信息只在审批评论里）
+    assert spy["cards"] == []
 
 
 def test_deliver_comment_user_id_uses_requester(spy):
@@ -102,10 +101,11 @@ def test_deliver_sts_comment_failure_no_alert(spy, monkeypatch):
     assert spy["text"] == []
 
 
-def test_deliver_no_creds_only_receipt(spy):
+def test_deliver_no_creds_noop(spy):
+    """creds=None → 既不评论也不推卡（#60：deliver 无内部回执）。"""
     delivery.deliver(_grant(), None)
-    assert spy["comments"] == []                   # 无凭证不评论
-    assert any(c[1] == "oc_group" for c in spy["cards"])   # 仍推群回执
+    assert spy["comments"] == []
+    assert spy["cards"] == []
 
 
 # ── deliver_extend（延期）─────────────────────────────────────────────────────
@@ -129,7 +129,7 @@ def test_deliver_extend_fallback_to_issue_instance(spy):
 
 
 def test_deliver_extend_same_ak_no_secret(spy):
-    """方案B 同 AK（creds=None）→ _extended_text 评论（无 secret）+ 群回执。"""
+    """方案B 同 AK（creds=None）→ _extended_text 评论（无 secret）。"""
     g = _grant(mode="ram", extend_instances=["ext_inst_9"], ak_id="LTAI_RAM")
     delivery.deliver_extend(g, None)
     ic, text, _uid = spy["comments"][0]
@@ -137,7 +137,6 @@ def test_deliver_extend_same_ak_no_secret(spy):
     for secret in _SECRETS:
         assert secret not in text
     assert "延长" in text
-    assert any(c[1] == "oc_group" for c in spy["cards"])
 
 
 def test_deliver_extend_reissue_has_secret(spy):

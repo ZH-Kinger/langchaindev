@@ -1,15 +1,19 @@
-"""#58 B —— P0.5 临时 AK 延期入口（approval / orchestrator / issuer / delivery / cards）。
+"""#58/#60 —— 临时 AK 延长/撤销二合一审批入口（approval / orchestrator / issuer）。
 
+#60：延期审批改「延长/撤销二合一」，加 撤销/延长 单选（widget17847115181700001），DateInterval 非必填。
 覆盖：
   · should_handle_extend_event：精确 == TEMP_AK_EXTEND_APPROVAL_CODE；发放 code 不命中。
-  · parse_temp_ak_extend_request：3 控件（凭证ID/使用企业信息/DateInterval），by_id + by_name；缺凭证ID/到期各抛。
+  · _parse_extend_action：撤销/吊销/撤回/revoke→revoke；延长/空/其它→extend（默认，向后兼容）。
+  · parse_temp_ak_extend_request：现返 **5 元组** (action, grant_id, enterprise, not_before, expire)；
+    缺凭证ID→抛；缺到期不再在 parse 抛（挪到 handler 按 action 校验）。
   · _verify_enterprise（MED-1 fail-safe）：orig 有值+ent 空→抛；orig 空→跳过；匹配→ok；不符→抛。
-  · handle_temp_ak_extend_event 门禁：实例非 APPROVED/无 instance_code 不动；grant 不存在→抛；
-    grant REVOKED→抛；企业不符→抛；同一 extend 实例二次投递→extend_already_applied 不重复应用。
+  · handle_temp_ak_extend_event：
+    - 延长分支：实例非 APPROVED/无 instance_code 不动、grant 不存在/REVOKED/企业不符/缺到期各抛、幂等。
+    - 撤销分支：APPROVED→防串→cleanup.revoke_grant 被调、落 revoke_instances 幂等、已 REVOKED 短路、
+      部分失败 ok=False 通知人工、防串对撤销也生效。
   · orchestrator.extend_grant：方案B creds=None+改窗+extends；STS≤12h 重签发；STS>12h 转 ram+ak 更新；
     stage!=ISSUED 抛；新到期已过/生效≥到期 抛。
   · issuer.rewrite_ram_window：mock RAM 断言 create_policy_version(set_as_default,policy_name)、缺 policy_name 抛。
-  · extended_card 脱敏（deliver_extend 的审批评论下发在 test_temp_ak_delivery.py 覆盖）。
 """
 import json
 import time
@@ -42,11 +46,12 @@ def _ext_event(code=EXT, status="APPROVED", instance="ext_inst_1"):
 
 
 def _ext_detail(instance_status, *, grant_id="tak-abc", enterprise="外采公司A",
-                date_interval=None, code=EXT, by_id=False):
+                action="延长", date_interval=None, code=EXT, by_id=False):
     date_interval = date_interval if date_interval is not None else \
         {"start": "", "end": "2099-06-01 00:00:00"}
     names = {
         "grant_id": "widget17846399101070001" if by_id else "凭证ID",
+        "action": "widget17847115181700001" if by_id else "撤销/延长",
         "enterprise": "widget17846914004480001" if by_id else "使用企业信息",
         "date_interval": "widget17846911942480001" if by_id else "DateInterval",
     }
@@ -57,6 +62,7 @@ def _ext_detail(instance_status, *, grant_id="tak-abc", enterprise="外采公司
         "instance_code": "ext_inst_1",
         "form": [
             {key: names["grant_id"], "value": grant_id},
+            {key: names["action"], "value": action},
             {key: names["enterprise"], "value": enterprise},
             {key: names["date_interval"], "value": date_interval},
         ],
@@ -105,8 +111,10 @@ def test_should_handle_extend_target_unset(monkeypatch):
 
 @pytest.mark.parametrize("by_id", [False, True])
 def test_parse_extend_full(by_id):
+    """现返回 5 元组 (action, grant_id, enterprise, not_before, expire)。默认 action=extend。"""
     detail = _ext_detail("APPROVED", grant_id="tak-xyz", enterprise="外采公司B", by_id=by_id)
-    gid, ent, nb, exp = approval.parse_temp_ak_extend_request(detail, {})
+    action, gid, ent, nb, exp = approval.parse_temp_ak_extend_request(detail, {})
+    assert action == "extend"
     assert gid == "tak-xyz"
     assert ent == "外采公司B"
     assert exp > 0
@@ -116,8 +124,14 @@ def test_parse_extend_full(by_id):
 def test_parse_extend_with_start():
     detail = _ext_detail("APPROVED",
                          date_interval={"start": "2027-01-01 00:00:00", "end": "2027-06-01 00:00:00"})
-    gid, ent, nb, exp = approval.parse_temp_ak_extend_request(detail, {})
+    action, gid, ent, nb, exp = approval.parse_temp_ak_extend_request(detail, {})
     assert nb > 0 and exp > nb
+
+
+def test_parse_extend_revoke_action():
+    detail = _ext_detail("APPROVED", action="撤销")
+    action, gid, ent, nb, exp = approval.parse_temp_ak_extend_request(detail, {})
+    assert action == "revoke"
 
 
 def test_parse_extend_missing_grant_id_raises():
@@ -126,10 +140,23 @@ def test_parse_extend_missing_grant_id_raises():
         approval.parse_temp_ak_extend_request(detail, {})
 
 
-def test_parse_extend_missing_expire_raises():
+def test_parse_extend_missing_expire_no_longer_raises_in_parse():
+    """expire 校验挪到 handler（撤销不需要到期）→ parse 不再因缺到期抛。"""
     detail = _ext_detail("APPROVED", date_interval={"start": "", "end": ""})
-    with pytest.raises(o.TempAkError):
-        approval.parse_temp_ak_extend_request(detail, {})
+    action, gid, ent, nb, exp = approval.parse_temp_ak_extend_request(detail, {})
+    assert exp == 0.0     # 缺到期 → 0，由 handler 按 action 校验
+
+
+# ── _parse_extend_action ─────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("raw", ["撤销", "吊销", "撤回", "revoke", "Revoke", "REVOKE"])
+def test_parse_extend_action_revoke(raw):
+    assert approval._parse_extend_action(raw) == "revoke"
+
+
+@pytest.mark.parametrize("raw", ["延长", "延期", "", "其它随便", None])
+def test_parse_extend_action_extend_default(raw):
+    assert approval._parse_extend_action(raw) == "extend"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -167,7 +194,7 @@ def test_verify_enterprise_mismatch_rejected():
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _spy_extend(monkeypatch):
-    calls = {"extend": 0, "deliver": 0}
+    calls = {"extend": 0, "deliver": 0, "revoke": 0, "notify": []}
 
     def fake_extend(grant, nb, exp, *, extend_instance=""):
         calls["extend"] += 1
@@ -177,6 +204,12 @@ def _spy_extend(monkeypatch):
     monkeypatch.setattr(o, "extend_grant", fake_extend)
     monkeypatch.setattr(delivery, "deliver_extend",
                         lambda g, c: calls.__setitem__("deliver", calls["deliver"] + 1))
+    # 撤销分支：桩 cleanup.revoke_grant（默认成功）+ 内部通知
+    from core.temp_ak_issuance import cleanup
+    monkeypatch.setattr(cleanup, "revoke_grant",
+                        lambda g, *a, **k: (calls.__setitem__("revoke", calls["revoke"] + 1) or True))
+    monkeypatch.setattr(approval, "_notify_internal_action",
+                        lambda g, text: calls["notify"].append(text))
     return calls
 
 
@@ -251,6 +284,144 @@ def test_extend_idempotent_second_delivery(monkeypatch):
     res = approval.handle_temp_ak_extend_event(_ext_event(instance="ext_inst_1"))
     assert calls["extend"] == 0
     assert res["reason"] == "extend_already_applied"
+
+
+def test_extend_missing_expire_rejected_in_handler(monkeypatch):
+    """延长分支缺到期（DateInterval 空）→ handler 抛（校验从 parse 挪到 handler）。"""
+    calls = _spy_extend(monkeypatch)
+    o._save(_issued_grant())
+    monkeypatch.setattr(ram_approval, "fetch_approval_instance",
+                        lambda code: _ext_detail("APPROVED", action="延长",
+                                                 date_interval={"start": "", "end": ""}))
+    res = approval.handle_temp_ak_extend_event(_ext_event())
+    assert calls["extend"] == 0
+    assert "error" in res
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# handle_temp_ak_extend_event —— 撤销分支（action=revoke）
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _revoke_detail(instance_status="APPROVED", *, grant_id="tak-abc", enterprise="外采公司A"):
+    return _ext_detail(instance_status, grant_id=grant_id, enterprise=enterprise,
+                       action="撤销", date_interval={"start": "", "end": ""})
+
+
+def test_revoke_branch_calls_cleanup(monkeypatch):
+    """撤销分支：门禁 APPROVED → 防串 → cleanup.revoke_grant 被调 → 不走 extend/deliver。"""
+    calls = _spy_extend(monkeypatch)
+    o._save(_issued_grant())
+    monkeypatch.setattr(ram_approval, "fetch_approval_instance", lambda code: _revoke_detail())
+    res = approval.handle_temp_ak_extend_event(_ext_event())
+    assert calls["revoke"] == 1
+    assert calls["extend"] == 0
+    assert calls["deliver"] == 0
+    assert res["ignored"] is False
+    assert res["action"] == "revoke"
+    assert res["ok"] is True
+    assert calls["notify"]                       # 内部通知发出
+
+
+def test_revoke_branch_records_revoke_instance(monkeypatch):
+    """撤销后落 revoke_instances（幂等基础）。"""
+    calls = _spy_extend(monkeypatch)
+    o._save(_issued_grant())
+    monkeypatch.setattr(ram_approval, "fetch_approval_instance", lambda code: _revoke_detail())
+    approval.handle_temp_ak_extend_event(_ext_event(instance="ext_inst_1"))
+    stored = o.get_grant("tak-abc")
+    assert "ext_inst_1" in (stored.get("revoke_instances") or [])
+
+
+def test_revoke_idempotent_same_instance(monkeypatch):
+    """同一撤销实例二次投递 → revoke_already_applied，不重复删。"""
+    calls = _spy_extend(monkeypatch)
+    o._save(_issued_grant(revoke_instances=["ext_inst_1"]))
+    monkeypatch.setattr(ram_approval, "fetch_approval_instance", lambda code: _revoke_detail())
+    res = approval.handle_temp_ak_extend_event(_ext_event(instance="ext_inst_1"))
+    assert calls["revoke"] == 0
+    assert res["reason"] == "revoke_already_applied"
+
+
+def test_revoke_already_revoked_short_circuits(monkeypatch):
+    """grant 已 REVOKED → already_revoked 短路、不再调 cleanup。"""
+    calls = _spy_extend(monkeypatch)
+    o._save(_issued_grant(stage=o.STAGE_REVOKED))
+    monkeypatch.setattr(ram_approval, "fetch_approval_instance", lambda code: _revoke_detail())
+    res = approval.handle_temp_ak_extend_event(_ext_event())
+    assert calls["revoke"] == 0
+    assert res["reason"] == "already_revoked"
+    assert calls["notify"]                       # 通知「已是撤销状态」
+
+
+def test_revoke_enterprise_mismatch_rejected(monkeypatch):
+    """防串对撤销分支同样生效：不能拿别家 grant_id 来撤。"""
+    calls = _spy_extend(monkeypatch)
+    o._save(_issued_grant(enterprise="甲公司"))
+    monkeypatch.setattr(ram_approval, "fetch_approval_instance",
+                        lambda code: _revoke_detail(enterprise="乙公司"))
+    res = approval.handle_temp_ak_extend_event(_ext_event())
+    assert calls["revoke"] == 0
+    assert "error" in res
+
+
+def test_revoke_grant_not_found_rejected(monkeypatch):
+    calls = _spy_extend(monkeypatch)
+    monkeypatch.setattr(ram_approval, "fetch_approval_instance",
+                        lambda code: _revoke_detail(grant_id="tak-missing"))
+    res = approval.handle_temp_ak_extend_event(_ext_event())
+    assert calls["revoke"] == 0
+    assert "error" in res
+
+
+def test_revoke_partial_failure_notifies(monkeypatch):
+    """cleanup.revoke_grant 返 False（部分失败）→ ok=False + 通知人工核查。"""
+    calls = _spy_extend(monkeypatch)
+    from core.temp_ak_issuance import cleanup
+    monkeypatch.setattr(cleanup, "revoke_grant", lambda g, *a, **k: False)
+    o._save(_issued_grant())
+    monkeypatch.setattr(ram_approval, "fetch_approval_instance", lambda code: _revoke_detail())
+    res = approval.handle_temp_ak_extend_event(_ext_event())
+    assert res["action"] == "revoke"
+    assert res["ok"] is False
+    assert any("核查" in t or "失败" in t for t in calls["notify"])
+
+
+def test_revoke_pending_instance_no_action(monkeypatch):
+    """撤销实例非 APPROVED → 门禁拦下，不删。"""
+    calls = _spy_extend(monkeypatch)
+    o._save(_issued_grant())
+    monkeypatch.setattr(ram_approval, "fetch_approval_instance",
+                        lambda code: _revoke_detail(instance_status="PENDING"))
+    res = approval.handle_temp_ak_extend_event(_ext_event(status="PASS"))
+    assert calls["revoke"] == 0
+    assert res["ignored"] is True
+
+
+# ── _notify_internal_action（真函数 → dsw_scheduler._send_text）───────────────
+
+def test_notify_internal_action_sends_text(monkeypatch):
+    sent = []
+    import core.dsw_scheduler as sched
+    monkeypatch.setattr(sched, "_send_text",
+                        lambda oid, chat, text: sent.append((oid, chat, text)))
+    monkeypatch.setattr(approval.settings, "TEMP_AK_CHAT_ID", "oc_group", raising=False)
+    approval._notify_internal_action(_issued_grant(grant_id="tak-n", enterprise="外采公司X"),
+                                     "✅ 凭证已按审批撤销")
+    assert sent
+    _oid, chat, text = sent[-1]
+    assert chat == "oc_group"
+    assert "tak-n" in text and "外采公司X" in text
+    assert "撤销" in text
+
+
+def test_notify_internal_action_no_chat_noop(monkeypatch):
+    called = []
+    import core.dsw_scheduler as sched
+    monkeypatch.setattr(sched, "_send_text", lambda *a, **k: called.append(1))
+    monkeypatch.setattr(approval.settings, "TEMP_AK_CHAT_ID", "", raising=False)
+    monkeypatch.setattr(approval.settings, "FEISHU_CHAT_ID", "", raising=False)
+    approval._notify_internal_action(_issued_grant(), "x")
+    assert called == []            # 无群配置 → 不发
 
 
 # ══════════════════════════════════════════════════════════════════════════════

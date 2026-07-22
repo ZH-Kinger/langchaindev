@@ -300,8 +300,9 @@ class Config:
     TEMP_AK_FIELD_PERM          = os.environ.get("TEMP_AK_FIELD_PERM", "")
     TEMP_AK_FIELD_DATE_INTERVAL = os.environ.get("TEMP_AK_FIELD_DATE_INTERVAL", "")
     TEMP_AK_FIELD_DIRECTORY     = os.environ.get("TEMP_AK_FIELD_DIRECTORY", "")
-    # 延期审批「访问凭证延长申请」3 控件：凭证ID / 使用企业信息 / DateInterval（后两者复用上面的别名）。
+    # 延长/撤销审批「访问凭证延长/撤销 申请」4 控件：凭证ID / 撤销·延长 / 使用企业信息 / DateInterval。
     TEMP_AK_FIELD_GRANT_ID      = os.environ.get("TEMP_AK_FIELD_GRANT_ID", "")
+    TEMP_AK_FIELD_EXTEND_ACTION = os.environ.get("TEMP_AK_FIELD_EXTEND_ACTION", "")
 
     # 容量巡检（OSS + TOS 目录大小定时盘点 → 飞书主动推送）
     # 默认关闭，opt-in；TARGETS 为 JSON 数组，每项 {vendor,bucket,prefix[,region]}
