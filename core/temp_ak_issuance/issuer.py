@@ -102,8 +102,9 @@ def _issue_ram(grant: dict) -> dict:
         client.get_user(m.GetUserRequest(user_name=user))
     except Exception as e:
         if _err(e) == "EntityNotExist.User":
+            from . import orchestrator as _o
             client.create_user(m.CreateUserRequest(
-                user_name=user, display_name=user,
+                user_name=user, display_name=_o.display_name_for(grant),
                 comments=(grant.get("reason") or "temp-ak external issuance")[:128] or None))
         else:
             raise

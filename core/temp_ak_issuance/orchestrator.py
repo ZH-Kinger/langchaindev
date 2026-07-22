@@ -112,11 +112,35 @@ def resolve_bucket(display: str) -> tuple[str, str]:
 
 
 def _derive_user_name(spec: dict, instance_code: str) -> str:
-    """外部方 RAM 用户名：tempak-<邮箱前缀>-<实例短hash>，收敛到 RAM 命名规则。"""
-    base = (spec.get("recipient_email", "").split("@")[0] or "ext")
-    base = re.sub(r"[^A-Za-z0-9._-]", "", base)[:24] or "ext"
-    short = hashlib.md5((instance_code or base).encode("utf-8")).hexdigest()[:6]
-    return f"tempak-{base}-{short}"
+    """外部方 RAM 登录名：tempak-<企业名ASCII化/否则ext>-<实例短hash>。
+
+    RAM user_name 只能 [A-Za-z0-9.@_-]，中文企业名 ASCII 化后可能为空 → 退回 ext（唯一性靠 hash）；
+    可读的企业名放 display_name（见 issuer._issue_ram，可中文）。
+    """
+    ent = spec.get("enterprise", "") or spec.get("recipient_email", "").split("@")[0]
+    slug = _ascii_slug(ent)
+    short = hashlib.md5((instance_code or slug).encode("utf-8")).hexdigest()[:6]
+    return f"tempak-{slug}-{short}"
+
+
+def _ascii_slug(text: str) -> str:
+    """企业名 → RAM 登录名可用的 ASCII slug。中文转拼音（pypinyin，未装则降级）；都取不到 → 'ext'。"""
+    text = (text or "").strip()
+    if not text:
+        return "ext"
+    try:
+        from pypinyin import lazy_pinyin
+        text = "".join(lazy_pinyin(text))   # 中文→拼音；ASCII 原样保留
+    except Exception:
+        pass                                 # 未装 pypinyin：仅保留原串里的 ASCII
+    slug = re.sub(r"[^A-Za-z0-9]", "", text).lower()[:20]
+    return slug or "ext"
+
+
+def display_name_for(grant: dict) -> str:
+    """RAM 控制台显示名（可中文，一眼识别是哪家外采企业的临时号）。"""
+    ent = (grant.get("enterprise") or "").strip()
+    return (f"{ent}-临时外采用户" if ent else "临时外采用户")[:128]
 
 
 # ── grant 生命周期 ────────────────────────────────────────────────────────────

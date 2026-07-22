@@ -9,7 +9,7 @@
   · orchestrator.extend_grant：方案B creds=None+改窗+extends；STS≤12h 重签发；STS>12h 转 ram+ak 更新；
     stage!=ISSUED 抛；新到期已过/生效≥到期 抛。
   · issuer.rewrite_ram_window：mock RAM 断言 create_policy_version(set_as_default,policy_name)、缺 policy_name 抛。
-  · delivery.deliver_extend：creds→凭证卡；None→extended_card（无 secret）；都推内部回执脱敏。
+  · extended_card 脱敏（deliver_extend 的审批评论下发在 test_temp_ak_delivery.py 覆盖）。
 """
 import json
 import time
@@ -368,69 +368,5 @@ def test_rewrite_ram_window_missing_policy_name_raises(monkeypatch):
         issuer.rewrite_ram_window(grant)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# delivery.deliver_extend
-# ══════════════════════════════════════════════════════════════════════════════
-
-CREDS = {"access_key_id": "STS.AK", "access_key_secret": "EXTEND_SECRET_SK",
-         "security_token": "EXTEND_TOK", "expire_ts": 0.0, "mode": "sts"}
-
-
-@pytest.fixture
-def send_spy(monkeypatch):
-    import core.dsw_scheduler as sched
-    sent_cards, sent_text, posts = [], [], []
-    monkeypatch.setattr(sched, "_send_card",
-                        lambda oid, chat, card: sent_cards.append((oid, chat, card)))
-    monkeypatch.setattr(sched, "_send_text",
-                        lambda oid, chat, text: sent_text.append((oid, chat, text)))
-    monkeypatch.setattr(delivery.settings, "TEMP_AK_CHAT_ID", "oc_group", raising=False)
-    from tools.feishu import notify
-    monkeypatch.setattr(notify, "_get_access_token", lambda: "tok")
-
-    class FakeResp:
-        status_code = 200
-
-        @staticmethod
-        def json():
-            return {"code": 0}
-
-    import requests
-    monkeypatch.setattr(requests, "post", lambda url, **kw: posts.append(kw.get("json") or {}) or FakeResp())
-    return {"cards": sent_cards, "text": sent_text, "posts": posts}
-
-
-def _flat(c):
-    return json.dumps(c, ensure_ascii=False)
-
-
-def test_deliver_extend_reissue_sends_credential(send_spy):
-    """STS 重签发（creds 非空）→ 私信新凭证卡（含 secret）+ 内部回执脱敏。"""
-    delivery.deliver_extend(_issued_grant(mode="sts", requester="ou_alice"), CREDS)
-    assert len(send_spy["posts"]) == 1
-    assert "EXTEND_SECRET_SK" in send_spy["posts"][0]["content"]
-    # 内部群回执脱敏
-    group = next(c[2] for c in send_spy["cards"] if c[1] == "oc_group")
-    assert "EXTEND_SECRET_SK" not in _flat(group)
-
-
-def test_deliver_extend_same_ak_sends_extended_card_no_secret(send_spy):
-    """方案B 同 AK（creds=None）→ extended_card（无 secret）+ 内部回执。"""
-    delivery.deliver_extend(_issued_grant(mode="ram", requester="ou_alice"), None)
-    # 私信一张 extended_card（HTTP post），不含 secret/token
-    assert len(send_spy["posts"]) == 1
-    content = send_spy["posts"][0]["content"]
-    assert "EXTEND_SECRET_SK" not in content
-    assert "EXTEND_TOK" not in content
-    # content 是 json.dumps(card)（ensure_ascii 转义），解回来再核文案
-    decoded = _flat(json.loads(content))
-    assert "延长" in decoded
-    # 内部回执也推
-    assert any(c[1] == "oc_group" for c in send_spy["cards"])
-
-
-def test_extended_card_no_secret():
-    s = _flat(cards.extended_card(_issued_grant(mode="ram")))
-    for secret in ("EXTEND_SECRET_SK", "EXTEND_TOK"):
-        assert secret not in s
-    assert "延长" in s
+# 注：deliver_extend 的审批评论下发 + _extended_text 脱敏在 test_temp_ak_delivery.py 覆盖；
+#     #59 已移除 cards.extended_card（延期改走审批评论 _extended_text，非卡片）。

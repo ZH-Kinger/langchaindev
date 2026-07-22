@@ -1,8 +1,9 @@
-"""凭证下发。
+"""凭证下发（方案 B：审批评论）。
 
-真机审批「数据外采访问凭证申请」无邮箱字段 → 凭证**定向私信审批发起人**（内部申请人，一次性展示），
-由其转交外采企业；同时给内部群一张**脱敏**回执卡（不含 secret）。
-secret/token 只在发给发起人的那张凭证卡里出现一次，绝不写日志、绝不落 Redis、绝不进群卡。
+用户拍板走**审批评论**下发：发放成功后，把含 AK/SK[/Token] 的凭证文本作为**评论**贴到该审批实例上
+（复用 ram_approval._send_approval_comment），审批链参与者可见、申请人转交外采企业。
+另给内部群一张**脱敏**回执卡（不含 secret）。
+secret/token 只出现在审批评论正文里，绝不写日志、绝不落 Redis、绝不进群卡。
 """
 from __future__ import annotations
 
@@ -15,70 +16,34 @@ logger = get_logger(__name__)
 
 
 def deliver(grant: dict, creds: dict | None) -> None:
-    """发放成功后下发：私信发起人（凭证）+ 内部群回执（脱敏）。best-effort。"""
+    """发放成功后下发：凭证走审批评论（发放审批实例）+ 内部群脱敏回执。best-effort。"""
     delivered = True
     if creds:
         try:
-            _send_creds_to_requester(grant, creds)
+            _post_credential_comment(grant, creds, grant.get("instance_code"))
         except Exception:
             delivered = False
-            logger.error("[temp_ak] 凭证私信发起人失败 grant=%s", grant.get("grant_id"), exc_info=True)
+            logger.error("[temp_ak] 凭证评论下发失败 grant=%s", grant.get("grant_id"), exc_info=True)
     try:
         _send_internal_receipt(grant)
     except Exception:
         logger.error("[temp_ak] 内部回执推送失败 grant=%s", grant.get("grant_id"), exc_info=True)
-    # 方案 B：AK 已在云上创建、secret 只此一次可得，下发失败即不可恢复 → 醒目告警管理员 revoke+重审。
     if creds and not delivered and grant.get("mode") == "ram":
         _alert_creds_undelivered(grant)
 
 
-def _send_creds_to_requester(grant: dict, creds: dict) -> None:
-    """把含 AK/SK[/Token] 的凭证卡**只**私信发起人（open_id）。无发起人 open_id 时拒发（不进群，防泄漏）。
-
-    凭证下发是关键路径，不能像共享 _send_card 那样静默失败 → 用带响应校验的发送，飞书返非 0 即抛，
-    触发上层 _alert_creds_undelivered（否则"以为送达实则没送"，外采企业收不到、无人知晓）。
-    """
-    target = (grant.get("requester") or "").strip()
-    if not target:
-        raise RuntimeError("无审批发起人 open_id，凭证无法定向下发（不入群，防泄漏）")
-    from . import cards
-    _feishu_send_interactive_checked(target, cards.credential_card(grant, creds))
-    logger.info("[temp_ak] 凭证已私信发起人 grant=%s", grant.get("grant_id"))
-
-
-def _feishu_send_interactive_checked(open_id: str, card: dict) -> None:
-    """私信一张交互卡并**校验飞书响应 code==0**；失败抛异常。异常信息只含 code/msg，绝不含卡片 body/secret。"""
-    import json as _json
-    import requests
-    from tools.feishu.notify import _get_access_token
-    token = _get_access_token()
-    resp = requests.post(
-        "https://open.feishu.cn/open-apis/im/v1/messages",
-        params={"receive_id_type": "open_id"},
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        json={"receive_id": open_id, "msg_type": "interactive", "content": _json.dumps(card)},
-        timeout=15,
-    )
-    data = {}
-    try:
-        data = resp.json()
-    except Exception:
-        pass
-    if resp.status_code != 200 or data.get("code") != 0:
-        raise RuntimeError(f"飞书私信失败 status={resp.status_code} code={data.get('code')} msg={data.get('msg')}")
-
-
 def deliver_extend(grant: dict, creds: dict | None) -> None:
-    """延期下发：方案B 同 AK（creds=None）→ 只发"已延长"通知(无 secret)；STS 重签发（creds）→ 发新凭证卡。"""
+    """延期下发：评论贴到**延期审批实例**上。creds(STS 重签发)→新凭证评论；None(方案B 同 AK)→"已延长"通知(无 secret)。"""
+    ic = (grant.get("extend_instances") or [grant.get("instance_code")])[-1]
     delivered = True
     try:
         if creds:
-            _send_creds_to_requester(grant, creds)          # 重签发：新凭证卡（含 secret，一次）
+            _post_credential_comment(grant, creds, ic)
         else:
-            _send_extended_notice(grant)                    # 同 AK：仅通知有效期已延长（无 secret）
+            _post_comment(grant, ic, _extended_text(grant))
     except Exception:
         delivered = False
-        logger.error("[temp_ak] 延期下发失败 grant=%s", grant.get("grant_id"), exc_info=True)
+        logger.error("[temp_ak] 延期评论下发失败 grant=%s", grant.get("grant_id"), exc_info=True)
     try:
         _send_internal_receipt(grant)
     except Exception:
@@ -87,16 +52,28 @@ def deliver_extend(grant: dict, creds: dict | None) -> None:
         _alert_creds_undelivered(grant)
 
 
-def _send_extended_notice(grant: dict) -> None:
-    target = (grant.get("requester") or "").strip()
-    if not target:
-        raise RuntimeError("无审批发起人 open_id，延期通知无法定向下发")
-    from . import cards
-    _feishu_send_interactive_checked(target, cards.extended_card(grant))
+# ── 审批评论下发 ──────────────────────────────────────────────────────────────
+
+def _comment_user_id(grant: dict) -> str:
+    from core import ram_approval
+    return grant.get("requester") or ram_approval._approval_comment_user_id()
+
+
+def _post_comment(grant: dict, instance_code: str, text: str) -> None:
+    from core import ram_approval
+    if not instance_code:
+        raise RuntimeError("缺审批实例 code，无法评论下发")
+    ram_approval._send_approval_comment(instance_code, text, _comment_user_id(grant))
+
+
+def _post_credential_comment(grant: dict, creds: dict, instance_code: str) -> None:
+    """把含 secret 的凭证文本作为评论贴到审批实例（审批链可见，B 方案）。"""
+    _post_comment(grant, instance_code, credential_text(grant, creds))
+    logger.info("[temp_ak] 凭证已评论下发到审批实例 grant=%s", grant.get("grant_id"))
 
 
 def _send_internal_receipt(grant: dict) -> None:
-    """内部回执：脱敏卡（企业/平台/桶目录/权限/有效期/模式），推 TEMP_AK_CHAT_ID（回退 FEISHU_CHAT_ID）。"""
+    """内部群脱敏回执（不含 secret/token），推 TEMP_AK_CHAT_ID（回退 FEISHU_CHAT_ID）。"""
     chat = settings.TEMP_AK_CHAT_ID or settings.FEISHU_CHAT_ID
     if not chat:
         return
@@ -113,17 +90,20 @@ def _alert_creds_undelivered(grant: dict) -> None:
         from core.dsw_scheduler import _send_text
         _send_text("", chat,
                    f"⚠️ 临时 AK `{grant.get('grant_id')}`（方案B/长期AK，外采企业 "
-                   f"{grant.get('enterprise') or '-'}）已在云上创建，但凭证私信发起人失败——"
+                   f"{grant.get('enterprise') or '-'}）已在云上创建，但凭证评论下发失败——"
                    f"secret 不可恢复。请管理员用 `manage_temp_ak revoke` 或 CLI revoke 吊销后重新发起审批。")
     except Exception:
         logger.error("[temp_ak] creds-undelivered 告警发送失败 grant=%s", grant.get("grant_id"), exc_info=True)
 
 
+# ── 文本 ──────────────────────────────────────────────────────────────────────
+
 def credential_text(grant: dict, creds: dict) -> str:
-    """凭证正文（含 secret/token，仅用于发给发起人的那张卡，出现一次）。"""
+    """凭证正文（含 secret/token，仅贴进审批评论，出现一次）。"""
     mode_cn = ("STS 临时凭证（含 SecurityToken，到点自动失效）" if creds.get("mode") == "sts"
                else "长期 AccessKey（权限内嵌生效/到期时间，到期后调用被拒并自动清理）")
     lines = [
+        "数据外采访问凭证（请妥善保存并转交外采企业）",
         f"外采企业：{grant.get('enterprise') or '-'}",
         f"授权范围：{o.scope_line(grant)}",
         f"有效期：{o.fmt_window(grant)}",
@@ -134,9 +114,23 @@ def credential_text(grant: dict, creds: dict) -> str:
     ]
     if creds.get("security_token"):
         lines.append(f"SecurityToken：{creds['security_token']}")
+    if grant.get("source_ips"):
+        lines.append(f"出口 IP 限制：仅 {', '.join(grant['source_ips'])} 可用")
     lines += [
         "",
         "· 仅在生效~到期区间内、且仅对上述桶/目录有效；超时或超范围调用一律被拒。",
-        "· Secret 只展示一次，请立即妥善保存后转交外采企业，切勿截图外传或提交代码仓库。",
+        "· Secret 请立即保存后转交外采企业，切勿截图外传或提交代码仓库。",
     ]
     return "\n".join(lines)
+
+
+def _extended_text(grant: dict) -> str:
+    """延期通知正文（方案B 同 AK，无 secret）。"""
+    return "\n".join([
+        "访问凭证有效期已延长",
+        f"凭证ID：{grant.get('grant_id')}",
+        f"外采企业：{grant.get('enterprise') or '-'}",
+        f"授权范围：{o.scope_line(grant)}",
+        f"新有效期：{o.fmt_window(grant)}",
+        "AccessKey 不变、无需更换；到期后自动失效。",
+    ])

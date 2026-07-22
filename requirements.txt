@@ -57,3 +57,6 @@ fakeredis>=2.20
 
 # SSH 迁移链(杭州→新加坡→泰国)：bot 用纯 Python SSH 遥控 SGP 跑 ossutil/rsync
 paramiko>=3.4.0
+
+# 临时 AK 发放：中文外采企业名→拼音，生成规范的 RAM 登录名（无则降级 ASCII/ext，非硬依赖）
+pypinyin>=0.51.0
