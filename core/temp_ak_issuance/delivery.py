@@ -48,8 +48,11 @@ def deliver_extend(grant: dict, creds: dict | None) -> None:
 # ── 审批评论下发 ──────────────────────────────────────────────────────────────
 
 def _comment_user_id(grant: dict) -> str:
+    """凭证评论身份**与 RAM 建号审批完全一致**——直接复用 ram_approval._approval_comment_user_id()：
+    FEISHU_RAM_APPROVAL_COMMENT_USER_ID → ADMIN_FEISHU_OPEN_ID（以管理员身份发，不冒充申请人/审批人）。
+    多级审批下不再用 requester（会解析成审批人、把凭证评论错挂其名下）。"""
     from core import ram_approval
-    return grant.get("requester") or ram_approval._approval_comment_user_id()
+    return ram_approval._approval_comment_user_id()
 
 
 def _post_comment(grant: dict, instance_code: str, text: str) -> None:

@@ -48,6 +48,7 @@ def spy(monkeypatch):
     text_sent = []
     monkeypatch.setattr(ram_approval, "_send_approval_comment",
                         lambda ic, text, uid, **k: comments.append((ic, text, uid)) or "cmt1")
+    # 评论身份现复用 ram_approval._approval_comment_user_id()（管理员身份，不用 grant.requester）
     monkeypatch.setattr(ram_approval, "_approval_comment_user_id", lambda *a, **k: "ou_admin")
     import core.dsw_scheduler as sched
     monkeypatch.setattr(sched, "_send_card",
@@ -71,16 +72,35 @@ def test_deliver_posts_credential_comment_to_issue_instance(spy):
     assert spy["cards"] == []
 
 
-def test_deliver_comment_user_id_uses_requester(spy):
+def test_deliver_comment_user_id_is_admin_not_requester(spy):
+    """真 bug 修复：即便 grant 有 requester（多级审批下可能是审批人）→ 评论身份仍固定管理员。"""
     delivery.deliver(_grant(requester="ou_bob"), CREDS_STS)
     _ic, _text, uid = spy["comments"][0]
-    assert uid == "ou_bob"
+    assert uid == "ou_admin"
+    assert uid != "ou_bob"
 
 
-def test_deliver_comment_user_id_fallback_admin(spy):
-    delivery.deliver(_grant(requester=""), CREDS_STS)
-    _ic, _text, uid = spy["comments"][0]
-    assert uid == "ou_admin"                       # 回退 _approval_comment_user_id
+# ── _comment_user_id 直测（复用 ram_approval._approval_comment_user_id）────────
+
+def test_comment_user_id_ignores_requester_uses_admin(monkeypatch):
+    """FEISHU_RAM_APPROVAL_COMMENT_USER_ID 空 → ADMIN_FEISHU_OPEN_ID，忽略 grant.requester。"""
+    monkeypatch.setattr(ram_approval.settings, "FEISHU_RAM_APPROVAL_COMMENT_USER_ID", "", raising=False)
+    monkeypatch.setattr(ram_approval.settings, "ADMIN_FEISHU_OPEN_ID", "ou_admin", raising=False)
+    assert delivery._comment_user_id({"requester": "ou_bob"}) == "ou_admin"
+
+
+def test_comment_user_id_prefers_configured(monkeypatch):
+    """FEISHU_RAM_APPROVAL_COMMENT_USER_ID 非空 → 优先它（高于 ADMIN_FEISHU_OPEN_ID）。"""
+    monkeypatch.setattr(ram_approval.settings, "FEISHU_RAM_APPROVAL_COMMENT_USER_ID", "ou_bot", raising=False)
+    monkeypatch.setattr(ram_approval.settings, "ADMIN_FEISHU_OPEN_ID", "ou_admin", raising=False)
+    assert delivery._comment_user_id({"requester": "ou_bob"}) == "ou_bot"
+
+
+def test_comment_user_id_both_empty_returns_empty(monkeypatch):
+    monkeypatch.setattr(ram_approval.settings, "FEISHU_RAM_APPROVAL_COMMENT_USER_ID", "", raising=False)
+    monkeypatch.setattr(ram_approval.settings, "ADMIN_FEISHU_OPEN_ID", "", raising=False)
+    # req=None → 无 requester 兜底 → ""
+    assert delivery._comment_user_id({"requester": "ou_bob"}) == ""
 
 
 def test_deliver_comment_failure_ram_alerts(spy, monkeypatch):
