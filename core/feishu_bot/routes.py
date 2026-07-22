@@ -71,6 +71,22 @@ def feishu_event():
             should_handle_approval,
             settings.FEISHU_RAM_APPROVAL_CODE or "-",
         )
+    # 临时 AK/SK 发放审批（独立模板 TEMP_AK_APPROVAL_CODE，严格 code 匹配）：排在 RAM 建号审批分发**之前**。
+    # ram_approval.should_handle_event 有 no-code 兜底(not code or code==target)，极端下(事件未 surface
+    # approval_code)会抢走本流→静默丢发放。temp_ak 严格 code==target 不会误抢 ram 事件，故先判、更安全。
+    if settings.TEMP_AK_ENABLED:
+        try:
+            from core.temp_ak_issuance import approval as temp_ak_approval
+            if temp_ak_approval.should_handle_event(data):
+                threading.Thread(
+                    target=temp_ak_approval.handle_temp_ak_event,
+                    args=(data,),
+                    daemon=True,
+                ).start()
+                return jsonify({"code": 0})
+        except Exception:
+            logger.error("[temp_ak] 审批事件分发失败", exc_info=True)
+
     if should_handle_approval:
         threading.Thread(
             target=ram_approval.handle_approval_event,

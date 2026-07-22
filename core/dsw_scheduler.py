@@ -719,6 +719,12 @@ class DSWScheduler:
             )
             self._reconcile_thread.start()
             extra += " + 数据流动/迁移对账"
+        if getattr(settings, "TEMP_AK_ENABLED", False) and getattr(settings, "TEMP_AK_CLEANUP_ENABLED", True):
+            self._temp_ak_thread = threading.Thread(
+                target=self._temp_ak_cleanup_loop, name="temp-ak-cleanup", daemon=True
+            )
+            self._temp_ak_thread.start()
+            extra += " + 临时AK到期清理"
         idle_stop = "DSW到期自动停止 + " if settings.DSW_IDLE_STOP_ENABLED else ""
         jira_seg = "Jira 轮询 + " if jira_on else "(Jira 停用) "
         logger.info("[Scheduler] 启动：%s%sGPU 空转提醒 + 每日早报(实例+集群)%s", jira_seg, idle_stop, extra)
@@ -828,6 +834,25 @@ class DSWScheduler:
                 _run_oss_perm_audit_push()
             except Exception:
                 logger.error("[Scheduler] OSS 权限对账推送失败", exc_info=True)
+
+    def _temp_ak_cleanup_loop(self) -> None:
+        """每日北京时间 TEMP_AK_CLEANUP_HOUR:35 扫 temp_ak:grant:*，对方案 B 到期 grant 硬删。
+        STS grant 自灭无需清理；纵深防御：policy 时间窗到期已服务端拒调用，硬删只清残留 artifact。"""
+        hour = max(0, min(23, settings.TEMP_AK_CLEANUP_HOUR))
+        while self._running:
+            now = _bj_now()
+            target = now.replace(hour=hour, minute=35, second=0, microsecond=0)
+            if now >= target:
+                target += timedelta(days=1)
+            if not _sleep_until(target, lambda: self._running):
+                break
+            try:
+                from core.temp_ak_issuance import cleanup as _tak_cleanup
+                revoked = _tak_cleanup.sweep_expired()
+                if revoked:
+                    logger.info("[Scheduler] 临时 AK 到期硬删 %d 个：%s", len(revoked), ", ".join(revoked))
+            except Exception:
+                logger.error("[Scheduler] 临时 AK 到期清理失败", exc_info=True)
 
 
 def _dataflow_reconcile_specs() -> list[dict]:

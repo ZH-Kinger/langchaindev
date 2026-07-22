@@ -274,6 +274,31 @@ class Config:
     PFS_TRANSFER_STAGING_CLEANUP = os.environ.get("PFS_TRANSFER_STAGING_CLEANUP", "false").lower() == "true"
     PFS_TRANSFER_CHAT_ID    = os.environ.get("PFS_TRANSFER_CHAT_ID", "")                # 留空回退 FEISHU_CHAT_ID
 
+    # 审批制临时 AK/SK 发放（外部/卖数据）：飞书审批 → 按有效期窗口分流生成 OSS 访问凭证。
+    #   到期−签发now ≤ TEMP_AK_STS_MAX_SECONDS(默认12h) → 纯 STS 单发（含 SecurityToken，到点自灭）；
+    #   跨天/跨周 → 方案 B（RAM 子用户 + 长期 AK + policy 时间区间条件 DateGreaterThan/DateLessThan + 到期硬删）。
+    # 审批通过才创建（复用 ram_approval 实例级 status==APPROVED 门禁）；凭证 secret/token 绝不落 Redis/日志。
+    TEMP_AK_ENABLED         = os.environ.get("TEMP_AK_ENABLED", "false").lower() == "true"
+    # 独立审批模板 code（务必与 RAM 建号审批 FEISHU_RAM_APPROVAL_CODE 分开，避免混流）
+    TEMP_AK_APPROVAL_CODE   = os.environ.get("TEMP_AK_APPROVAL_CODE", "")
+    # STS 宽 OSS 角色 ARN：信任 Master AK、MaxSessionDuration=43200；STS 分支现场用 session policy 收窄到桶/前缀
+    TEMP_AK_OSS_ROLE_ARN    = os.environ.get("TEMP_AK_OSS_ROLE_ARN", "")
+    # STS 单发上限秒（阿里 AssumeRole 硬顶 43200=12h）。expire-now ≤ 此值走 STS，超出走方案 B
+    TEMP_AK_STS_MAX_SECONDS = int(os.environ.get("TEMP_AK_STS_MAX_SECONDS", "43200"))
+    # 展示桶名 → {region,bucket}（JSON）。留空回退 permsync.BUCKET_MAP；表单填真实桶名则原样用
+    TEMP_AK_BUCKET_MAP_RAW  = os.environ.get("TEMP_AK_BUCKET_MAP", "{}")
+    # 方案 B 到期硬删定时（北京时间每日 TEMP_AK_CLEANUP_HOUR:35 扫 temp_ak:grant:* 删到期号）
+    TEMP_AK_CLEANUP_ENABLED = os.environ.get("TEMP_AK_CLEANUP_ENABLED", "true").lower() == "true"
+    TEMP_AK_CLEANUP_HOUR    = int(os.environ.get("TEMP_AK_CLEANUP_HOUR", "3"))
+    TEMP_AK_CHAT_ID         = os.environ.get("TEMP_AK_CHAT_ID", "")   # 内部回执群，留空回退 FEISHU_CHAT_ID
+    # 审批表单字段名映射（逗号/分号分隔候选名；留空用内置别名+widget id）。真机模板「数据外采访问凭证申请」
+    # 5 控件：平台/使用企业名称/权限设置/DateInterval/申请目录。名字改了设这些 env 覆盖即可。
+    TEMP_AK_FIELD_PLATFORM      = os.environ.get("TEMP_AK_FIELD_PLATFORM", "")
+    TEMP_AK_FIELD_ENTERPRISE    = os.environ.get("TEMP_AK_FIELD_ENTERPRISE", "")
+    TEMP_AK_FIELD_PERM          = os.environ.get("TEMP_AK_FIELD_PERM", "")
+    TEMP_AK_FIELD_DATE_INTERVAL = os.environ.get("TEMP_AK_FIELD_DATE_INTERVAL", "")
+    TEMP_AK_FIELD_DIRECTORY     = os.environ.get("TEMP_AK_FIELD_DIRECTORY", "")
+
     # 容量巡检（OSS + TOS 目录大小定时盘点 → 飞书主动推送）
     # 默认关闭，opt-in；TARGETS 为 JSON 数组，每项 {vendor,bucket,prefix[,region]}
     CAPACITY_MONITOR_ENABLED = os.environ.get("CAPACITY_MONITOR_ENABLED", "false").lower() == "true"
@@ -399,6 +424,19 @@ class Config:
                 _m = {}
             if not _m:
                 missing.append(("PFS_STAGING_MAP", "PFS↔PFS 直传无法定位中转桶，功能不可用"))
+        # 临时 AK 发放启用时校验：审批模板 + STS 宽角色 + RAM 可写 AK（方案 B 建号）+ SMTP（外部下发）。
+        if self.TEMP_AK_ENABLED:
+            checks = [
+                ("TEMP_AK_APPROVAL_CODE", self.TEMP_AK_APPROVAL_CODE,
+                 "临时 AK 发放不可用：缺独立审批模板 code"),
+                ("TEMP_AK_OSS_ROLE_ARN", self.TEMP_AK_OSS_ROLE_ARN,
+                 "临时 AK 的 STS 分支(≤12h)不可用：缺宽 OSS 角色 ARN"),
+                ("ALIYUN_ACCESS_KEY_ID", self.ALIYUN_ACCESS_KEY_ID,
+                 "临时 AK 的方案 B(跨天)建号不可用：缺 RAM 可写 AK"),
+            ]
+            for fld, val, impact in checks:
+                if not val:
+                    missing.append((fld, impact))
         return missing
 
     def print_validate(self) -> None:

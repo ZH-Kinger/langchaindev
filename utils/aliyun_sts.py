@@ -142,6 +142,58 @@ def _do_assume_role(role_arn: str, session_name: str) -> Optional[dict]:
         return None
 
 
+def assume_role_with_policy(
+    role_arn: str,
+    session_policy,
+    duration_seconds: int,
+    session_name: str = "temp-ak",
+) -> Optional[dict]:
+    """一次性 AssumeRole：传内联 session Policy 现场收窄会话权限（= role policy ∩ session policy），
+    并自定 duration（900–43200s）。用于临时 AK 发放的 STS 分支（外部/卖数据，≤12h 自灭）。
+
+    不走 (open_id, role_arn) 缓存——外部发放是一次性的，不缓存、不复用；与 assume_role_for_user 隔离。
+    session_policy 可为 dict（自动 json 序列化）或已序列化的 str。失败返回 None。
+    """
+    if not settings.ALIYUN_BOT_MASTER_AK_ID or not settings.ALIYUN_BOT_MASTER_AK_SECRET:
+        logger.error("[STS] Master AK 未配置，无法 AssumeRole(with policy)")
+        return None
+    if not role_arn:
+        logger.error("[STS] assume_role_with_policy 缺 role_arn")
+        return None
+    try:
+        from alibabacloud_sts20150401.client import Client
+        from alibabacloud_sts20150401 import models as sts_models
+        from alibabacloud_tea_openapi import models as open_api_models
+
+        cfg = open_api_models.Config(
+            access_key_id=settings.ALIYUN_BOT_MASTER_AK_ID,
+            access_key_secret=settings.ALIYUN_BOT_MASTER_AK_SECRET,
+            endpoint=f"sts.{settings.ALIYUN_STS_REGION_ID}.aliyuncs.com",
+        )
+        client = Client(cfg)
+        duration = max(900, min(int(duration_seconds), 43200))
+        policy_str = (json.dumps(session_policy, ensure_ascii=False)
+                      if isinstance(session_policy, (dict, list)) else (session_policy or None))
+        req = sts_models.AssumeRoleRequest(
+            role_arn=role_arn,
+            role_session_name=(session_name or "temp-ak")[:32],
+            duration_seconds=duration,
+            policy=policy_str,
+        )
+        resp = client.assume_role(req)
+        c = resp.body.credentials
+        return {
+            "access_key_id":     c.access_key_id,
+            "access_key_secret": c.access_key_secret,
+            "security_token":    c.security_token,
+            "expire_ts":         _iso_to_ts(c.expiration),
+            "role_arn":          role_arn,
+        }
+    except Exception as e:
+        logger.error("[STS] assume_role_with_policy 失败 role=%s err=%s", role_arn, e, exc_info=True)
+        return None
+
+
 def _iso_to_ts(iso_str: str) -> float:
     """阿里云返回的 expiration 是 '2025-01-01T12:00:00Z' 格式。"""
     from datetime import datetime, timezone

@@ -16,6 +16,7 @@ from .volcano import tos_tool, vepfs_dataflow_tool
 from .transfer import transfer_tool
 from .cpfs import cpfs_dataflow_tool
 from .pfs_transfer import pfs_transfer_tool
+from .temp_ak_issuance import temp_ak_tool
 from .feishu import feishu_tool
 from .jira import jira_tool, jira_workflow_tool
 from .github import github_workflow_tool
@@ -49,6 +50,8 @@ ALL_TOOLS = [
     cpfs_dataflow_tool,
     # ── PFS 跨云直传（vePFS↔CPFS 3 段链）─────────────────────
     pfs_transfer_tool,
+    # ── 临时 AK/SK 发放（外部/卖数据，审批制）─��───────────────
+    temp_ak_tool,
     # ── 飞书 / Jira / GitHub ─────────────────────────────────
     feishu_tool,
     jira_tool,
@@ -84,6 +87,7 @@ TOOL_GROUPS = {
     "cpfs":      {"manage_cpfs_dataflow"},
     "vepfs":     {"manage_vepfs_dataflow"},
     "pfs_transfer": {"manage_pfs_transfer"},
+    "temp_ak":      {"manage_temp_ak"},
 }
 
 # 启动时校验 TOOL_GROUPS 中的名字与 ALL_TOOLS 一致，防止静默路由失效
