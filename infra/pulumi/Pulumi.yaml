@@ -1,0 +1,11 @@
+name: aiops-infra
+runtime:
+  name: python
+  options:
+    virtualenv: venv
+description: >-
+  AIOps 智能运维助手 —— 阿里云基础设施即代码（IaC）。
+  第一期只纳管 RAM/STS 地基（BotRole-* 角色、信任策略、审批用户组、Master 用户），
+  作为后续 PAI 灵骏 / K8s 两套 stack 的共同底座。
+  设计红线：IaC 管"骨架"（角色/组/信任/基线策略），Bot 管"血肉"（STS 临时凭证、
+  wuji-oss-auto-* 按人策略、审批开户）。运行时动态资源永不进 state。

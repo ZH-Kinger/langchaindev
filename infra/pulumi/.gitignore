@@ -1,0 +1,14 @@
+# Pulumi 本地 state（若误用了 local backend）、机密、venv —— 绝不进 git
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Pulumi 机密/local state
+Pulumi.*.yaml.bak
+.pulumi/
+
+# 绝不提交任何凭证或从活体导出的机密策略原文（放本地，用完删）
+*.ak
+*.secret
+live-export/

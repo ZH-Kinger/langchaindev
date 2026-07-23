@@ -303,6 +303,12 @@ class Config:
     # 延长/撤销审批「访问凭证延长/撤销 申请」4 控件：凭证ID / 撤销·延长 / 使用企业信息 / DateInterval。
     TEMP_AK_FIELD_GRANT_ID      = os.environ.get("TEMP_AK_FIELD_GRANT_ID", "")
     TEMP_AK_FIELD_EXTEND_ACTION = os.environ.get("TEMP_AK_FIELD_EXTEND_ACTION", "")
+    # 火山云 TOS 临时凭证发放（方案 B）：与阿里 OSS 版共用审批/编排/下发骨架，platform=volcano 分派火山引擎。
+    # 独立灰度开关（默认关，真机验收后再开）；TOS 桶展示名→{region,bucket}(JSON，留空=表单直填真实桶)；
+    # region 回退（tos:// 带不出 region；policy trn 不含 region，仅影响可选数据面校验）。建号凭证复用 VOLCANO/TOS AK。
+    TEMP_AK_VOLCANO_ENABLED     = os.environ.get("TEMP_AK_VOLCANO_ENABLED", "false").lower() == "true"
+    TEMP_AK_TOS_BUCKET_MAP_RAW  = os.environ.get("TEMP_AK_TOS_BUCKET_MAP", "{}")
+    TEMP_AK_TOS_REGION          = os.environ.get("TEMP_AK_TOS_REGION", "")
 
     # 容量巡检（OSS + TOS 目录大小定时盘点 → 飞书主动推送）
     # 默认关闭，opt-in；TARGETS 为 JSON 数组，每项 {vendor,bucket,prefix[,region]}
@@ -445,6 +451,10 @@ class Config:
             for fld, val, impact in checks:
                 if not val:
                     missing.append((fld, impact))
+            # 火山 TOS 临时凭证（方案 B）启用时：建号需 VOLCANO/TOS 可写 IAM AK。
+            if self.TEMP_AK_VOLCANO_ENABLED and not (self.VOLCANO_ACCESS_KEY or self.TOS_ACCESS_KEY):
+                missing.append(("VOLCANO_ACCESS_KEY/TOS_ACCESS_KEY",
+                                "火山 TOS 临时凭证方案 B 建号不可用：缺可写 IAM AK"))
         return missing
 
     def print_validate(self) -> None:

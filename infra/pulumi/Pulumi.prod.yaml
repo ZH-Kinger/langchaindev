@@ -1,0 +1,21 @@
+# prod stack 配置（仅非机密项；机密走 `pulumi config set --secret` 或环境变量）。
+#
+# 执行凭证（有 RAM 写权限的管理员 AK，≠ Bot 的 master AK）不写这里，
+# 用环境变量注入：ALICLOUD_ACCESS_KEY / ALICLOUD_SECRET_KEY / ALICLOUD_REGION。
+config:
+  alicloud:region: cn-hangzhou
+
+  # 单一事实源：指向 Bot 读的同一份 .env，config.py 从中解析
+  # ALIYUN_BOT_ROLE_MAPPING / ALIYUN_BOT_ROLE_DEFAULT / ALIYUN_BOT_ACCOUNT_UID。
+  # 留空则从当前进程环境变量读取（CI 里更常见）。
+  aiops-infra:envFile: "../../.env"
+
+  # Master 用户名（信任策略的被信任主体）。与活体一致，import no-op 的前提。
+  aiops-infra:masterUserName: "feishu-bot-master"
+
+  # 信任主体粒度：user = 只信任 master 用户；root = 信任整个账号。
+  # 必须与活体角色的 AssumeRolePolicyDocument 一致，否则 import 后 preview 会出 diff。
+  aiops-infra:trustPrincipal: "user"
+
+  # 审批白名单用户组（与 settings FEISHU_RAM_APPROVAL_ALLOWED_GROUPS 对齐）。
+  aiops-infra:approvalGroups: "wuji_Algorithm,wuji_Examination"
