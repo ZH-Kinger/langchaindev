@@ -1,10 +1,12 @@
 """临时 AK 发放的 OSS 权限 policy 生成（时间区间条件变体）。
 
-权限模型（用户拍板，与审批「权限设置」勾选项一一对应，三者正交）：
-  · read     → 只给 **List**（ListObjects + 桶信息/ACL），**能看文件清单、不能下载**。
-  · download → 只给 **GetObject**（+GetObjectAcl），**能下载对象内容**。
+权限模型（严格对齐用户手动固化的权威模板，与审批「权限设置」勾选项一一对应，三者正交）：
+  · 桶信息   → GetBucketInfo/GetBucketStat/GetBucketAcl，**独立成条、Resource=桶、无 Prefix、无时间窗**
+              （read/download 任一勾选即给；桶级操作不带 prefix，绝不叠 oss:Prefix 条件否则被拒→用户访问不了）。
+  · read     → List（ListObjects + GetBucketMultipartUploads），Resource=桶 + oss:Prefix 条件，能看清单、不能下载。
+  · download → 只给 **GetObject**，Resource=桶/前缀*，能下载对象内容。
   · write    → 只给 **PutObject/AbortMultipartUpload/ListParts**（上传/分片），**绝不含任何删除动作**。
-每条 statement 叠加生效/到期时间窗（DateGreaterThan/DateLessThan，acs:CurrentTime ISO8601 +08:00，AND）——
+List/下载/写语句叠加生效/到期时间窗（DateGreaterThan/DateLessThan，acs:CurrentTime ISO8601 +08:00，AND）——
 服务端每次调用按当前时间判定，泄漏也随到期自动失效。可选 acs:SourceIp 锁外部出口 IP。
 纯逻辑、不调云、不改 permsync 源。build_policy_with_window 供方案 B；build_session_policy 供 STS（≤2048）。
 """
@@ -18,11 +20,12 @@ from core.oss_perm import permsync
 POLICY_PREFIX = "temp-ak-auto-"      # 方案 B 自定义策略命名前缀（区别于 permsync 的 wuji-oss-auto-）
 SESSION_POLICY_MAX = 2048            # AssumeRole Policy 参数字符上限
 
-# 三类能力各自的动作集（互不重叠；download≠read，read 不含 GetObject）。含用户要的 GetBucketAcl。
-LIST_ACTIONS = ["oss:ListObjects", "oss:GetBucketInfo", "oss:GetBucketStat",
-                "oss:GetBucketLocation", "oss:GetBucketAcl"]
-DOWNLOAD_ACTIONS = ["oss:GetObject", "oss:GetObjectAcl"]
-WRITE_ACTIONS = ["oss:PutObject", "oss:AbortMultipartUpload", "oss:ListParts"]   # 无 DeleteObject
+# 动作集严格对齐用户手动固化的权威模板（temp-ak-auto-tempak-nuoyiteng-7df6a7），三者正交、无删除动作。
+# 桶信息语句独立成条、Resource=桶、无 Prefix 条件（桶级操作不带 prefix 参数，混进 List+Prefix 条件会被拒→用户访问不了）。
+BUCKET_INFO_ACTIONS = ["oss:GetBucketInfo", "oss:GetBucketStat", "oss:GetBucketAcl"]
+LIST_ACTIONS = ["oss:ListObjects", "oss:GetBucketMultipartUploads"]              # read：列清单，带 oss:Prefix
+DOWNLOAD_ACTIONS = ["oss:GetObject"]                                            # download：仅选了才下发
+WRITE_ACTIONS = ["oss:PutObject", "oss:AbortMultipartUpload", "oss:ListParts"]  # 无 DeleteObject
 
 _BJ = timezone(timedelta(hours=8))
 
@@ -62,6 +65,24 @@ def build_policy_with_window(
     obj_arn = permsync._obj_arn(base, prefix)
     stmts: list[dict] = []
 
+    # read 或 download 任一勾选，都给桶信息（能定位桶、看基本信息）。独立成条：Resource=桶、无 Prefix、无时间窗，
+    # 与用户权威模板一致（桶级操作不带 prefix 参数，绝不能叠 oss:Prefix 条件，否则被拒）。
+    if "read" in caps or "download" in caps:
+        stmts.append({
+            "Effect": "Allow",
+            "Action": BUCKET_INFO_ACTIONS,
+            "Resource": [base],
+        })
+    if "read" in caps:
+        cond = _time_conditions(not_before, expire, source_ips)
+        if prefix:
+            cond["StringLike"] = {"oss:Prefix": [prefix, prefix + "*"]}
+        stmts.append({
+            "Effect": "Allow",
+            "Action": LIST_ACTIONS,
+            "Resource": [base],
+            "Condition": cond,
+        })
     if "download" in caps:
         stmts.append({
             "Effect": "Allow",
@@ -75,16 +96,6 @@ def build_policy_with_window(
             "Action": WRITE_ACTIONS,
             "Resource": [obj_arn],
             "Condition": _time_conditions(not_before, expire, source_ips),
-        })
-    if "read" in caps:
-        cond = _time_conditions(not_before, expire, source_ips)
-        if prefix:
-            cond["StringLike"] = {"oss:Prefix": [prefix, prefix + "*"]}
-        stmts.append({
-            "Effect": "Allow",
-            "Action": LIST_ACTIONS,
-            "Resource": [base],
-            "Condition": cond,
         })
 
     return {"Version": "1", "Statement": stmts}

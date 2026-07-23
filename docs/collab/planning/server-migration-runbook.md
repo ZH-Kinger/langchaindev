@@ -14,7 +14,7 @@
 | 新机 `bot-new` | 8.222.149.27，2 核 7.4G，docker29/compose5/git 已装。已跑一套 Jul-1 旧版 langchaindev（要删重装）+ **别人的** wuji-review-server / marzneshin / openwam（**绝不能碰**）。 |
 | 部署目标 | 新机 `/root/langchaindev` 全新部署 **当前 HEAD**（brief 记 `7050f65`，含 ssh_transfer 全套 + paramiko；dev 部署时钉死确切 SHA）。 |
 | 部署后状态 | 新机 = **热备**，不接飞书事件（回调仍指旧机），**调度器双推必须抑制**（见 §双推抑制）。 |
-| 必搬数据 | `.env`（整份覆盖）+ Redis 数据（初拷 + cutover 末次同步）。代码走 git archive。vector_db/models/sessions/data/logs 不搬。 |
+| 必搬数据 | `.env`（整份覆盖）+ Redis 数据（初拷 + cutover 末次同步）+ **RAG 嵌入模型缓存 `models/model_cache`（~391M）+ 向量库 `vector_db/`**（git 不跟踪，git archive 同步不了，缺了知识库问答离线加载会失败）。代码走 git archive。sessions/data/logs 不搬。 |
 | 构建方式 | **`docker compose up -d --build`**（新机 7.4G 扛得住，把 paramiko 固化进镜像，别学旧机 exec pip 临时装）。 |
 | cutover（切回调） | **留给用户择时手动执行**：末次 Redis 同步 + 飞书开放平台改回调到新机 IP + 旧机降备。 |
 
@@ -32,7 +32,7 @@
 - **`docker-compose.yml` 与 `Dockerfile` 不在 git 仓库**（未跟踪、只存在于各服务器）→ `git archive HEAD` **不会覆盖**它们。新机现有的「好版本」compose/Dockerfile 会**原样保留**；只有 `requirements.txt`（已跟踪，含 `paramiko>=3.4.0`）随代码更新 → 触发重新 `--build` 装 paramiko。
 - 连通性新机全绿：feishu / 阿里 STS·ECS·SLS·NAS / Jira / dashscope / 火山 TOS / **SGP 43.98.203.59:22**。**仅内网 Grafana 10.0.10.54:3000 不通** → 见风险 R4（不影响运行期）。
 - 无系统级 cron/timer 需迁移（业务定时全在 bot 进程内线程，随容器走）。
-- 项目目录 24M，运行时唯一必搬 = `.env`（vector_db/models/sessions/data 空或可重建，RAG 禁用）。
+- 项目目录 24M，运行期必搬 = `.env` + Redis + **`models/model_cache`（~391M）+ `vector_db/`**（后两者 git 不跟踪、被 `.gitignore` 的 `models/`/`*.safetensors`/`vector_db/` 排除，`git archive` 永远同步不了 → **必须单独 scp**，否则知识库问答触发离线嵌入模型加载失败、报连不上 huggingface.co）。sessions/data 空或可重建。
 
 ---
 

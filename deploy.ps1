@@ -6,6 +6,10 @@
     流程：git archive 当前 HEAD → scp 到服务器 → 解压覆盖 → 清理已删文件和 __pycache__
           → docker compose restart bot → 轮询 /health 校验。
 
+    首次部署到新机时会自动补传 RAG 嵌入模型缓存(models/model_cache, ~391M)+向量库(vector_db/)：
+    这俩被 .gitignore 排除、git archive 同步不了，缺了会导致知识库问答离线加载失败。
+    探测服务器无 config.json 即 scp 补传一次，之后 bind-mount 持久化、不再重传。
+
     服务器 /root/langchaindev 不是 git 仓库，代码经 docker-compose 的 .:/app 挂载直接生效，
     所以部署 = 同步文件 + 重启进程（约 10 秒），无需 docker build。
     只有 requirements.txt 变更时才需手动 `docker compose up -d --build`（脚本会检测并提示）。
@@ -114,6 +118,31 @@ if ($LASTEXITCODE -ne 0) { Die "scp 失败" }
 Step "远端解压、同步、重启"
 $out = ssh $SERVER "bash /tmp/feishu-deploy.sh"
 if ($out -notmatch "REMOTE_SYNC_OK") { Die "远端同步失败：$out" }
+
+# ── 5. 模型缓存 / 向量库缺失自动补传（git 不跟踪，git archive 永远同步不了）────
+#     RAG 嵌入模型(text2vec-base-chinese, ~391M) + ChromaDB(vector_db/) 被 .gitignore 排除，
+#     首次部署到新机时服务器上这俩是空的 → 用户一问知识库类问题就触发离线加载失败
+#     （连 huggingface.co 报错）。这里探测：服务器无 config.json 即视为缺失，scp 补传一次；
+#     之后 bind-mount 持久化，restart/recreate 都不丢，无需重复传。
+$modelProbe = "$REMOTE/models/model_cache/models--shibing624--text2vec-base-chinese"
+$hasModel = "$(ssh $SERVER "find '$modelProbe' -name config.json 2>/dev/null | head -1")".Trim()
+if (-not $hasModel) {
+    Warn "服务器缺 RAG 嵌入模型缓存（git 同步不了），补传 models/model_cache + vector_db（~391M，一次性）…"
+    $localModel = Join-Path $REPO "models\model_cache"
+    $localVdb   = Join-Path $REPO "vector_db"
+    if (Test-Path (Join-Path $localModel "models--shibing624--text2vec-base-chinese")) {
+        ssh $SERVER "mkdir -p '$REMOTE/models/model_cache' '$REMOTE/vector_db'" | Out-Null
+        scp -r "$localModel\*" "${SERVER}:$REMOTE/models/model_cache/"
+        if ($LASTEXITCODE -ne 0) { Warn "模型补传失败，RAG 仍不可用，请手动 scp models/model_cache" }
+        if (Test-Path $localVdb) { scp -r "$localVdb\*" "${SERVER}:$REMOTE/vector_db/" | Out-Null }
+        $probe2 = "$(ssh $SERVER "find '$modelProbe' -name config.json 2>/dev/null | head -1")".Trim()
+        if ($probe2) { Write-Host "✓ 模型/向量库补传完成，RAG 就绪" -ForegroundColor Green }
+    } else {
+        Warn "本地也没有 models/model_cache（未 ingest？），跳过补传——服务器 RAG 将不可用"
+    }
+} else {
+    Step "RAG 嵌入模型缓存已在服务器（跳过补传）"
+}
 
 # ── 6. 健康校验（轮询，Agent 预热 + 调度器启动需要几秒）─────────────────────
 if ($SkipHealth) {
