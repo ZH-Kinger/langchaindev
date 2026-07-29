@@ -115,7 +115,12 @@ def _access_lines(grant: dict) -> list[str]:
     bucket = (grant.get("bucket") or "").strip()
     if not region:
         return ["地域/Endpoint：未知（该桶未配地域映射，请按控制台上该桶的外网 Endpoint 连接）"]
-    ep = f"oss-{region}.aliyuncs.com"
+    # 仓库里有**两套地域写法**：permsync.BUCKET_MAP 存的是已带前缀的 `oss-ap-southeast-1`
+    # （默认账号 resolve_bucket 的回退表），而 TEMP_AK_*_BUCKET_MAP 存的是裸 `cn-shenzhen`。
+    # 不归一就会拼出 `oss-oss-ap-southeast-1.aliyuncs.com` —— 一个解析不了的域名，
+    # 使用方拿到等于没拿到，正是这几行要避免的事（tester 实测复现）。
+    host = region if region.startswith("oss-") else f"oss-{region}"
+    ep = f"{host}.aliyuncs.com"
     lines = [f"地域：{region}", f"外网 Endpoint：{ep}"]
     if bucket:
         lines.append(f"桶域名：{bucket}.{ep}")

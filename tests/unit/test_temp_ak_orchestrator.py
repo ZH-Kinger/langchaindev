@@ -15,6 +15,17 @@ import pytest
 from core.temp_ak_issuance import orchestrator as o, issuer
 
 
+@pytest.fixture(autouse=True)
+def _pin_sts_threshold(monkeypatch):
+    """钉住分流阈值，别读环境里的 `.env`。
+
+    本文件多条用例按「1h 有效期 → sts」断言，而 `TEMP_AK_STS_MAX_SECONDS` ��代码默认是 43200、
+    **服务器 .env 里是 0**（用户拍板全走方案 B）→ 同一份代码在容器里跑就变成 ram，3 条用例红。
+    这属于测试卫生问题（用例依赖运行环境的 .env），与被测行为无关，故在此显式钉死。
+    """
+    monkeypatch.setattr(o.settings, "TEMP_AK_STS_MAX_SECONDS", 43200)
+
+
 # ── grant_id_for ──────────────────────────────────────────────────────────────
 
 def test_grant_id_prefix_and_determinism():

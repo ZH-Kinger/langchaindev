@@ -120,12 +120,21 @@ def resolve_bucket(display: str, profile=None) -> tuple[str, str]:
     if display in m and isinstance(m[display], dict):
         v = m[display]
         return v.get("region", ""), v.get("bucket") or display
+    # 申请人常常直接填**真实桶名**（表单占位符就是 oss://桶/目录/ 的形状），此时按展示名查不到。
+    # 反查一遍映射的 bucket 值，把地域捞回来 —— 否则 region 为空，凭证正文里的
+    # 地域/Endpoint/桶域名三行会退化成「未知」，使用方又要去猜该连哪个 endpoint（首单已踩）。
+    for v in m.values():
+        if isinstance(v, dict) and v.get("bucket") == display:
+            return v.get("region", ""), display
     if p.slug == accounts.DEFAULT_SLUG:
         from core.oss_perm.permsync import BUCKET_MAP
         if display in BUCKET_MAP:
             region, bucket = BUCKET_MAP[display]
             return region, bucket
-    return "", display   # 表单直接填了真实桶名
+        for region, bucket in BUCKET_MAP.values():
+            if bucket == display:
+                return region, bucket
+    return "", display   # 映射里查不到：当真实桶名用，地域未知
 
 
 def _derive_user_name(spec: dict, instance_code: str, profile=None) -> str:

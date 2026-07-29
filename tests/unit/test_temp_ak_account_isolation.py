@@ -578,6 +578,88 @@ def test_resolve_bucket_1949_map_does_not_leak_into_default(monkeypatch):
     assert o.resolve_bucket("仅1949", _p1949())[1] == "prod1949-real"
 
 
+# ── 按真实桶名反查地域（真机首单暴露：申请人填的是真实桶名，不是展示名）─────────
+
+@pytest.fixture
+def maps(monkeypatch):
+    """两档各一张桶表；1949 的取值照服务器实配（展示名「产线数据」→ 真桶 wuji-product/裸地域）。"""
+    monkeypatch.setattr(settings, "TEMP_AK_BUCKET_MAP_RAW",
+                        '{"共享名": {"region": "cn-hangzhou", "bucket": "default-real"}}')
+    monkeypatch.setattr(settings, "TEMP_AK_1949_BUCKET_MAP_RAW",
+                        '{"产线数据": {"region": "cn-shenzhen", "bucket": "wuji-product"}}')
+
+
+def test_resolve_bucket_by_display_name_unchanged(maps):
+    """① 填展示名 → 原有行为不变（反查这层不得干扰正查）。"""
+    assert o.resolve_bucket("产线数据", _p1949()) == ("cn-shenzhen", "wuji-product")
+    assert o.resolve_bucket("共享名") == ("cn-hangzhou", "default-real")
+
+
+def test_resolve_bucket_by_real_bucket_name(maps):
+    """② 填**真实桶名**也能把地域捞回来（首单踩的就是这里：region 空 → 正文三行退化成「未知」）。"""
+    assert o.resolve_bucket("wuji-product", _p1949()) == ("cn-shenzhen", "wuji-product")
+    assert o.resolve_bucket("default-real") == ("cn-hangzhou", "default-real")
+
+
+def test_resolve_bucket_real_name_end_to_end_gives_endpoint(maps):
+    """②' 端到端：填真实桶名 → 凭证正文不再是「未知」，而是可用的 endpoint。"""
+    from core.temp_ak_issuance import delivery
+    region, bucket = o.resolve_bucket("wuji-product", _p1949())
+    lines = "\n".join(delivery._access_lines({"account": "1949", "region": region,
+                                             "bucket": bucket}))
+    assert "未知" not in lines
+    assert "外网 Endpoint：oss-cn-shenzhen.aliyuncs.com" in lines
+    assert "桶域名：wuji-product.oss-cn-shenzhen.aliyuncs.com" in lines
+
+
+def test_resolve_bucket_miss_returns_passthrough_without_raising(maps):
+    """③ 两种查法都不中 → `("", display)` 原样当真实桶名用，不抛（表单直填桶名仍可发）。"""
+    assert o.resolve_bucket("完全没见过的桶", _p1949()) == ("", "完全没见过的桶")
+    assert o.resolve_bucket("some-raw-bucket") == ("", "some-raw-bucket")
+
+
+def test_resolve_bucket_reverse_lookup_tolerates_bad_entries(monkeypatch):
+    """映射值不是 dict / 缺 bucket 键时反查不炸（运维手写 JSON 容错）。"""
+    monkeypatch.setattr(settings, "TEMP_AK_1949_BUCKET_MAP_RAW",
+                        '{"坏1": "not-a-dict", "坏2": {"region": "cn-x"}, '
+                        '"好": {"region": "cn-shenzhen", "bucket": "wuji-product"}}')
+    assert o.resolve_bucket("wuji-product", _p1949()) == ("cn-shenzhen", "wuji-product")
+    assert o.resolve_bucket("not-a-dict", _p1949()) == ("", "not-a-dict")
+
+
+def test_default_profile_reverse_lookup_in_permsync_map(monkeypatch):
+    """④ 默认档对 permsync.BUCKET_MAP 也反查，且拿到的 region 是**带前缀**的。"""
+    monkeypatch.setattr(settings, "TEMP_AK_BUCKET_MAP_RAW", "{}")
+    assert o.resolve_bucket("新加坡-wuji-sing") == ("oss-ap-southeast-1", "wuji-sing")   # 正查
+    assert o.resolve_bucket("wuji-sing") == ("oss-ap-southeast-1", "wuji-sing")          # 反查
+    assert o.resolve_bucket("wuji-test-data") == ("oss-cn-beijing", "wuji-test-data")
+
+
+def test_1949_reverse_lookup_never_touches_permsync_map(monkeypatch):
+    """⑤ 1949 档**不**回退 permsync.BUCKET_MAP（正查反查都不许）——那是默认账号的桶表，
+    串了就等于把第二账号申请人的凭证指向现有账号的桶。"""
+    monkeypatch.setattr(settings, "TEMP_AK_1949_BUCKET_MAP_RAW", "{}")
+    assert o.resolve_bucket("wuji-sing", _p1949()) == ("", "wuji-sing")            # 反查不中
+    assert o.resolve_bucket("新加坡-wuji-sing", _p1949()) == ("", "新加坡-wuji-sing")  # 正查也不中
+    # 默认档同一输入仍能解析（零回归、证明上面不是因为表本身失效）
+    assert o.resolve_bucket("wuji-sing")[0] == "oss-ap-southeast-1"
+
+
+def test_reverse_lookup_does_not_cross_accounts(maps):
+    """两档各自的真实桶名互不可见（反查这层新增了一条匹配路径，别让它成为跨账号通道）。"""
+    assert o.resolve_bucket("wuji-product") == ("", "wuji-product")          # 默认档看不到 1949 的桶
+    assert o.resolve_bucket("default-real", _p1949()) == ("", "default-real")  # 反之亦然
+
+
+def test_create_grant_by_real_bucket_name_records_region(maps, fake_redis):
+    """落库层面：填真实桶名建 grant → region 有值、bucket 原样、display 记原文。"""
+    g9 = o.create_grant_record(_spec(bucket="wuji-product"), instance_code="i9rev",
+                               profile=_p1949())
+    assert g9["bucket"] == "wuji-product"
+    assert g9["region"] == "cn-shenzhen"
+    assert g9["bucket_display"] == "wuji-product"
+
+
 def test_create_grant_uses_account_bucket_map(monkeypatch, fake_redis):
     monkeypatch.setattr(settings, "TEMP_AK_1949_BUCKET_MAP_RAW",
                         '{"数据桶": {"region": "oss-cn-shanghai", "bucket": "prod1949-real"}}')
@@ -1119,6 +1201,77 @@ def test_credential_text_endpoint_lines_from_region():
     assert "外网 Endpoint：oss-oss-cn-shanghai.aliyuncs.com" in t or \
            "外网 Endpoint：oss-cn-shanghai.aliyuncs.com" in t
     assert "prod-b." in t          # 桶域名
+
+
+# ── Endpoint 归一（我报的 MED 已修：`oss-` 前缀双写）──────────────────────────
+#   两套地域写法都得拼对：TEMP_AK_*_BUCKET_MAP 存裸 `cn-shenzhen`（服务器实配），
+#   permsync.BUCKET_MAP 存带前缀 `oss-ap-southeast-1`（默认档回退表，硬编码在仓库里）。
+#   拼错 = 给外部使用方一个解析不了的域名 → 403 → 以为凭证无效，正是这几行要避免的事。
+
+def test_access_lines_bare_region():
+    """裸地域（服务器 1949 桶表的写法）→ 补上 `oss-` 前缀。"""
+    from core.temp_ak_issuance import delivery
+    lines = delivery._access_lines({"account": "1949", "region": "cn-shenzhen",
+                                    "bucket": "wuji-product"})
+    assert lines[0] == "地域：cn-shenzhen"
+    assert lines[1] == "外网 Endpoint：oss-cn-shenzhen.aliyuncs.com"
+    assert lines[2] == "桶域名：wuji-product.oss-cn-shenzhen.aliyuncs.com"
+    assert "oss-oss-" not in "\n".join(lines)
+
+
+def test_access_lines_already_prefixed_region_not_doubled():
+    """已带前缀的地域（permsync.BUCKET_MAP 的写法）→ **不得**再补一层。
+
+    这就是我报的那个 bug 的回归钉子：修前这里是 `oss-oss-ap-southeast-1.aliyuncs.com`。"""
+    from core.temp_ak_issuance import delivery
+    lines = delivery._access_lines({"account": "", "region": "oss-ap-southeast-1",
+                                    "bucket": "wuji-sing"})
+    assert lines[0] == "地域：oss-ap-southeast-1"
+    assert lines[1] == "外网 Endpoint：oss-ap-southeast-1.aliyuncs.com"
+    assert lines[2] == "桶域名：wuji-sing.oss-ap-southeast-1.aliyuncs.com"
+    assert "oss-oss-" not in "\n".join(lines)
+
+
+@pytest.mark.parametrize("region", ["", "   ", None])
+def test_access_lines_empty_region_hints_unknown(region):
+    """空/空白 region → 仍走「地域/Endpoint：未知」单行分支，不瞎猜、不拼出 `oss-.aliyuncs.com`。"""
+    from core.temp_ak_issuance import delivery
+    lines = delivery._access_lines({"account": "", "region": region, "bucket": "b"})
+    assert len(lines) == 1
+    assert lines[0].startswith("地域/Endpoint：未知")
+    assert "aliyuncs.com" not in lines[0].split("外网 Endpoint")[0].replace("endpoint", "")
+    assert "oss-.aliyuncs.com" not in lines[0]
+    assert "桶域名" not in "\n".join(lines)
+
+
+def test_access_lines_no_bucket_omits_bucket_host():
+    from core.temp_ak_issuance import delivery
+    lines = delivery._access_lines({"account": "", "region": "cn-shenzhen", "bucket": ""})
+    assert len(lines) == 2 and "桶域名" not in "\n".join(lines)
+
+
+@pytest.mark.parametrize("display,expect_host", [
+    ("新加坡-wuji-sing", "oss-ap-southeast-1.aliyuncs.com"),      # BUCKET_MAP 展示名（带前缀 region）
+    ("wuji-sing", "oss-ap-southeast-1.aliyuncs.com"),             # BUCKET_MAP 真实桶名反查
+    ("北京-wuji-test-data", "oss-cn-beijing.aliyuncs.com"),
+])
+def test_resolve_bucket_to_endpoint_end_to_end(display, expect_host):
+    """**端到端串起来**：resolve_bucket 拿到的 region 一路进凭证正文，绝不双前缀。"""
+    from core.temp_ak_issuance import delivery
+    region, bucket = o.resolve_bucket(display)
+    text = "\n".join(delivery._access_lines({"account": "", "region": region, "bucket": bucket}))
+    assert f"外网 Endpoint：{expect_host}" in text
+    assert f"桶域名：{bucket}.{expect_host}" in text
+    assert "oss-oss-" not in text
+
+
+def test_credential_text_endpoint_not_doubled_for_prefixed_region():
+    """整篇凭证正文层面再钉一次（使用方真正拿到的就是这段文本）。"""
+    from core.temp_ak_issuance import delivery
+    region, bucket = o.resolve_bucket("新加坡-wuji-sing")
+    t = delivery.credential_text(_issued(region=region, bucket=bucket), _CREDS)
+    assert "oss-oss-" not in t
+    assert "oss-ap-southeast-1.aliyuncs.com" in t
 
 
 def test_credential_text_missing_region_hints_instead_of_guessing():
