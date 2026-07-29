@@ -225,7 +225,8 @@ class Config:
     BUCKET_TRANSFER_OSS_SRC_ROLE = os.environ.get("BUCKET_TRANSFER_OSS_SRC_ROLE", "")
 
     # CPFS/NAS 数据预热(Import OSS→CPFS) + 沉降(Export CPFS→OSS)：阿里 NAS DataFlow
-    # 只查现有 DataFlow + 提交任务，不创建/删除绑定。凭证默认走全局主账号 AK（同 MGW）。
+    # 优先复用现有 DataFlow 绑定；找不到才临建一条、用完即删（CreateDataFlow 会清空目标 Fileset，
+    # 故绝不碰别人已有的绑定）。凭证默认走全局主账号 AK（同 MGW）。
     CPFS_DATAFLOW_ENABLED   = os.environ.get("CPFS_DATAFLOW_ENABLED", "false").lower() == "true"
     CPFS_REGION             = os.environ.get("CPFS_REGION", "cn-hangzhou")    # CPFS 与 OSS 必须同地域
     CPFS_FILE_SYSTEM_ID     = os.environ.get("CPFS_FILE_SYSTEM_ID", "")       # cpfs-*=通用版 / bmcpfs-*=智算版

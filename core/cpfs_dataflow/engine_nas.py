@@ -9,8 +9,11 @@
     CreateDataFlowTask     TaskAction=Import 预热 / Export 沉降
     DescribeDataFlowTasks  轮询 TaskId 状态/进度
     CancelDataFlowTask     取消（备用）
+    CreateDataFlow         **临建**绑定（仅在找不到可复用的现有绑定时；仅智算版）
+    DeleteDataFlow         删除临建的那条（用完即删，见 orchestrator._cleanup_ephemeral）
 
-不调 CreateDataFlow/DeleteDataFlow（会清空 Fileset，危险）。
+**CreateDataFlow 会清空目标 Fileset，所以永远优先复用现有绑定**（resolve_dataflow），
+只有找不到才临建，且只删自己临建的那条（dataflow_ephemeral 标记），绝不碰别人的绑定。
 
 凭证：默认全局主账号 AK（需 nas:DescribeDataFlows / CreateDataFlowTask / DescribeDataFlowTasks）。
 响应字段嵌套未在文档固定，故用容错深搜解析（兼容大小写/层级差异）。

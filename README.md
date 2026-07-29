@@ -1,19 +1,26 @@
 # AIOps 智能运维助手
 
-基于 LangChain 0.3 构建的多模式 AI 运维平台。五种运行模式（RAG / 单智能体 / 混合边云 / 多智能体协作 / 飞书 Webhook Bot）之上是一层封装了阿里云（PAI DSW / ECS / OSS / SLS / RAM / Prometheus）、火山引擎（TOS / vePFS）、Jira、GitHub、K8s 与本地 ChromaDB 的工具层。面向算法团队的日常运维：GPU 资源全生命周期、跨云/同云数据搬运、CPFS/vePFS 数据流动、OSS 权限最小化、算力效率与容量治理。每个用户的云 API 调用走 STS AssumeRole，Bot 不用共享 AK。
+基于 LangChain 0.3 构建的多模式 AI 运维平台。五种运行模式（RAG / 单智能体 / 混合边云 / 多智能体协作 / 飞书 Webhook Bot）之上是一层封装了阿里云（PAI DSW / ECS / OSS / SLS / RAM / NAS-CPFS / Prometheus）、火山引擎（TOS / vePFS / IAM）、Jira、GitHub、K8s 与本地 ChromaDB 的工具层。面向算法团队的日常运维：审批制凭证发放、六条数据搬运链、GPU 资源全生命周期、OSS 权限最小化、算力效率与容量治理。每个用户的云 API 调用走 STS AssumeRole，Bot 不用共享 AK。
 
 功能按「新→旧」排列。
 
 ## 功能特性
 
-### 数据外采与数据搬运（最新）
-- **临时 AK/SK 发放**（`core/temp_ak_issuance`）：飞书审批「数据外采访问凭证申请」通过 → 给**外部方**发一组时限 OSS 凭证（生效 + 到期时间窗，policy 内嵌、服务端逐调用判时间，泄漏也随到期自动失效 + 到期硬删）。权限 `read`/`download`/`write` 三者正交（read=列不下载 / download=才给下载 / write=上传无删除）。按有效期分流：`到期−now ≤ TEMP_AK_STS_MAX_SECONDS`（默认 12h）走 **STS 单发**（含 Token 到点自灭），超出走 **方案 B**（RAM 长期 AK + policy 时间窗 + 到期硬删）；线上 `TEMP_AK_STS_MAX_SECONDS=0` 全走方案 B。延长/撤销二合一审批；企业名自动转拼音登录名 + 中文显示名；凭证走审批评论、以管理员身份下发，secret 不落盘/日志。全局审批白名单只处理指定审批 code。三入口：飞书审批（**唯一发凭证路径**）+ Agent 工具 `manage_temp_ak`（`plan`/`status`/`revoke`，无 `issue`）+ CLI。当前仅阿里 OSS，火山云 TOS 为 P1 规划中。
+### 审批驱动的凭证发放（最新）
+- **临时 AK/SK 发放**（`core/temp_ak_issuance`）：飞书审批通过 → 给**外部方 / 使用人**发一组时限 OSS 凭证（生效 + 到期时间窗内嵌进 policy，服务端逐调用判时间，泄漏也随到期自动失效 + 到期硬删）。权限 `read`/`download`/`write` 三者正交（read=列不下载 / download=才给下载 / write=上传无删除）。按有效期分流：`到期−now ≤ TEMP_AK_STS_MAX_SECONDS`（默认 12h）走 **STS 单发**（含 Token 到点自灭），超出走 **方案 B**（RAM 长期 AK + policy 时间窗 + 到期硬删）；线上置 `0` 全走方案 B。延长/撤销二合一审批；主体名自动转拼音登录名 + 中文显示名；凭证走审批评论、以管理员身份下发，secret 不落盘/不入日志；凭证正文附地域 / 外网 Endpoint / 桶域名（避免跨地域 endpoint 403）。三入口：飞书审批（**唯一发凭证路径**）+ Agent 工具 `manage_temp_ak`（`plan`/`status`/`revoke`，无 `issue`）+ CLI。当前仅阿里 OSS，火山云 TOS 为 P1 规划中。
+- **多阿里云主账号发放**（`core/temp_ak_issuance/accounts.py`）：一个 Bot 给两个阿里云主账号发凭证，走「账号档案注册制」——凭证 / Redis 前缀 / 凭证ID 前缀 / RAM 命名 / 桶映射 / 表单字段 / 回执群逐项隔离。第二账号一律走长期 AK 方案，**绝不共用第一账号的 STS 宽角色**；延长/撤销共用同一条审批模板，按凭证ID 前缀分派回对应账号。
+- **RAM / IAM 子账号审批建号**（`core/ram_approval`）：飞书审批通过 → 建阿里云 RAM 和/或火山引擎 IAM 子用户（开控制台、入组、建 AK），凭证走审批评论下发。**只认审批实例级 `APPROVED`**（多级审批下第一级通过不建号）；建号失败同实例同错误只播报一次，密码策略这类确定性失败标终态不再重跑，瞬时失败（限流/网关 5xx）仍可自愈重试。
+- **全局审批白名单**：Bot 只处理配置内的审批 code（RAM 建号 + 各账号发放 + 延长/撤销），其余（含未带 code 的组织审批）一律记日志丢弃。
+
+### 数据搬运（六条链，共享一套编排）
+- **PFS 跨云直传**（`core/pfs_transfer`）：vePFS 与 CPFS 之间物理无直连，编排成三段链——源 PFS 沉降 → 跨云对象存储迁移 → 目的 PFS 预热，段级「跳过已成功段」续跑。`vePFS→CPFS` 三段引擎均已单独真机验证（整链尚未真机跑通），`CPFS→vePFS` 待跨云段验证。卡片确认与 Agent 工具 `apply` **两条路都要管理员确认**。硬约束：每个 PFS 与它的中转桶必须同地域。
+- **SSH 迁移链（杭州 OSS → 新加坡 → 泰国）**（`core/ssh_transfer`）：Bot 用 paramiko 遥控新加坡 ECS 跑两段——段1 `ossutil` 把 OSS 拉到本地挂载盘、段2 `rsync` 推到泰国服务器；起任务后台化 + 只读 marker 轮询，失败卡直接给出 ossutil 报告路径 / 失败对象条数 / 首条根因。私钥以 Fernet 密文配置、运行时只进内存，host key 固定（禁 AutoAdd）；路径过严格白名单防 ssh 双跳注入。入口：飞书「数据迁移（泰国H200）」+ CLI。
 - **跨云数据迁移**（`core/transfer`）：给一条路径自动判方向、推目的桶。方向决定引擎——搬入 OSS 用阿里「在线迁移服务」(hcs_mgw)，搬入 TOS 用火山「迁移服务」。一期打通 `TOS→OSS`；>1TB 走管理员审批。
 - **同云桶间迁移**（`core/bucket_transfer`）：同账号跨 region/桶搬运，阿里 `oss://→oss://`、火山 `tos://→tos://`；OSS 自动探测源/目的 region，跨 region 走公网。与跨云迁移独立命名空间，仅复用其引擎。
-- **CPFS/NAS 数据流动**（`core/cpfs_dataflow`）：阿里 NAS DataFlow **预热**（OSS→CPFS，Import）/**沉降**（CPFS→OSS，Export）。只查现有 DataFlow + 提交任务，按目标子目录匹配最长前缀绑定；智算版/通用版自动分支。飞书选择器从发现的 CPFS↔OSS 绑定里选。
+- **CPFS/NAS 数据流动**（`core/cpfs_dataflow`）：阿里 NAS DataFlow **预热**（OSS→CPFS，Import）/**沉降**（CPFS→OSS，Export）。**优先复用现有 DataFlow 绑定**（按目标子目录匹配最长前缀，别人的绑定绝不删）；找不到可复用的才临时建一条、任务终态后自动删（只对智算版开放——通用版建流会清空 Fileset 已有数据，直接拒绝）。智算版/通用版参数自动分支；飞书选择器从发现的 CPFS↔OSS 绑定里选。
 - **火山 vePFS/TOS 数据流动**（`core/vepfs_dataflow`）：火山「文件存储 vePFS」**预热**（TOS→vePFS）/**沉降**（vePFS→TOS）。无持久 DataFlow 对象，提交任务直接带桶/前缀，方向由地址类型自动判断。与 CPFS 共用三步级联向导卡（选云→选地区→表单）。
-- **数据流动/迁移在途任务对账**：调度器每 2 分钟对账在途任务。后台轮询线程随容器重启会死，对账线程随容器复活兜底——重启后任务完成也会自动补推结果卡（跑完必通知）。在线推送与对账推送共用 Redis `SET NX` 闸门，跨线程只推一次。
-- **三入口共享核心**：以上迁移/流动能力均是「飞书卡片 + Agent 工具 + CLI」三入口共用一套编排。飞书发意图→确认卡→后台推进度/结果卡（优先推发起人，空则降级配置频道）；Agent 工具 `manage_transfer`/`manage_cpfs_dataflow`/`manage_vepfs_dataflow`；CLI `python -m core.<pkg>.cli`（dry-run 默认）。
+- **数据流动/迁移在途任务对账**：调度器每 2 分钟对账**六条链**的在途任务。后台轮询线程随容器重启会死，对账线程随容器复活兜底——重启后任务完成也会自动补推结果卡（跑完必通知）。在线推送、对账、按 ID 查询共用 Redis `SET NX` 闸门，同一任务的结果卡至多推一张。
+- **多入口共享核心**：以上搬运能力都是「飞书卡片 + CLI」（多数再加「Agent 工具」）共用一套编排。飞书发意图→确认卡→后台推进度/结果卡（优先推发起人，空则降级配置频道）；Agent 工具 `manage_transfer`/`manage_cpfs_dataflow`/`manage_vepfs_dataflow`/`manage_pfs_transfer`；CLI `python -m core.<pkg>.cli`（dry-run 默认）。**SSH 迁移链与同云桶间迁移只有飞书卡片 + CLI，没有 Agent 工具**；发送 `查询进度 <任务ID>` 可实时重查云端（`tr-`/`cpfs-`/`vepfs-`/`sgp-`/`xpfs-` 前缀）。
 
 ### 权限、算力与容量治理
 - **OSS 权限最小化同步**（`core/oss_perm`）：飞书「舞肌算法组权限统计」多维表格 → 每人一条最小权限自定义 RAM 策略并挂到其 RAM 用户。桶级/目录级两档粒度（先放桶级观察再收紧）。飞书表单卡选择性下发（粒度单选默认桶级 + 成员多选默认全选 + 一键确认）；CLI `--apply`/`--audit`（对账多授/少授/孤儿）。
@@ -64,14 +71,17 @@ langchaindev/
 │   ├── multi_agent_system.py   # 多智能体协作（诊断 + 执行）
 │   ├── feishu_bot/             # 飞书 Webhook 服务（Flask，含 routes/actions/messages/gpu_flow）
 │   ├── dsw_scheduler.py        # 后台调度器（工单轮询/实例监控/早报/巡检/对账…）
-│   ├── temp_ak_issuance/       # 临时 AK/SK 发放（审批门/policy 时间窗/STS 或方案B/清理）
+│   ├── temp_ak_issuance/       # 临时 AK/SK 发放（账号档案/审批门/policy 时间窗/STS 或方案B/清理）
+│   ├── ram_approval.py         # RAM / 火山 IAM 子账号审批建号 + 凭证评论下发
+│   ├── ram_query.py            # 阿里 RAM 账号只读查询（+ volcano_iam_query.py 火山镜像）
+│   ├── pfs_transfer/           # PFS 跨云直传（vePFS↔CPFS 三段链编排）
+│   ├── ssh_transfer/           # SSH 迁移链 杭州OSS→新加坡→泰国（paramiko + ossutil + rsync）
 │   ├── transfer/               # 跨云迁移（paths/engine_mgw/engine_tos/orchestrator/cli）
 │   ├── bucket_transfer/        # 同云桶间迁移（oss→oss / tos→tos）
 │   ├── cpfs_dataflow/          # 阿里 CPFS/NAS 数据流动（预热/沉降）
 │   ├── vepfs_dataflow/         # 火山 vePFS/TOS 数据流动（预热/沉降）
 │   ├── dataflow_cards.py       # CPFS/vePFS 共用三步级联向导卡
 │   ├── oss_perm/               # OSS 权限最小化同步（permsync/cards/actions）
-│   ├── cpfs_dataflow.py        # (Phase-3 SINKING) NAS DataFlow Export 引擎
 │   ├── capacity_monitor.py     # 容量巡检
 │   ├── capacity_bitable.py     # 容量结果写飞书多维表格
 │   ├── dataset_dashboard.py    # 数据集大盘多维表格维护
@@ -87,6 +97,7 @@ langchaindev/
 │   │                           #   cluster_health / cluster_mfu / gpu_distribution
 │   ├── volcano/                # tos（容量）/ vepfs_dataflow
 │   ├── temp_ak_issuance/       # manage_temp_ak
+│   ├── pfs_transfer/           # manage_pfs_transfer
 │   ├── transfer/               # manage_transfer
 │   ├── cpfs/                   # manage_cpfs_dataflow
 │   ├── feishu/                 # notify（消息卡片）+ cards（卡片原语）
@@ -198,7 +209,32 @@ GPU_PRICE_PER_HOUR=35.0         # 定价（元/GPU·小时）
 GPU_QUOTA_HOURS_PER_MONTH=200.0 # 每人月度配额上限（GPU·小时）
 GPU_IDLE_THRESHOLD_PCT=5.0      # 空转检测阈值（%）
 GPU_IDLE_WARN_MINUTES=30        # 空转持续多久告警（分钟）
+
+# 审批制凭证发放（临时 AK/SK）
+TEMP_AK_ENABLED=true
+TEMP_AK_APPROVAL_CODE=            # 发放审批 definitionCode（主账号）
+TEMP_AK_EXTEND_APPROVAL_CODE=     # 延长/撤销审批（各账号共用同一条）
+TEMP_AK_STS_MAX_SECONDS=0         # 0=全走方案 B（长期 AK + 时间窗），不需要 STS 宽角色
+TEMP_AK_BUCKET_MAP={}             # 展示桶名 → {"region":..,"bucket":..}
+TEMP_AK_CLEANUP_HOUR=3            # 每天北京 HOUR:35 硬删到期凭证
+# 第二阿里云主账号（短标识 1949）：独立 AK / 审批 / 桶表 / 回执群，其余隔离项由代码定死
+ALIYUN_1949_ACCESS_KEY_ID=
+ALIYUN_1949_ACCESS_KEY_SECRET=
+TEMP_AK_1949_APPROVAL_CODE=
+TEMP_AK_1949_BUCKET_MAP={}
+
+# 数据搬运链（按需开启，完整清单见 .env.example）
+TRANSFER_ENABLED=false            # 跨云迁移
+BUCKET_TRANSFER_ENABLED=false     # 同云桶间迁移
+CPFS_DATAFLOW_ENABLED=false       # 阿里 CPFS 预热/沉降
+VEPFS_DATAFLOW_ENABLED=false      # 火山 vePFS 预热/沉降
+PFS_TRANSFER_ENABLED=false        # PFS 跨云直传（需 PFS_STAGING_MAP，PFS 与中转桶必须同地域）
+SSH_TRANSFER_ENABLED=false        # SSH 迁移链（需 SGP_SSH_KEY_ENC / SGP_SSH_HOST_KEY / THAI_*）
 ```
+
+> **别设 `ALIBABA_CLOUD_ACCESS_KEY_ID/SECRET` 环境变量**：RAM client 的零参路径会优先读它，多阿里云主账号下会把所有账号的建号请求劫持到同一个账号。启动自检会对此告警，并打印已注册的账号档案。
+>
+> 改服务器 `.env` 后必须 `docker compose up -d --force-recreate`：`restart` 不重载 `env_file`，新账号档案不会生效。
 
 ### 初始化知识库
 
@@ -287,13 +323,22 @@ python main.py --mode bot               # 飞书机器人（端口 8088）
 
 | 发送内容 | 触发动作 |
 |----------|----------|
+| `数据迁移（泰国H200）` | SSH 迁移链录入卡（杭州 OSS → 新加坡 → 泰国） |
+| `vepfs 迁到 cpfs` 等（同时提到两端） | PFS 跨云直传向导卡 |
+| `桶间迁移` / `同云迁移` | 同云桶间迁移录入卡 |
+| `预热` / `沉降` | CPFS/vePFS 数据流动三步向导（选云→选地区→表单） |
+| `把 tos://a/ 迁到 oss://b/` | 跨云迁移确认卡 |
+| `查询进度 <任务ID>` | 实时重查云端并回进度（`tr-`/`cpfs-`/`vepfs-`/`sgp-`/`xpfs-`） |
+| `卡分布` / `谁在用卡` | GPU 卡分布摘要卡 + 实时大盘链接 |
 | `申请GPU` / `需要GPU` / `我要训练` | 弹出 GPU 申请卡片 |
 | `我的实例` / `my dsw` | 查看运行中实例，支持在线延续/停止 |
 | `注册AK: AccessKeyId AccessKeySecret` | 绑定个人阿里云凭证 |
-| 其他任意问题 | 通过 Agent 工具链回答，并附实时指标趋势图 |
+| 其他任意问题 | 通过 Agent 工具链回答，命中指标类问题时附实时趋势图 |
+
+> 意图判定按上表从上到下短路，越通用的话术排得越靠后（否则「数据迁移」会被跨云迁移入口抢走）。
 
 > 在飞书开放平台配置两个回调地址：
-> - 消息事件：`https://your-domain/feishu/event`
+> - 消息事件：`https://your-domain/feishu/event`（同时接收审批事件，仅白名单内的审批 code 会被处理）
 > - 卡片回调：`https://your-domain/feishu/card_action`
 
 ## 调度器架构（`core/dsw_scheduler.py`）
@@ -305,29 +350,34 @@ python main.py --mode bot               # 飞书机器人（端口 8088）
 | `jira-poll` | 20 秒 | 拉取 Jira 待办工单 → 验证注册/配额/审批 → 创建 DSW 实例 |
 | `dsw-check` | 5 分钟 | 检查运行中实例的超时状态和 GPU 空转指标 |
 | `morning-report` | 每天北京 09:00 | 推两卡：各用户实例汇总 + 集群 MFU 汇总 |
-| `dataflow-reconcile` | 2 分钟 | 对账在途迁移/数据流动任务，重启后完成也补推结果卡 |
+| `dataflow-reconcile` | 2 分钟 | 对账**六条搬运链**的在途任务，重启后完成也补推结果卡 |
 | `capacity-monitor` | N 小时（对齐整点，opt-in） | 扫 OSS/TOS 容量 + 增量推卡 + 写多维表格 |
 | `dataset-dashboard` | N 小时（对齐整点，opt-in） | 维护飞书「数据集大盘」多维表格 |
 | `oss-perm-push` | 每天北京 HOUR:20（opt-in） | OSS 权限对账，把待同步权限推群（带批准按钮） |
-| `temp-ak-cleanup` | 每天北京 HOUR:35（opt-in） | 扫临时外采凭证，对已到期的方案 B 凭证硬删 AK+policy+user |
+| `temp-ak-cleanup` | 每天北京 HOUR:35（opt-in） | 逐个阿里云主账号扫临时凭证，对已到期的方案 B 凭证硬删 AK+policy+user |
 
 对账线程随容器一起重启复活，因此后台轮询线程即使随重启死掉，任务跑完仍会被对账补推——在线推送与对账推送共用 Redis `SET NX` 闸门，跨线程只推一次。
 
 主要 Redis Key 命名空间：
 
 ```
-dsw:ticket:{ticket_key}                → 工单/实例状态（7 天 TTL）
-agent:chat_history:{session_id}        → 会话历史（最近 20 条，7 天空闲 TTL）
-agent:chat_summary:{session_id}        → 更早对话的滚动摘要（GLM 压缩，7 天空闲 TTL）
-user:ak:{open_id}                      → 用户个人 AK/SK（Fernet 加密，30 天闲置 TTL）
-gpu:quota:{open_id}:{YYYYMM}           → 当月已用 GPU·小时数
-aliyun:sts:{open_id}:{role_arn}        → STS 临时凭证缓存（到期前 5 分钟刷新）
+temp_ak:grant:{grant_id}               → 临时凭证发放记录（只存 ak_id，绝不存 secret）
+temp_ak_1949:grant:{grant_id}          → 第二阿里云主账号的发放记录（按账号档案分命名空间）
+ram_approval:instance:{code}           → RAM/IAM 建号审批处理记录（含终态标记）
+ram_approval:instance:failnotice:{code}:{sig} → 同实例同错误只评论一次的播报闸门（7 天）
+pfs:transfer:job:{job_id}              → PFS 跨云直传三段链状态（30 天 TTL）
+ssh:transfer:job:{job_id}              → 杭州→新加坡→泰国两段链状态
 transfer:job:{job_id}                  → 跨云迁移状态机（30 天 TTL）
 bkt:transfer:job:{job_id}              → 同云桶间迁移状态机
 cpfs:dataflow:job:{job_id}             → CPFS 预热/沉降任务状态
 vepfs:dataflow:job:{job_id}            → vePFS 预热/沉降任务状态
-temp_ak:grant:{grant_id}               → 临时外采凭证发放记录（只存 ak_id，绝不存 secret）
-dataflow:notified:{job_id}             → 对账/在线推送共用的 SET NX 闸门
+dataflow:notified:{job_id}             → 六条链共用的结果卡 SET NX 闸门
+dsw:ticket:{ticket_key}                → 工单/实例状态（7 天 TTL）
+gpu:quota:{open_id}:{YYYYMM}           → 当月已用 GPU·小时数
+agent:chat_history:{session_id}        → 会话历史（最近 20 条，7 天空闲 TTL）
+agent:chat_summary:{session_id}        → 更早对话的滚动摘要（GLM 压缩，7 天空闲 TTL）
+aliyun:sts:{open_id}:{role_arn}        → STS 临时凭证缓存（到期前 5 分钟刷新）
+user:ak:{open_id}                      → 用户个人 AK/SK（Fernet 加密，30 天闲置 TTL）
 capacity:snapshot:{vendor}:{bucket}:{prefix}  → 上次容量巡检快照（算增量）
 mfu:snapshot / gpu:dist:snapshot       → MFU / GPU 卡分布快照（区域切换、大盘秒回）
 feishu:event_dedup:{event_id}          → Webhook 幂等去重（1h TTL）
@@ -340,6 +390,7 @@ Agent 通过 `TOOL_GROUPS` 按意图选挂 1–2 组工具（`tools/__init__.py`
 | 工具名 | 子包 | 功能 |
 |--------|------|------|
 | `manage_temp_ak` | temp_ak_issuance | 临时外采凭证 plan/status/revoke（发凭证仅走审批） |
+| `manage_pfs_transfer` | pfs_transfer | vePFS↔CPFS 跨云直传 plan/apply/status（apply 需管理员） |
 | `manage_transfer` | transfer | 跨云迁移 plan/apply/status（TOS↔OSS） |
 | `manage_cpfs_dataflow` | cpfs | 阿里 CPFS/NAS 数据流动 list/preheat/sink/status |
 | `manage_vepfs_dataflow` | volcano | 火山 vePFS/TOS 数据流动 preheat/sink/status |
@@ -508,7 +559,11 @@ ngrok http 8088
 
 ## 安全注意事项
 
+- **发凭证只有审批一条路**：Agent 工具和 CLI 都没有 `issue` 动作；审批处理器只认**回拉实例详情后的实例级 `APPROVED`**（多级审批下第一级通过不发），拿不到实例号一律不发。审批事件先过白名单，非配置内的 code 直接丢弃。
+- **凭证不落盘**：临时凭证的 secret/token 只在审批评论正文出现一次，Redis 记录只存 `ak_id`，日志与内部群卡全脱敏。
+- **多主账号隔离**：每个阿里云主账号用自己的 RAM 可写 AK（显式传参），凭证ID / Redis / RAM 命名 / 桶表逐项隔离；非默认账号**禁用 STS 分支**（那条用的是默认账号的宽角色）。**不要设 `ALIBABA_CLOUD_ACCESS_KEY_*` 环境变量**，它会劫持所有账号的建号请求。
 - **用户凭证加密 + STS**：用户自填 AK/SK 经 Fernet 加密后入 Redis（`BOT_CREDS_ENCRYPTION_KEY`）；用户发起的云动作走 STS AssumeRole 换临时凭证，Bot 不用共享 AK。Master AK 仅需 `STSAssumeRoleAccess + RAMReadOnlyAccess`。
+- **SSH 迁移链**：bot→新加坡的私钥以 Fernet 密文存配置、运行时只进内存不落盘；host key 固定、禁 `AutoAddPolicy`；所有用户输入的桶/前缀/目标子目录过严格白名单（段2 是 ssh 双跳，`shlex.quote` 只护得住第一层）。
 - **飞书 Verification Token**：务必配置 `FEISHU_VERIFICATION_TOKEN`，防止伪造事件请求
 - **K8s 操作**：Pod 重启工具内置命名空间白名单，禁止对 `prod`、`production`、`kube-system` 执行操作
 - **Jira PAT**：使用个人访问令牌（Personal Access Token）而非账号密码，定期轮换
@@ -516,18 +571,16 @@ ngrok http 8088
 ## 开发与测试
 
 ```bash
-# 测试 LLM API 连通性
-python test_llm_apis.py
+pytest                                # 单测 + 工具测试（默认跳过 integration）
+pytest -m integration                 # 仅集成测试（需真实 Grafana/Jira/LLM/飞书）
+pytest -m ""                          # 全部
+pytest tests/unit/test_aliyun_sts.py  # 单个文件
+pytest -k test_router                 # 按名字匹配
 
-# 测试工具技能
-python test_skills.py
-
-# 测试 Grafana 集成
-python test_grafana.py
-
-# 验证飞书 Bot（需服务已启动）
-curl -X POST http://localhost:8088/health
+curl -X POST http://localhost:8088/health   # 验证飞书 Bot（需服务已启动）
 ```
+
+`tests/conftest.py` 自动用 `fakeredis` 顶替 Redis、注入测试用 Fernet key，并把飞书发送 / 外部 HTTP / SSH 连接打成空操作或硬失败（防单测真往群里发消息、真连生产机）。
 
 ## 注意事项
 
