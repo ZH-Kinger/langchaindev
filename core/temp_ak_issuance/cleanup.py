@@ -57,8 +57,10 @@ def revoke_grant(grant: dict, *, log=None) -> bool:
         return True
 
     from alibabacloud_ram20150501 import models as m
-    from core.oss_perm.permsync import _err_code, make_ram_client
-    client = make_ram_client()
+    from core.oss_perm.permsync import _err_code
+    # **必须按 grant 所属账号取 client**：拿 A 账号的 AK 去删 B 账号的用户，轻则报错、
+    # 重则在 A 账号里误伤同名对象。permsync_client(grant) 内部按 grant["account"] 分派。
+    client = o.issuer.permsync_client(grant)
     user = grant.get("user_name", "")
     pol = grant.get("policy_name", "")
     try:
@@ -98,27 +100,46 @@ def revoke_grant(grant: dict, *, log=None) -> bool:
 
 
 def sweep_expired(now: float | None = None) -> list[str]:
-    """扫 Redis temp_ak:grant:*，对已 ISSUED 且 expire<now 的方案 B grant 硬删。返回被吊销的 grant_id 列表。"""
+    """逐账号扫各自的 `<前缀>grant:*`，对已 ISSUED 且 expire<now 的方案 B grant 硬删。
+
+    **按档遍历、不做全局单扫**：每个账号有独立 Redis 前缀，且 revoke_grant 会按 grant["account"]
+    取对应账号的 AK。单扫 + 默认 client 会把别的账号的 grant 也捞进来、再拿错账号的凭证去删。
+    某个账号扫挂了不影响其它账号（各自 try）。返回被吊销的 grant_id 列表。
+    """
     from utils.redis_client import get_redis
+    from . import accounts
     now = now if now is not None else time.time()
     revoked: list[str] = []
     try:
         r = get_redis()
-        for key in r.scan_iter(o._KEY_PREFIX + "*"):
-            raw = r.get(key)
-            if not raw:
-                continue
-            try:
-                grant = json.loads(raw)
-            except Exception:
-                continue
-            if grant.get("stage") != o.STAGE_ISSUED:
-                continue
-            if float(grant.get("expire", 0)) >= now:
-                continue
-            if revoke_grant(grant):
-                revoked.append(grant["grant_id"])
-                logger.info("[temp_ak] 到期硬删 grant=%s user=%s", grant["grant_id"], grant.get("user_name"))
     except Exception:
-        logger.error("[temp_ak] sweep failed", exc_info=True)
+        logger.error("[temp_ak] sweep failed: redis 不可用", exc_info=True)
+        return revoked
+    for profile in accounts.profiles():
+        try:
+            keys = list(r.scan_iter(profile.redis_prefix + "grant:*"))
+        except Exception:
+            logger.error("[temp_ak] sweep 扫描失败 %s", profile.label, exc_info=True)
+            continue
+        for key in keys:
+            # **try 必须按 grant 包，不能按账号包整个循环**：revoke_grant 现在会抛
+            # （缺该账号 AK / 账号维度自相矛盾），按账号包的话一条脏记录就会中断该账号
+            # 剩余全部 grant 的清理，且每轮都在同一条上中断 → 到期凭证永久清不掉，
+            # 只留一行 ERROR。逐条隔离，坏一条只跳一条。
+            try:
+                raw = r.get(key)
+                if not raw:
+                    continue
+                grant = json.loads(raw)
+                if grant.get("stage") != o.STAGE_ISSUED:
+                    continue
+                if float(grant.get("expire", 0)) >= now:
+                    continue
+                if revoke_grant(grant):
+                    revoked.append(grant["grant_id"])
+                    logger.info("[temp_ak] 到期硬删 %s grant=%s user=%s",
+                                profile.label, grant["grant_id"], grant.get("user_name"))
+            except Exception:
+                logger.error("[temp_ak] sweep 单条失败 %s key=%s（跳过该条，继续其余）",
+                             profile.label, key, exc_info=True)
     return revoked

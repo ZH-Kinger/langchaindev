@@ -28,6 +28,13 @@ def _approval_allowlist() -> set:
         for c in (settings.TEMP_AK_APPROVAL_CODE, settings.TEMP_AK_EXTEND_APPROVAL_CODE):
             if c:
                 codes.add(c)
+        # 多阿里云主账号：各账号有自己的发放审批 code（延长/撤销复用上面那条共用模板）。
+        # 档案未注册（缺 code 或缺该账号 AK）就不会出现在这里，天然不会放行没配好的账号。
+        try:
+            from core.temp_ak_issuance import accounts as temp_ak_accounts
+            codes |= temp_ak_accounts.issue_codes()
+        except Exception:
+            logger.error("[temp_ak] 账号档案装配失败，白名单仅含基础 code", exc_info=True)
     return codes
 
 

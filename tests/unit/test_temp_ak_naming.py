@@ -158,9 +158,18 @@ class _FakeRamClient:
 
 
 def test_issue_ram_passes_display_name(monkeypatch):
+    """#63 后 permsync_client 收 grant（按 grant 所属账号取 AK）——桩必须接一个参数，
+    并断言**传进去的就是那个 grant**：客户端按 grant 分派是多账号隔离的命门，
+    这里若传成 None/别的 dict，_issue_ram 就会退回默认账号的 AK 去别人账号里建号。"""
     import time
     fake = _FakeRamClient()
-    monkeypatch.setattr(issuer, "permsync_client", lambda: fake)
+    seen = {}
+
+    def _client(grant=None):
+        seen["grant"] = grant
+        return fake
+
+    monkeypatch.setattr(issuer, "permsync_client", _client)
     now = time.time()
     grant = {
         "grant_id": "tak-abc", "mode": "ram", "bucket": "b", "prefix": "p/",
@@ -174,3 +183,5 @@ def test_issue_ram_passes_display_name(monkeypatch):
     assert fake.created["display_name"] == "某某科技-临时外采用户"
     assert fake.created["user_name"] == "tempak-ext-abc123"
     assert creds["access_key_id"] == "LTAI_NEW"
+    # 客户端是按**这个 grant** 取的（不是零参/不是别的 grant）
+    assert seen["grant"] is grant

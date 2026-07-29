@@ -600,3 +600,36 @@ dev 的默认反射是**先拉子 agent**、不是自己扛。下面的活**默�
   ③ **`.temp` 残片是第二个独立触发点（重传时才暴露）**：已强制单分片后重传仍 rc=4。真因是上次失败留下的 42366 个 `.temp`（169.53 GiB）—— ossutil 见已存在的 `.temp` 会当续传、从非零 offset 写 → ossfs2 照样拒。**同一对象实测：留着 .temp → rc=4（0.6s 就挂）；删掉 → rc=0（492697406 B）**。故 `start_stage1` 增加前置 `find -name '*.temp' -delete`：不清的话，段1 只要被中断一次（kill/重启/抖动），**之后每一次重试都必然失败**。源桶内无 .temp 结尾对象（已核），按后缀删安全。
   ④ 前一单 `sgp-841b88a7b0dd`(rc=2) 是**另一个**独立缺口：源桶在 cn-beijing，SGP 的 ossutil 写死杭州 endpoint → 403 秒退。`start_stage1`/`estimate_source` 都不带 `-e`。**本批未修**，与 ossfs2 修复互斥不失效，待下一批。
   ⑤ 教训：我曾据「旧 ckpt 副本 + 新 flags 跑通」断言「旧断点无害、不用清」——但那次实验往**空目录**写，与真实重传（满地 .temp）条件不同，结论下早了；auditor 当时已点出取证链弱点。
+
+[2026-07-29 #63 第二阿里云主账号(1949)接入 —— 账号档案注册制]
+[DEV] 需求：第二主账号 UID 1339279783371949 也要发临时 OSS 凭证，与现有账号**数据隔离**，飞书复用同一应用。
+  **为什么不是整包复制**（用户原话是"复制一个新文件"）：延长/撤销审批被两账号**共用同一个 definitionCode**
+  (E9333E62)，同一 code 只能有一个处理器认领（routes 三个 should_handle_* 均严格等值），两份独立副本必然
+  一个抢到另一个永远收不到。故延长/撤销必须由单一处理器按「凭证ID 前缀 → grant → 账号」分派 → grant 需带
+  账号维度 → 采用 AccountProfile 注册制（新文件 core/temp_ak_issuance/accounts.py 收拢第二账号全部差异）。
+  副作用红利：#55 那个实例级 APPROVED 硬化门不必再复制第三份。
+  新审批「数据访问凭证申请（产线）」(0133C4FC) 经飞书 API 实拉，与现有模板三点不同：无「平台」单选(恒阿里云)、
+  主体是「使用人名称」而非企业名、多一个「备注」。widget id 全部写死，无需真机试错。
+  隔离维度：凭证(各账号自己的 RAM 可写 AK，显式传参) / Redis(temp_ak: vs temp_ak_1949:) /
+  凭证ID(tak- vs tak1949-) / 云上命名(tempak- vs tempak-1949-) / 桶表 / 字段映射 / 回执群。
+  桶映射真机确认：产线数据 → (cn-shenzhen, wuji-product)。
+  **顺带修的真缺口**：凭证正文原本不含地域/Endpoint —— 深圳桶用杭州 endpoint 会撞 403
+  "must be addressed using the specified endpoint"，使用方会以为凭证无效。现在带地域/外网Endpoint/桶域名。
+[AUDITOR] 第一轮：**1 条阻塞** —— `_issue_sts` 完全不认账号，用默认账号 Master AK + 默认账号宽 OSS 角色
+  给 1949 申请人签发；1949 申请人在「访问目录」填一个默认账号的桶即可拿到默认账号身份的可用凭证。
+  且 TEMP_AK_STS_MAX_SECONDS **代码默认值 43200（危险侧）**，只靠线上 .env 写 0 才不触发 = fail-open。
+  另 4 中 10 低。dev 已修：classify_mode 非默认档一律 RAM + _issue_sts 账号门（双保险 fail-closed）。
+  MED-1 档案下线致**静默失效**（sweep 扫不到该前缀 + _key 退默认档读不到 → 外部方长期 AK 永久残留云上、
+  运维看不见）→ 改为"三项任一存在即注册，AK 缺失只在 ram_client 抛"。MED-2 两套真相源交叉校验。
+  MED-3 分账号回执群（chat_id 原是死字段）。MED-4 上线须 force-recreate。
+  LOW-1 备注换行可在凭证评论里伪造整行 → 压单行。LOW-2 防串对人名过弱（张三⊂张三丰）→ 人名档精确相等。
+  LOW-7 make_ram_client 半参静默回落到另一账号凭证 → 抛错。
+[AUDITOR] 增量复审：**可提交无阻塞**。新增 MED-A（dev 本轮自引入）：permsync_client 变成会抛之后，
+  sweep 的 try 按账号包住整个循环 → 一条脏记录中断该账号剩余全部清理且每轮都断 → 到期号永久清不掉。
+  已改为 per-grant 包 try。LOW-A：_issue_sts 只看 grant["account"] 不看凭证ID 前缀，与 RAM 路径不对称，
+  「account 被抹 + tak1949- 前缀」能过账号门（实测复现）→ 抽出 accounts.assert_account_consistent 两边共用。
+  LOW-C issue_grant 成功不清 error。print_validate 加 ALIBABA_CLOUD_* 劫持告警 + 打印已注册档案
+  （force-recreate 生效与否的客观依据）。_subject_label 三份漂移收拢到 accounts.subject_label_for。
+[TESTER] 1737 passed / 1 skipped / 0 failed（含 STS 跨账号越权专项回归 + 隔离对抗用例）。
+[已知约束] 延长/撤销共用同一审批模板 ⇒ 1949 的审批人也能批准默认账号凭证的延长/撤销（只能延长既有范围、
+  不能扩权）。这是飞书审批权限层面的事，代码侧无法拆；要拆需在飞书为第二账号单建一条延长/撤销模板。

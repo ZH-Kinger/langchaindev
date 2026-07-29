@@ -16,15 +16,8 @@ from . import delivery, orchestrator
 
 logger = get_logger(__name__)
 
-# 表单字段名映射：env 覆盖候选 + 内置别名（含真机 widget id，名字改了也能命中）。
-# 真机审批「数据外采访问凭证申请」(5B4A…) 实际 5 控件：平台/使用企业名称/权限设置/DateInterval/申请目录。
-_FIELDS = {
-    "platform":      ("TEMP_AK_FIELD_PLATFORM",      ("平台", "云平台", "platform", "widget17846401222860001")),
-    "enterprise":    ("TEMP_AK_FIELD_ENTERPRISE",    ("使用企业名称", "企业名称", "使用方", "外采企业", "enterprise", "widget17846886904010001")),
-    "perm":          ("TEMP_AK_FIELD_PERM",          ("权限设置", "权限", "读写", "perm", "widget17846401501570001")),
-    "date_interval": ("TEMP_AK_FIELD_DATE_INTERVAL", ("DateInterval", "有效期", "生效到期", "起止时间", "date_interval", "widget17846402309610001")),
-    "directory":     ("TEMP_AK_FIELD_DIRECTORY",     ("申请目录", "目录", "路径", "directory", "widget17846402564230001")),
-}
+# 发放表单的字段映射已按账号收拢到 accounts._FIELDS_DEFAULT / _FIELDS_1949（经 profile.fields 取用）。
+# 这里不再留一份副本——两处并存必然漂移（改了一处忘另一处）。
 
 # 延期/撤销审批「访问凭证延长/撤销 申请」4 控件：凭证ID / 撤销·延长 / 使用企业信息 / DateInterval。
 _EXTEND_FIELDS = {
@@ -35,23 +28,27 @@ _EXTEND_FIELDS = {
 }
 
 
-def should_handle_event(payload: dict[str, Any]) -> bool:
-    """精确匹配 TEMP_AK_APPROVAL_CODE。要求 code 恰等于本模板（不做 no-code 兜底），
-    与 ram_approval 按各自 code 分流、互不误抢。"""
+def _issue_profile(payload: dict[str, Any]):
+    """发放事件 → 账号档案（按 definitionCode 精确定档）。非任何已注册档案返回 None。"""
     from core import ram_approval
-    target = settings.TEMP_AK_APPROVAL_CODE
-    if not target:
-        return False
+    from . import accounts
     et = ram_approval._event_type(payload).lower()
     code = ram_approval._extract_approval_code(payload)
     if "approval" not in et and not code:
-        return False
-    return code == target
+        return None
+    return accounts.by_issue_code(code)
+
+
+def should_handle_event(payload: dict[str, Any]) -> bool:
+    """精确匹配**任一已注册账号**的发放审批 code（不做 no-code 兜底），
+    与 ram_approval 按各自 code 分流、互不误抢；账号之间也靠 code 严格互斥。"""
+    return _issue_profile(payload) is not None
 
 
 def handle_temp_ak_event(payload: dict[str, Any]) -> dict[str, Any]:
     from core import ram_approval
-    if not should_handle_event(payload):
+    profile = _issue_profile(payload)
+    if profile is None:
         return {"ignored": True, "reason": "not_temp_ak"}
 
     status = (ram_approval._extract_status(payload) or "").upper()
@@ -61,12 +58,12 @@ def handle_temp_ak_event(payload: dict[str, Any]) -> dict[str, Any]:
     if not status and not instance_code:
         return {"ignored": True, "reason": "no_status_no_instance"}
 
-    gid = orchestrator.grant_id_for(instance_code)
+    gid = orchestrator.grant_id_for(instance_code, profile)
     existing = orchestrator.get_grant(gid)
     if existing and existing.get("stage") in (orchestrator.STAGE_ISSUED, orchestrator.STAGE_REVOKED):
         return {"ignored": True, "reason": "already_issued", "grant_id": gid}
 
-    lock = orchestrator.claim(instance_code)
+    lock = orchestrator.claim(instance_code, profile)
     if instance_code and not lock:
         return {"ignored": True, "reason": "already_processing", "grant_id": gid}
 
@@ -81,13 +78,15 @@ def handle_temp_ak_event(payload: dict[str, Any]) -> dict[str, Any]:
             logger.info("[temp_ak] instance NOT fully approved (status=%s) instance=%s; skip issue",
                         instance_status or "-", instance_code)
             return {"ignored": True, "reason": f"instance_status={instance_status or 'none'}", "grant_id": gid}
+        # 回拉详情里的 code 必须仍指向**同一个账号档案**——防事件与详情分属不同账号时错发。
         code = ram_approval._extract_approval_code(detail) or ram_approval._extract_approval_code(payload)
-        if code and code != settings.TEMP_AK_APPROVAL_CODE:
+        if code and code != profile.issue_code:
             return {"ignored": True, "reason": "approval_code_mismatch"}
 
-        spec = parse_temp_ak_request(detail, payload)
+        spec = parse_temp_ak_request(detail, payload, profile)
         requester, _ = ram_approval._extract_requester_ids(detail, payload)
-        grant = orchestrator.create_grant_record(spec, instance_code=instance_code, requester=requester)
+        grant = orchestrator.create_grant_record(spec, instance_code=instance_code,
+                                                 requester=requester, profile=profile)
 
         if getattr(settings, "FEISHU_RAM_APPROVAL_DRY_RUN", False):
             logger.info("[temp_ak] dry-run: 计划 %s（未真发）", issuer_plan_summary(grant))
@@ -101,7 +100,7 @@ def handle_temp_ak_event(payload: dict[str, Any]) -> dict[str, Any]:
         if g:
             orchestrator.fail_grant(g, str(exc))
         logger.error("[temp_ak] issue failed instance=%s", instance_code, exc_info=True)
-        _notify_internal_failure(instance_code, exc)
+        _notify_internal_failure(instance_code, exc, profile)
         return {"ignored": False, "error": str(exc)}
     finally:
         orchestrator.release(lock)
@@ -221,7 +220,8 @@ def _parse_extend_action(raw) -> str:
 
 
 def _notify_internal_action(grant: dict, text: str) -> None:
-    chat = settings.TEMP_AK_CHAT_ID or settings.FEISHU_CHAT_ID
+    from . import accounts
+    chat = accounts.chat_id_for(grant)      # 按该凭证所属账号取群，别混进别的账号运维群
     if not chat:
         return
     try:
@@ -232,28 +232,53 @@ def _notify_internal_action(grant: dict, text: str) -> None:
 
 
 def _verify_enterprise(grant: dict, enterprise: str) -> None:
-    """防串企业：延期表单的使用企业信息须与原凭证一致（宽松包含匹配容错格式差异）。
+    """防串主体：延期表单的使用方信息须与原凭证一致（宽松包含匹配容错格式差异）。
 
-    fail-safe：原凭证有企业名而延期表单留空 → 无法核实归属 → 拒（否则引用别家 grant_id + 留空即绕过防串）。
-    仅当原凭证本身无企业名时才跳过（无可比对象）。"""
+    fail-safe：原凭证有主体名而延期表单留空 → 无法核实归属 → 拒（否则引用别家 grant_id + 留空即绕过防串）。
+    仅当原凭证本身无主体名时才跳过（无可比对象）。
+
+    多账号：延长/撤销审批被各账号**共用**，账号归属已由 grant_id 前缀在上游定死（拿 A 账号的
+    凭证ID 只会取到 A 的 grant），本函数只再挡一层「同账号内张冠李戴」。措辞按该账号的表单叫法。
+    """
+    from . import accounts
+    label, strict = "使用方信息", False
+    try:
+        p = accounts.by_slug(grant.get("account", ""))
+        label = p.subject_label
+        # 主体是**人名**的账号要求精确相等：包含匹配对人名太松——「张三」能通过「张三丰」的校验，
+        # 等于拿别人的凭证ID + 自己的名字就能延期/撤销。企业名保留宽松匹配（容错"有限公司"等后缀差异）。
+        strict = p.subject_is_person
+    except Exception:
+        pass
     orig = (grant.get("enterprise") or "").strip()
     ent = (enterprise or "").strip()
     if not orig:
         return
     if not ent:
-        raise orchestrator.TempAkError("延期申请缺少使用企业信息，无法核实凭证归属，拒绝延期")
+        raise orchestrator.TempAkError(f"延期申请缺少{label}，无法核实凭证归属，拒绝延期")
+    if strict:
+        # 人名精确比对，但先去掉所有空白：「张 三」与「张三」是同一个人，不该被拒。
+        if re.sub(r"\s+", "", orig) != re.sub(r"\s+", "", ent):
+            raise orchestrator.TempAkError(f"{label}与原凭证不符（原：{orig}），拒绝延期")
+        return
     if orig != ent and orig not in ent and ent not in orig:
-        raise orchestrator.TempAkError(f"使用企业信息与原凭证不符（原：{orig}），拒绝延期")
+        raise orchestrator.TempAkError(f"{label}与原凭证不符（原：{orig}），拒绝延期")
 
 
 # ── 表单解析（真机 5 控件：平台/使用企业名称/权限设置/DateInterval/申请目录）──────────
 
-def parse_temp_ak_request(detail: dict[str, Any], payload: dict[str, Any]) -> dict:
+def parse_temp_ak_request(detail: dict[str, Any], payload: dict[str, Any], profile=None) -> dict:
+    """审批表单 → 发放 spec。字段映射按账号档案取（各账号审批模板的 widget id 不同）。"""
     from core import ram_approval
+    from . import accounts
+    p = profile or accounts.default()
     values = ram_approval.extract_form_values(detail)
 
     def field(key: str):
-        env_name, aliases = _FIELDS[key]
+        entry = p.fields.get(key)
+        if not entry:
+            return None            # 该账号模板没有这个控件（如 1949 档无「平台」）
+        env_name, aliases = entry
         specs = ram_approval._split_specs(getattr(settings, env_name, ""))
         for spec in specs + list(aliases):
             if spec in values.by_id:
@@ -262,11 +287,13 @@ def parse_temp_ak_request(detail: dict[str, Any], payload: dict[str, Any]) -> di
                 return values.by_name[spec]
         return None
 
-    platform = _parse_platform(field("platform"))
+    # 无「平台」控件的模板（1949 档）恒为阿里云——不能让缺字段被解析成"无法识别平台"而全量拒绝。
+    platform = _parse_platform(field("platform")) if p.has_platform_field else "aliyun"
     enterprise = ram_approval._as_text(field("enterprise")).strip()
     caps = _parse_perm(field("perm"))                 # ⊆ {read(列), download(下载), write(上传)}
     not_before, expire = _parse_date_interval(field("date_interval"))
     bucket, prefix = _parse_directory(field("directory"))
+    note = ram_approval._as_text(field("note")).strip()   # 仅 1949 档有；无该控件时为空
 
     spec = {
         "platform": platform,
@@ -276,10 +303,11 @@ def parse_temp_ak_request(detail: dict[str, Any], payload: dict[str, Any]) -> di
         "caps": caps,
         "not_before": not_before,
         "expire": expire,
-        # 模板无邮箱字段：凭证定向发给审批发起人(内部申请人)，由其转交外采企业（见 delivery）。
+        # 模板无邮箱字段：凭证定向发给审批发起人(内部申请人)，由其转交使用方（见 delivery）。
         "recipient_email": "",
         "source_ips": [],
-        "reason": f"外采企业：{enterprise}" if enterprise else "",
+        "reason": f"{p.subject_label}：{enterprise}" if enterprise else "",
+        "note": note,
     }
     _validate_spec(spec)
     return spec
@@ -412,8 +440,9 @@ def issuer_plan_summary(grant: dict) -> str:
     return f"mode={p['mode']} {o.scope_line(grant)} 有效期 {o.fmt_window(grant)}"
 
 
-def _notify_internal_failure(instance_code: str, exc: Exception) -> None:
-    chat = settings.TEMP_AK_CHAT_ID or settings.FEISHU_CHAT_ID
+def _notify_internal_failure(instance_code: str, exc: Exception, profile=None) -> None:
+    from . import accounts
+    chat = accounts.chat_id_for(profile=profile)   # 已知账号就发它自己的群
     if not chat:
         return
     try:

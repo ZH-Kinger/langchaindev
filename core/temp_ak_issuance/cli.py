@@ -83,19 +83,23 @@ def _cmd_revoke(a) -> None:
 
 def _cmd_sweep(a) -> None:
     if not a.apply:
-        # dry-run：只列到期未吊销的 grant，不删
+        # dry-run：只列到期未吊销的 grant，不删。**逐账号扫各自前缀**（与 cleanup.sweep_expired 一致），
+        # 全前缀单扫会把别的主账号的 grant 也列出来、误导运维以为归本账号管。
         from utils.redis_client import get_redis
+        from . import accounts
         now = time.time()
         n = 0
-        for key in get_redis().scan_iter(orchestrator._KEY_PREFIX + "*"):
-            raw = get_redis().get(key)
-            if not raw:
-                continue
-            g = json.loads(raw)
-            if g.get("stage") == orchestrator.STAGE_ISSUED and float(g.get("expire", 0)) < now:
-                print(f"到期待清理：{g['grant_id']} user={g.get('user_name')} "
-                      f"expire={orchestrator.fmt_ts(g.get('expire'))}")
-                n += 1
+        r = get_redis()
+        for profile in accounts.profiles():
+            for key in r.scan_iter(profile.redis_prefix + "grant:*"):
+                raw = r.get(key)
+                if not raw:
+                    continue
+                g = json.loads(raw)
+                if g.get("stage") == orchestrator.STAGE_ISSUED and float(g.get("expire", 0)) < now:
+                    print(f"到期待清理[{profile.label}]：{g['grant_id']} user={g.get('user_name')} "
+                          f"expire={orchestrator.fmt_ts(g.get('expire'))}")
+                    n += 1
         print(f"共 {n} 个到期 grant（dry-run；加 --apply 硬删）")
         return
     revoked = cleanup.sweep_expired()

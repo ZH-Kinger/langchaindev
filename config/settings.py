@@ -310,6 +310,29 @@ class Config:
     TEMP_AK_TOS_BUCKET_MAP_RAW  = os.environ.get("TEMP_AK_TOS_BUCKET_MAP", "{}")
     TEMP_AK_TOS_REGION          = os.environ.get("TEMP_AK_TOS_REGION", "")
 
+    # ── 第二阿里云主账号 1339279783371949（短标识 1949）────────────────────────────
+    # 与现有主账号**数据隔离**：独立 RAM 可写 AK、独立 Redis 前缀(temp_ak_1949:)、
+    # 独立凭证ID 前缀(tak1949-)、独立 RAM 用户名前缀(tempak-1949-)。档案装配见
+    # core/temp_ak_issuance/accounts.py —— 审批 code 或 AK 缺一即视为该账号未接入、不注册。
+    # AK 用 ALIYUN_1949_* 而非 TEMP_AK_1949_*：这把 AK 临时发放与 RAM 建号两条流程共用，
+    # 与现有账号的 ALIYUN_ACCESS_KEY_* 一一对应。
+    ALIYUN_1949_ACCESS_KEY_ID     = os.environ.get("ALIYUN_1949_ACCESS_KEY_ID", "")
+    ALIYUN_1949_ACCESS_KEY_SECRET = os.environ.get("ALIYUN_1949_ACCESS_KEY_SECRET", "")
+    # 发放审批「数据访问凭证申请（产线）」。延长/撤销**复用现有那条**，靠凭证ID 前缀分账号，无需另配。
+    TEMP_AK_1949_APPROVAL_CODE    = os.environ.get("TEMP_AK_1949_APPROVAL_CODE", "")
+    TEMP_AK_1949_BUCKET_MAP_RAW   = os.environ.get("TEMP_AK_1949_BUCKET_MAP", "{}")
+    TEMP_AK_1949_CHAT_ID          = os.environ.get("TEMP_AK_1949_CHAT_ID", "")
+    # 凭证评论的发出身份（open_id）。留空 = 沿用全局链路 FEISHU_RAM_APPROVAL_COMMENT_USER_ID →
+    # ADMIN_FEISHU_OPEN_ID（即与现有账号同一个管理员身份）。**必须是本飞书应用下的 open_id**，
+    # 跨 app 会报 99992361。
+    TEMP_AK_1949_COMMENT_USER_ID  = os.environ.get("TEMP_AK_1949_COMMENT_USER_ID", "")
+    # 表单字段覆盖（留空用内置别名 + 真机 widget id，已按飞书 API 实拉结果写死，正常无需设置）
+    TEMP_AK_1949_FIELD_SUBJECT       = os.environ.get("TEMP_AK_1949_FIELD_SUBJECT", "")
+    TEMP_AK_1949_FIELD_PERM          = os.environ.get("TEMP_AK_1949_FIELD_PERM", "")
+    TEMP_AK_1949_FIELD_DATE_INTERVAL = os.environ.get("TEMP_AK_1949_FIELD_DATE_INTERVAL", "")
+    TEMP_AK_1949_FIELD_DIRECTORY     = os.environ.get("TEMP_AK_1949_FIELD_DIRECTORY", "")
+    TEMP_AK_1949_FIELD_NOTE          = os.environ.get("TEMP_AK_1949_FIELD_NOTE", "")
+
     # 容量巡检（OSS + TOS 目录大小定时盘点 → 飞书主动推送）
     # 默认关闭，opt-in；TARGETS 为 JSON 数组，每项 {vendor,bucket,prefix[,region]}
     CAPACITY_MONITOR_ENABLED = os.environ.get("CAPACITY_MONITOR_ENABLED", "false").lower() == "true"
@@ -455,12 +478,19 @@ class Config:
             if self.TEMP_AK_VOLCANO_ENABLED and not (self.VOLCANO_ACCESS_KEY or self.TOS_ACCESS_KEY):
                 missing.append(("VOLCANO_ACCESS_KEY/TOS_ACCESS_KEY",
                                 "火山 TOS 临时凭证方案 B 建号不可用：缺可写 IAM AK"))
+            # 第二主账号 1949：填了审批 code 就得配套 RAM 可写 AK，否则该账号的审批会收到但发不出凭证。
+            # 只填 AK 不填 code 属于「还没接入」，不告警。
+            if self.TEMP_AK_1949_APPROVAL_CODE and not (
+                    self.ALIYUN_1949_ACCESS_KEY_ID and self.ALIYUN_1949_ACCESS_KEY_SECRET):
+                missing.append(("ALIYUN_1949_ACCESS_KEY_ID/SECRET",
+                                "第二主账号(1949)临时 AK 发放不可用：配了审批 code 却缺该账号 RAM 可写 AK"))
         return missing
 
     def print_validate(self) -> None:
-        """启动时打印配置自检报告（有缺失才输出）。"""
+        """启动时打印配置自检报告（有缺失才输出）+ 多账号档案与凭证劫持体检。"""
         from utils.logger import get_logger
         log = get_logger("config")
+        self._log_temp_ak_accounts(log)
         missing = self.validate()
         if not missing:
             log.info("配置自检通过，所有关键配置已设置 ✓")
@@ -468,6 +498,32 @@ class Config:
         log.warning("以下配置未设置，相关功能不可用：")
         for field, impact in missing:
             log.warning("  %-35s → %s", field, impact)
+
+    def _log_temp_ak_accounts(self, log) -> None:
+        """打出临时 AK 已注册的账号档案 + 检测会劫持所有账号的环境变量。
+
+        为什么要打：`.env` 改动只在容器 force-recreate 后生效（restart 不重载 env_file），
+        否则新账号档案根本没注册、审批事件会被白名单静默丢弃。有这一行日志才有客观验收依据。
+        为什么要告警：`ALIBABA_CLOUD_ACCESS_KEY_ID/SECRET` 会被 permsync.make_ram_client 的
+        零参路径优先采用 —— 一旦设了它，**所有账号的建号请求都用同一把 AK**，分账号配置形同虚设。
+        """
+        if not self.TEMP_AK_ENABLED:
+            return
+        try:
+            from core.temp_ak_issuance import accounts
+            slugs = [p.slug or "(默认)" for p in accounts.profiles()]
+            log.info("临时 AK 已注册账号档案：%s", slugs)
+            multi = len(slugs) > 1
+        except Exception:
+            log.warning("临时 AK 账号档案装配失败（多账号可能不可用）", exc_info=True)
+            multi = False
+        if os.environ.get("ALIBABA_CLOUD_ACCESS_KEY_ID") or \
+                os.environ.get("ALIBABA_CLOUD_ACCESS_KEY_SECRET"):
+            lvl = log.error if multi else log.warning
+            lvl("检测到环境变量 ALIBABA_CLOUD_ACCESS_KEY_*：它会被 RAM client 的零参路径优先采用，"
+                "%s。请从服务器环境/.env 中移除，改用各账号自己的 AK 配置。",
+                "**多账号已启用，这会把所有账号的建号请求劫持到同一个账号**" if multi
+                else "多账号启用后会造成跨账号劫持")
 
     def setup_env(self):
         # 离线开关（防止 HuggingFace 联网）

@@ -15,10 +15,12 @@ from datetime import datetime, timedelta, timezone
 from config.settings import settings
 from utils.logger import get_logger
 
-from . import issuer
+from . import accounts, issuer
 
 logger = get_logger(__name__)
 
+# 默认档（现有主账号）的前缀。多账号下真正生效的是各档 profile 里的前缀，这两个常量保留
+# 是因为历史数据与既有测试都按它们写死；accounts._default_profile() 取值与之逐字相同。
 _KEY_PREFIX = "temp_ak:grant:"
 _LOCK_PREFIX = "temp_ak:lock:"
 _TTL_SECONDS = 30 * 86400
@@ -37,12 +39,24 @@ class TempAkError(RuntimeError):
 
 # ── Redis 记录 ────────────────────────────────────────────────────────────────
 
+def _profile_of(grant_id: str):
+    """凭证ID → 账号档案。前缀认不出来（历史数据 / 档案已下线）时退默认档，与本文件多账号化前一致。"""
+    return accounts.by_grant_id(grant_id) or accounts.default()
+
+
 def _key(grant_id: str) -> str:
-    return _KEY_PREFIX + grant_id
+    return _profile_of(grant_id).redis_prefix + "grant:" + grant_id
 
 
-def grant_id_for(instance_code: str) -> str:
-    return "tak-" + hashlib.md5(("temp_ak|" + (instance_code or "")).encode("utf-8")).hexdigest()[:16]
+def grant_id_for(instance_code: str, profile=None) -> str:
+    """审批实例 → 凭证ID。前缀带账号维度，**共用的延长/撤销审批据此把请求分派回正确账号**。
+
+    hash 输入刻意仍是 "temp_ak|<instance>"（不掺 slug）：审批实例本身就跨账号唯一，
+    掺进去只会让历史 grant_id 全部漂移。
+    """
+    p = profile or accounts.default()
+    return p.grant_prefix + hashlib.md5(
+        ("temp_ak|" + (instance_code or "")).encode("utf-8")).hexdigest()[:16]
 
 
 def get_grant(grant_id: str) -> dict | None:
@@ -67,10 +81,11 @@ def _save(grant: dict) -> None:
 
 # ── 幂等锁（独立命名空间，不与 ram_approval 冲突）────────────────────────────────
 
-def claim(instance_code: str) -> str:
+def claim(instance_code: str, profile=None) -> str:
     if not instance_code:
         return ""
-    lock_key = _LOCK_PREFIX + instance_code
+    p = profile or accounts.default()
+    lock_key = p.redis_prefix + "lock:" + instance_code
     try:
         from utils.redis_client import get_redis
         return lock_key if get_redis().set(lock_key, "1", nx=True, ex=600) else ""
@@ -91,36 +106,40 @@ def release(lock_key: str) -> None:
 
 # ── 桶解析 ────────────────────────────────────────────────────────────────────
 
-def resolve_bucket(display: str) -> tuple[str, str]:
-    """展示桶名 → (region, real_bucket)。先查 TEMP_AK_BUCKET_MAP(JSON)，再回退 permsync.BUCKET_MAP，
-    都没有则把 display 当真实桶名原样用（region 未知留空）。"""
+def resolve_bucket(display: str, profile=None) -> tuple[str, str]:
+    """展示桶名 → (region, real_bucket)。先查该账号的桶映射(JSON)，再回退 permsync.BUCKET_MAP，
+    都没有则把 display 当真实桶名原样用（region 未知留空）。
+
+    **桶映射按账号取**：两个主账号的桶名可能重名却是不同的桶，共用一张表会把凭证发到错的桶上。
+    permsync.BUCKET_MAP 是现有账号的算法组对照表，只对默认档回退。"""
     display = (display or "").strip()
     if not display:
         raise TempAkError("审批表单缺少 OSS 桶")
-    try:
-        m = json.loads(settings.TEMP_AK_BUCKET_MAP_RAW or "{}")
-    except Exception:
-        m = {}
+    p = profile or accounts.default()
+    m = accounts.bucket_map(p)
     if display in m and isinstance(m[display], dict):
         v = m[display]
         return v.get("region", ""), v.get("bucket") or display
-    from core.oss_perm.permsync import BUCKET_MAP
-    if display in BUCKET_MAP:
-        region, bucket = BUCKET_MAP[display]
-        return region, bucket
+    if p.slug == accounts.DEFAULT_SLUG:
+        from core.oss_perm.permsync import BUCKET_MAP
+        if display in BUCKET_MAP:
+            region, bucket = BUCKET_MAP[display]
+            return region, bucket
     return "", display   # 表单直接填了真实桶名
 
 
-def _derive_user_name(spec: dict, instance_code: str) -> str:
-    """外部方 RAM 登录名：tempak-<企业名ASCII化/否则ext>-<实例短hash>。
+def _derive_user_name(spec: dict, instance_code: str, profile=None) -> str:
+    """RAM 登录名：<账号前缀><主体名ASCII化/否则ext>-<实例短hash>。
 
-    RAM user_name 只能 [A-Za-z0-9.@_-]，中文企业名 ASCII 化后可能为空 → 退回 ext（唯一性靠 hash）；
-    可读的企业名放 display_name（见 issuer._issue_ram，可中文）。
+    RAM user_name 只能 [A-Za-z0-9.@_-]，中文主体名 ASCII 化后可能为空 → 退回 ext（唯一性靠 hash）；
+    可读的主体名放 display_name（见 issuer._issue_ram，可中文）。
+    主体 = 默认档的「使用企业名称」/ 1949 档的「使用人名称」，逻辑键统一为 enterprise。
     """
+    p = profile or accounts.default()
     ent = spec.get("enterprise", "") or spec.get("recipient_email", "").split("@")[0]
     slug = _ascii_slug(ent)
     short = hashlib.md5((instance_code or slug).encode("utf-8")).hexdigest()[:6]
-    return f"tempak-{slug}-{short}"
+    return f"{p.user_prefix}{slug}-{short}"
 
 
 def _ascii_slug(text: str) -> str:
@@ -138,31 +157,35 @@ def _ascii_slug(text: str) -> str:
 
 
 def display_name_for(grant: dict) -> str:
-    """RAM 控制台显示名（可中文，一眼识别是哪家外采企业的临时号）。"""
+    """RAM 控制台显示名（可中文，一眼看出是哪个主体、哪个账号的临时号）。后缀按账号档案取。"""
     ent = (grant.get("enterprise") or "").strip()
-    return (f"{ent}-临时外采用户" if ent else "临时外采用户")[:128]
+    suffix = _profile_of(grant.get("grant_id", "")).display_suffix
+    return (f"{ent}{suffix}" if ent else suffix.lstrip("-"))[:128]
 
 
 # ── grant 生命周期 ────────────────────────────────────────────────────────────
 
 def create_grant_record(spec: dict, *, instance_code: str, requester: str = "",
-                        approver: str = "") -> dict:
+                        approver: str = "", profile=None) -> dict:
     """据审批表单 spec 建 grant 记录（幂等：同实例返回已有记录）。
 
     spec: {bucket(display), region?, prefix, caps⊆{read,download,write}, not_before, expire,
-           recipient_email, source_ips?, reason?}
+           recipient_email, source_ips?, reason?, note?}
+    profile: 账号档案，决定凭证ID/Redis 前缀/桶表/命名；不传 = 现有主账号。
     """
-    gid = grant_id_for(instance_code)
+    p = profile or accounts.default()
+    gid = grant_id_for(instance_code, p)
     existing = get_grant(gid)
     if existing:
         return existing
 
     now = time.time()
-    region, real_bucket = resolve_bucket(spec["bucket"])
-    mode = issuer.classify_mode(spec["expire"], now)
-    user_name = _derive_user_name(spec, instance_code)
+    region, real_bucket = resolve_bucket(spec["bucket"], p)
+    mode = issuer.classify_mode(spec["expire"], now, p)   # 非默认账号强制 RAM（STS 角色属默认账号）
+    user_name = _derive_user_name(spec, instance_code, p)
     grant = {
         "grant_id": gid,
+        "account": p.slug,          # 账号维度：延期/撤销/到期清理据此取对应账号的凭证
         "stage": STAGE_NEW,
         "mode": mode,
         "platform": spec.get("platform", "aliyun"),
@@ -183,6 +206,7 @@ def create_grant_record(spec: dict, *, instance_code: str, requester: str = "",
         "requester": requester,
         "approver": approver,
         "reason": spec.get("reason", ""),
+        "note": spec.get("note", ""),        # 「备注」栏（1949 档模板新增），仅记录+回执，不参与授权
         "error": "",
         "created_ts": now,
         "updated_ts": now,
@@ -203,6 +227,7 @@ def issue_grant(grant: dict) -> tuple[dict, dict | None]:
         grant["ak_id"] = creds.get("access_key_id", "")
     grant["stage"] = STAGE_ISSUED
     grant["issued_ts"] = time.time()
+    grant["error"] = ""     # 清掉上一轮失败原因：否则 FAILED 重试成功后状态卡仍显示「失败原因」
     _save(grant)
     return grant, creds
 
@@ -236,7 +261,7 @@ def extend_grant(grant: dict, not_before, expire, *, extend_instance: str = "") 
         issuer.rewrite_ram_window(grant)          # 同 AK 改写时间窗，不重发凭证
         creds = None
     else:  # STS：原 token 已自灭 → 按新窗重签发（新窗 >12h 自动转方案 B 发长期 AK）
-        grant["mode"] = issuer.classify_mode(grant["expire"], now)
+        grant["mode"] = issuer.classify_mode(grant["expire"], now, _profile_of(grant.get("grant_id", "")))
         if grant["mode"] == issuer.RAM_MODE and not grant.get("policy_name"):
             grant["policy_name"] = issuer.policy.POLICY_PREFIX + grant["user_name"]
         creds = issuer.issue(grant)
