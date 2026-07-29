@@ -61,6 +61,10 @@ def _cmd_status(args) -> int:
     print(f"大小   : {o.fmt_size(job.get('bytes_total', 0))} / {job.get('objects_total', 0)} 对象")
     if job.get("error"):
         print(f"错误   : {job['error']}")
+    if job.get("error_detail"):
+        print("明细   :")
+        for ln in job["error_detail"].splitlines():
+            print(f"         {ln}")
     return 0
 
 

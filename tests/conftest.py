@@ -153,6 +153,27 @@ def _no_real_feishu_or_network(monkeypatch):
     yield calls
 
 
+# ── 全局硬兜底：任何测试都不得真的 SSH 到新加坡/泰国生产机 ─────────────────────
+#   engine_ssh.run() 里 _client() 会用真实 .env（SGP_SSH_HOST/KEY_ENC/HOST_KEY）连 SGP ECS。
+#   本机没装 paramiko 时它自然 ImportError 快速失败，但**服务器容器 aiops-bot 装了 paramiko
+#   且 .env 有真私钥** —— 那里跑单测时任何漏打桩的 run()（如 poll_once 的 FAILED 分支会调
+#   failure_detail→run）就会真去连生产机、甚至真读远端日志。这里把 _client 打成硬失败：
+#   没打桩就快速抛错（各调用点本就 best-effort try/except 兜住），杜绝真连。
+#   需要断言命令串的测试照旧 monkeypatch engine_ssh.run（autouse 先跑、测试的 setattr 后跑→生效）。
+
+@pytest.fixture(autouse=True)
+def _no_real_ssh(monkeypatch):
+    def _blocked(*a, **k):
+        raise RuntimeError("SSH blocked in tests (conftest._no_real_ssh)")
+
+    try:
+        from core.ssh_transfer import engine_ssh as _eng
+        monkeypatch.setattr(_eng, "_client", _blocked, raising=False)
+    except Exception:
+        pass
+    yield
+
+
 # ── 飞书消息：默认拦截不发 ───────────────────────────────────────────────────
 
 @pytest.fixture

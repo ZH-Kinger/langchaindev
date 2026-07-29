@@ -1292,6 +1292,7 @@ def _h_retry_ssh_transfer(action_val, open_id, chat_id, form_value):
     # 保留 stage1_rc：段1已成功(=0)时 run_to_completion 会只重跑段2，省 CEN 流量。
     job["stage"] = orchestrator.STAGE_NEW
     job["error"] = ""
+    job["error_detail"] = ""   # 跟 error 一起清：留着上一轮明细会和新一轮的失败原因自相矛盾
     job["launched"] = False
     orchestrator._save(job)
     try:

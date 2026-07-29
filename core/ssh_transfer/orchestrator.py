@@ -147,6 +147,9 @@ def _start_stage(job: dict, stage: str) -> None:
     except Exception as e:
         job["stage"] = STAGE_FAILED
         job["error"] = str(e)
+        # 起任务就挂时没有新日志可摘，必须清掉上一轮的明细：否则「起 stage1 失败(rc=1)」会配上
+        # 上一轮那条「失败对象 42366 个 / ossfs2 单分片说明」，自相矛盾、把排障带偏。
+        job["error_detail"] = ""
         job["finished_ts"] = time.time()
         logger.error("[SSHT] 起 %s 失败 job=%s", stage, job.get("job_id"), exc_info=True)
     _save(job)
@@ -222,6 +225,14 @@ def poll_once(job: dict) -> dict:
         job["stage"] = STAGE_FAILED
         job["error"] = st.get("error", "") or f"{stage} 失败"
         job["finished_ts"] = time.time()
+        # 先落库再去摘明细：摘明细要走 SSH（最坏几十秒），期间 updated_ts 若还停在上一轮，
+        # 对账的 stale 门会认为本 job 失联、再触发一次 refresh → 白跑一遍远端 grep。
+        _save(job)
+        # 只在终态多花一次 SSH 摘真原因：光给「退出码 N」排障要手工翻十几 MB 日志（本次踩过）。
+        try:
+            job["error_detail"] = engine_ssh.failure_detail(job["job_id"], eng_stage)
+        except Exception:
+            job["error_detail"] = ""
     elif status == "DONE":
         if stage == STAGE_STAGE1:
             job["stage1_rc"] = st.get("rc", 0)   # 记段1成功，retry 可跳过段1
@@ -247,10 +258,12 @@ def refresh(job_id: str):
 
 
 def run_to_completion(job: dict, *, on_update=None, poll_interval: int = 60,
-                      max_polls: int = 2880) -> dict:
+                      max_polls: int = 10080) -> dict:
     """启动并阻塞轮询至终态（后台线程调用）。段1成功才进段2；retry 时段1已成功直接从段2起。
 
-    max_polls*poll_interval 默认上限 48h（跨云 + rsync 大数据可能很久）。
+    max_polls*poll_interval 默认上限 7 天。**原来 48h 不够**：真机实测段1 约 148MiB/s，
+    19.5TiB 的单子光段1 就要 ~38h，加段2 必然超 48h → 会在任务其实还在正常跑的时候被判「轮询超时」
+    并推失败卡。按 7 天给足余量（真失败由 rc marker 立刻判定，不依赖这个上限）。
     """
     resume_stage2 = job.get("stage1_rc") == 0 and job.get("stage") in (STAGE_NEW, STAGE_FAILED, STAGE_STAGE2)
     _start_stage(job, STAGE_STAGE2 if resume_stage2 else STAGE_STAGE1)
@@ -267,8 +280,11 @@ def run_to_completion(job: dict, *, on_update=None, poll_interval: int = 60,
         if job["stage"] in (STAGE_DONE, STAGE_FAILED):
             break
     else:
+        hours = max_polls * poll_interval // 3600
+        span = f"{hours // 24}天" if hours >= 48 else f"{hours}h"
         job["stage"] = STAGE_FAILED
-        job["error"] = f"轮询超时（>{max_polls * poll_interval // 3600}h 未完成）"
+        job["error"] = f"轮询超时（>{span} 未完成）"
+        job["error_detail"] = ""   # 同 _start_stage：别让上一轮的明细配上「轮询超时」这个新原因
         job["finished_ts"] = time.time()
         _save(job)
         if on_update:

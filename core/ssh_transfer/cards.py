@@ -101,11 +101,19 @@ def result_card(job: dict):
                    ("耗时", fmt_duration(created, finished))),
             div(f"**源** `{job.get('source_uri')}`\n**目的** `{job.get('dest_uri')}`"),
         ], color="green")
-    return card(f"❌ 泰国迁移失败", [
+    elements = [
         fields(("任务ID", f"`{job['job_id']}`"), ("阶段", job.get("stage", "")),
                ("结束", fmt_ts(finished))),
         div(f"**源** `{job.get('source_uri')}`\n**目的** `{job.get('dest_uri')}`\n"
             f"**失败原因**：{job.get('error') or '未知'}"),
+    ]
+    # 明细来自 engine_ssh.failure_detail（ossutil/rsync 汇总行 + 报告路径 + 首条根因）。
+    # 只给「退出码 N」的话排障得手工翻十几 MB 日志，故在卡上直接摊开。
+    detail = (job.get("error_detail") or "").strip()
+    if detail:
+        elements.append(div("**明细**\n" + "\n".join(f"· {ln}" for ln in detail.splitlines() if ln.strip())))
+    elements += [
         hr(),
         buttons(btn("\U0001f501 重试", {"action": "retry_ssh_transfer", "job_id": job["job_id"]}, "danger")),
-    ], color="red")
+    ]
+    return card(f"❌ 泰国迁移失败", elements, color="red")
