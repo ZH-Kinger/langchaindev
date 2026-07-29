@@ -201,6 +201,19 @@ def build_plan(source_raw: str, dest_raw: str) -> Plan:
     src_staging = _staging_for(src)   # 源云对象存储（沉降落点=跨云源）
     dst_staging = _staging_for(dst)   # 目的云对象存储（跨云落点=预热源）
 
+    # P2(CPFS→vePFS) 的跨云段是 OSS→TOS，走火山 DMS —— 而 DMS 1.0 **只能指定目标桶、指不了目标
+    # 前缀**，对象保持**源 key 结构**落进目的桶。所以第③段预热能不能找到数据，完全取决于
+    # 「源 staging 前缀 == 目的 staging 前缀」这个巧合：两侧都是 pfs-staging/<链ID>/ 时，
+    # 源 key 前缀恰好等于预热期望的前缀，才对得上。
+    # 一旦两侧配成不同前缀，前两段会正常成功、第③段静默地去错误位置找数据 —— 极难排查。
+    # P1(vePFS→CPFS) 的跨云是 TOS→OSS 走阿里在线迁移，能指定目标前缀，不受此限制。
+    if direction == DIRECTION_P2 and src_staging.base_prefix != dst_staging.base_prefix:
+        raise PfsPathError(
+            f"PFS_STAGING_MAP 里两侧 staging 前缀不一致（源 `{src_staging.base_prefix or '<根>'}` "
+            f"vs 目的 `{dst_staging.base_prefix or '<根>'}`）。CPFS→vePFS 的跨云段走火山 DMS，"
+            f"只能指定目标桶、对象按源 key 结构落地，两侧前缀必须相同，否则预热段会找不到数据。"
+            f"请把 `oss_prefix` 与 `tos_prefix` 配成同一个值。")
+
     return Plan(
         direction=direction,
         src_pfs=src,
