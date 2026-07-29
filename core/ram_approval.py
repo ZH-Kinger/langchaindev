@@ -1329,8 +1329,14 @@ def _humanize_error(exc: Exception) -> str:
             pass
     blob = f"{code} {msg} {raw}".lower()
     if "invalidpassword" in blob or ("password" in blob and any(k in blob for k in ("policy", "satisfy", "weak", "密码"))):
+        # 必须交代"子用户可能已建"这件事：密码是建号链的**最后一步**（get_user→create_user→…→
+        # create_login_profile），撞策略时用户往往已经建出来了。但它**没入组、无权限、无 AccessKey**
+        # （入组在开通登录之后），且重提**同名**会命中 get_user 直接续做、不会重复建号 —— 那个用户就是断点。
+        # 不写清楚的话，运维看到云上多出个用户会去手动删、或改个登录名重提（那才会真留下永久空壳）。
         return ("登录密码不符合密码策略（一般需 8–32 位，且同时包含大写字母、小写字母、数字、特殊字符）。"
-                "请修改登录密码后重新提交审批。")
+                "请修改登录密码后重新提交审批。"
+                "注意：本次可能已创建子用户，但它未加入任何用户组、无任何权限、无 AccessKey；"
+                "用**相同登录名**重新提交会自动复用并补齐，不会重复建号，请勿手动删除或改名。")
     if code or msg:
         return f"{code}: {msg}".strip(" :")
     return raw[:300]
