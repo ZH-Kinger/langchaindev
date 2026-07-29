@@ -23,6 +23,16 @@ STAGE2 = "stage2"   # rsync: SGP 挂载盘 → 泰国服务器
 # rsync 成功退出码：0=完全成功，24=源文件传输中消失（非致命）。其余非 0 视失败。
 _RSYNC_OK = (0, 24)
 
+# 段1 目的端 /mnt/sgp_oss 是 ossfs2(FUSE)，**只支持顺序写**。ossutil 对超过 100MiB 的对象默认
+# 切分片、并发 pwrite 到不同 offset → 在该挂载点上必然 `invalid argument`(EINVAL)。
+# 真机实证（19.527 TiB / 75850 对象那单）：≤100MiB 的 33484 个全成功、>100MiB 的 42366 个全失败，
+# 边界与分片阈值严格吻合，且失败报告 42366 行全是同一个 EINVAL。
+# 修法=强制单分片顺序写：--part-size 顶到 ossutil 上限 5Gi（合法区间 100Ki~5Gi）+ --parallel 1
+# （文件内不并发）。跨文件并发 --job 保留：不同文件各自顺序写互不干扰，实测 job 30 稳定 148MiB/s
+# （比出错那次的 75MiB/s 还快一倍），故不为此降并发。
+# 残留限制：单个对象 >5Gi 无法压成单分片、仍会 EINVAL —— failure_detail() 会把这点直接讲给用户。
+_OSSFS2_PART_SIZE = "5Gi"
+
 
 class SshTransferError(RuntimeError):
     """SSH 迁移调用失败，消息面向用户。"""
@@ -159,9 +169,19 @@ def start_stage1(job_id: str, *, source_bucket: str, source_prefix: str) -> None
     src = f"oss://{source_bucket}/{source_prefix}"
     dst = f"{mount}/{source_prefix}"
     ckpt = f"{_job_dir(job_id)}/ckpt1"
+    # 跑之前先删目标前缀下残留的 `*.temp`（上一次中断留下的半成品）。**这是必须的，不是打扫卫生**：
+    # ossfs2 只能顺序写，ossutil 见到已存在的 `.temp` 会当成续传、从非零 offset 往里写 → EINVAL。
+    # 真机实证（同一对象、同一 flags）：留着旧 .temp → rc=4 且 0.6 秒就失败；删掉 → rc=0 完整落地。
+    # 不清的话，段1 只要被中断过一次（kill/容器重启/网络抖动），**之后每一次重试都必然失败**。
+    # `.temp` 是 ossutil 自己的中间文件、永远不是有效数据；源桶里也不存在以 .temp 结尾的对象（已核）。
+    # 用 find -name 精确按后缀删，绝不用通配符递归删，避免误伤已传好的正式文件。
+    purge = (f"[ -d {shlex.quote(dst)} ] && "
+             f"find {shlex.quote(dst)} -type f -name '*.temp' -delete 2>/dev/null; true")
     # ossutil 2.x 并发 flag 是 `-j/--job`（单数），非 `--jobs`（复数会报 unknown flag、段1挂）。
-    work = (f"ossutil cp {shlex.quote(src)} {shlex.quote(dst)} "
-            f"-r --job {jobs} -u --checkpoint-dir {shlex.quote(ckpt)}")
+    # --parallel 1 + --part-size 5Gi：目的端 ossfs2 只能顺序写，见 _OSSFS2_PART_SIZE 处的实证说明。
+    work = (f"{purge}; ossutil cp {shlex.quote(src)} {shlex.quote(dst)} "
+            f"-r --job {jobs} --parallel 1 --part-size {_OSSFS2_PART_SIZE} "
+            f"-u --checkpoint-dir {shlex.quote(ckpt)}")
     _launch(job_id, STAGE1, work)
 
 
@@ -227,6 +247,123 @@ def poll_stage(job_id: str, stage: str) -> dict:
     # DEAD 且无 rc：进程异常退出（OOM/被杀/机器重启），当失败
     return {"status": "FAILED", "rc": None, "alive": False,
             "error": f"{stage} 进程异常退出（无退出码 marker）"}
+
+
+# 失败时值得摘出来的行：ossutil 汇总/报告路径、ossutil 裸 `Error:` 行、rsync 错误行。
+# `Error:` 必须在列：源桶不在杭州那种失败（前一单 sgp-841b88a7b0dd，rc=2）日志里只有
+# `Error: operation error ListObjectsV2 ... AccessDenied`，没有 FinishWithError/report，
+# 漏了它明细就是空的、卡片又退回「退出码 2」。（grep 带 -i，故不必再列小写变体。）
+_FAIL_GREP = "FinishWithError|Error occurs|See more information|rsync error|rsync:|Error:"
+_DETAIL_MAX = 1200          # 进飞书卡片，掐总长
+_DETAIL_LINE_MAX = 240      # 单行上限：逐行截，避免前面几条长汇总行把后面的根因/说明挤没
+# report 路径来自远端日志内容（外部数据）。虽已 shlex.quote，仍按白名单收窄，避免被日志里
+# 精心构造的对象 key 骗着去 grep 任意文件、再把内容贴进飞书群（读取 oracle）。
+# 必须「先切出整个空白分隔 token，再 fullmatch」——直接对整段 search 会从
+# `/root/x.report_evil` 里截出 `/root/x.report`、从 `relative/x.report` 里截出 `/x.report`，
+# 等于放过了构造串（tester 抓到）。另禁 `..`：字符集含 `.` 和 `/`，否则 `/a/../../etc/x.report` 能过。
+_REPORT_PATH_RE = re.compile(r"/[A-Za-z0-9._\-]+(?:/[A-Za-z0-9._\-]+)*\.report")
+_TRIM_PUNCT = ".,;:)]}'\"`"             # 真机日志里路径可能被标点/引号/括号裹着
+
+
+def _safe_report_path(blob: str) -> str:
+    """从日志片段里取第一个可信的 report 路径；取不到返回 ""。
+
+    白名单：整个 token fullmatch「绝对路径 + 仅 [A-Za-z0-9._-] 与 / + 精确 .report 结尾」且不含 `..`。
+    这封死了注入面（空格/分号/反引号/`$()`/相对路径/后缀不闭合全拒）。
+
+    **刻意不再额外限制目录**：曾加过「必须在 job 目录或 /ossutil_output/ 下」，能把残留的窄读取
+    oracle（指向 SGP 上某个真实存在的 .report、泄露其一行 cause）也封掉，但 ossutil 的报告目录是可变的，
+    一旦与硬编码不符，最有价值的「首条根因」会**静默消失**——而那正是本函数存在的意义。
+    权衡：注入已封死，残留泄漏面需要攻击者先能写源桶对象名、再猜中真实存在的 .report 路径，仅泄漏一行；
+    代价却是核心诊断能力时不时失灵。故只保结构白名单。（auditor 将目录限制列为可选低危。）
+    """
+    for raw in blob.split():
+        tok = raw.rstrip(_TRIM_PUNCT)      # 去尾部标点，否则真机 `(/root/x.report)` 会静默摘不到
+        if tok.endswith(".report") and ".." not in tok and _REPORT_PATH_RE.fullmatch(tok):
+            return tok
+    return ""
+
+
+def _clip(line: str) -> str:
+    return line[:_DETAIL_LINE_MAX]
+
+
+def failure_detail(job_id: str, stage: str) -> str:
+    """失败后摘一段人可读原因：ossutil/rsync 汇总行 + 报告路径 + 失败条数 + 首条根因。
+
+    卡片原来只给「stage1 退出码 4」，排障得手工翻十几 MB 日志才知道是写入 EINVAL —— 而 ossutil
+    其实早把明细写进了自己的 report。这里把它捞回来。best-effort：任何一步失败就返回已拿到的部分。
+
+    注意：ossutil 进度用 `\\r` 刷屏（单次任务日志可达十几 MB），必须 `tr '\\r' '\\n'` 再筛，
+    直接 `tail -n` 只会抓到一整行进度条、看不见尾部真错误（本次排障踩过）。
+    """
+    log_path = _marker(job_id, stage, "log")
+    # 取 20KB 尾窗：汇总行之后 ossutil 还会刷若干输出，窗口太小会把 report 路径那行挤出去。
+    # `tail -n +2` 丢掉第一行——按字节切必然切在行中/多字节中，留着会是乱码碎片。
+    # 一条命中都没有时（错误形态没见过）兜底回尾部原文：噪声也比卡片上只有「退出码 N」强。
+    # 兜底必须在远端做——过滤后的输出为空时，本地已经没有原文可退回了。
+    probe = (
+        f"L={shlex.quote(log_path)}; sz=$(wc -c < \"$L\" 2>/dev/null || echo 0); "
+        f"t=$(tail -c 20000 \"$L\" 2>/dev/null | tr '\\r' '\\n'); "
+        # 只有确实被 -c 截断（日志 >20KB）时才丢首行。无条件丢会把「整个日志只有一行」的快速失败
+        # 吞成空明细——正是异地桶 rc=2 那种形态（日志只有一行 `Error: ... AccessDenied`），
+        # 明细一空卡片就又退回「退出码 N」。auditor 本地 bash 实测到的，单测桩掉 run 抓不到。
+        f"if [ \"${{sz:-0}}\" -gt 20000 ]; then t=$(printf '%s\\n' \"$t\" | tail -n +2); fi; "
+        f"f=$(printf '%s\\n' \"$t\" | grep -aiE {shlex.quote(_FAIL_GREP)} | tail -3); "
+        f"if [ -n \"$f\" ]; then printf '%s\\n' \"$f\"; "
+        f"else printf '%s\\n' \"$t\" | grep -av '^[[:space:]]*$' | tail -3; fi"
+    )
+    try:
+        _, out, _ = run(probe, timeout=20)
+    except Exception:
+        logger.warning("[SSHT] 取 %s %s 失败明细失败（SSH 不可用或超时）", job_id, stage, exc_info=True)
+        return ""
+    blob = out or ""
+    # lead = 日志原文摘出来的行；key = 我们二次加工出的关键结论（条数/根因/说明）。
+    # 分开是为了最后按预算拼：key 必须完整保留，超预算只削 lead——否则几条长汇总行就把根因挤没了。
+    lead = [_clip(ln.strip()) for ln in blob.splitlines() if ln.strip()]
+    key: list[str] = []
+
+    # ossutil 把逐个失败对象写进 report 文件；取条数 + 首条 cause（cause 才是真原因）
+    report = _safe_report_path(blob)
+    if report:
+        try:
+            _, out2, _ = run(
+                f"echo COUNT=$(grep -ac 'cause:' {shlex.quote(report)} 2>/dev/null || echo 0); "
+                f"grep -aom1 'cause: .*' {shlex.quote(report)} 2>/dev/null | cut -c1-240",
+                timeout=25)
+        except Exception:
+            logger.warning("[SSHT] 读 %s 失败报告 %s 失败", job_id, report, exc_info=True)
+            out2 = ""
+        cm = re.search(r"COUNT=(\d+)", out2 or "")
+        if cm and int(cm.group(1)):
+            key.append(_clip(f"失败对象 {cm.group(1)} 个，明细报告：{report}"))
+        cause = re.search(r"cause:\s*(.+)", out2 or "")
+        if cause:
+            key.append(_clip(f"首条根因：{cause.group(1).strip()}"))
+        blob += out2 or ""
+
+    # EINVAL 是 ossfs2 顺序写限制的签名错误。只有段1 往 ossfs2 挂载点写，段2 是 rsync 到泰国
+    # 本地盘、同样的错另有原因，别把段1 的结论硬套上去。
+    if "invalid argument" in blob.lower():
+        if stage == STAGE1:
+            key.append(
+                f"说明：目的端 ossfs2(FUSE) 不支持随机偏移写（段1 已强制单分片顺序写 "
+                f"--parallel 1 --part-size {_OSSFS2_PART_SIZE}）。优先核查目标前缀下是否残留上次中断的 "
+                f".temp（会被当成偏移续写、必失败），以及是否存在 >{_OSSFS2_PART_SIZE} 的单个对象。")
+        else:
+            key.append("说明：目的端写入被拒(EINVAL)，请复查泰国侧目标目录与挂载点。")
+
+    # 拼装：key（我们提炼的结论：失败条数/首条根因/说明）必须完整保住，剩余预算才轮到 lead
+    # （日志原文行）。反过来先拼 lead 再整体截，几条长汇总行就能把根因和说明全挤掉。
+    budget = _DETAIL_MAX - len("\n".join(key)) - (1 if key else 0)
+    head: list[str] = []
+    for ln in lead:
+        if len(ln) + 1 > budget:
+            break
+        head.append(ln)
+        budget -= len(ln) + 1
+    return "\n".join(head + key)[:_DETAIL_MAX]
 
 
 def estimate_source(source_bucket: str, source_prefix: str) -> tuple[int, int, bool]:

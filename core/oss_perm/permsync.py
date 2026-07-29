@@ -320,9 +320,23 @@ def diff_resolved(expected, actual):
 # ---------------------------------------------------------------------------
 # 阿里云 RAM 落地
 # ---------------------------------------------------------------------------
-def make_ram_client():
+def make_ram_client(ak: str = "", sk: str = ""):
+    """RAM 可写 client。显式传 ak/sk 时**只用传入的那对**，不看环境变量也不回退 settings。
+
+    显式传参是多阿里云主账号隔离的唯一安全入口：不传时的旧行为会优先读进程环境变量
+    `ALIBABA_CLOUD_*`，一旦运维设了它，所有账号的建号请求都会被劫持到同一个账号
+    （见 core/temp_ak_issuance/accounts.ram_client 的说明）。不传参时行为与历史逐字一致。
+    """
     from alibabacloud_ram20150501.client import Client as RamClient
     from alibabacloud_tea_openapi import models as open_api_models
+
+    if ak or sk:
+        # 只给一半就报错，绝不静默回落到 env/settings —— 那会拿**另一个账号**的凭证去建号。
+        if not (ak and sk):
+            raise RuntimeError("make_ram_client: ak 与 sk 必须同时提供（拒绝半参回落到全局凭证）")
+        cfg = open_api_models.Config(access_key_id=ak, access_key_secret=sk)
+        cfg.endpoint = "ram.aliyuncs.com"
+        return RamClient(cfg)
 
     ak = os.environ.get("ALIBABA_CLOUD_ACCESS_KEY_ID")
     sk = os.environ.get("ALIBABA_CLOUD_ACCESS_KEY_SECRET")

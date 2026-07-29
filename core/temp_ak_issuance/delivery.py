@@ -7,6 +7,8 @@ secret/token 只出现在审批评论正文里，绝不写日志、绝不落 Red
 """
 from __future__ import annotations
 
+import re
+
 from config.settings import settings
 from utils.logger import get_logger
 
@@ -48,10 +50,21 @@ def deliver_extend(grant: dict, creds: dict | None) -> None:
 # ── 审批评论下发 ──────────────────────────────────────────────────────────────
 
 def _comment_user_id(grant: dict) -> str:
-    """凭证评论身份**与 RAM 建号审批完全一致**——直接复用 ram_approval._approval_comment_user_id()：
+    """凭证评论身份**默认与 RAM 建号审批完全一致**——复用 ram_approval._approval_comment_user_id()：
     FEISHU_RAM_APPROVAL_COMMENT_USER_ID → ADMIN_FEISHU_OPEN_ID（以管理员身份发，不冒充申请人/审批人）。
-    多级审批下不再用 requester（会解析成审批人、把凭证评论错挂其名下）。"""
+    多级审批下不再用 requester（会解析成审批人、把凭证评论错挂其名下）。
+
+    多账号：某账号档案配了 comment_user_id 才覆盖（如第二主账号想让别人来发凭证评论）。
+    注意该 open_id **必须属于发评论用的那个飞书应用**，跨 app 会报 99992361。
+    """
     from core import ram_approval
+    from . import accounts
+    try:
+        profile = accounts.by_slug(grant.get("account", ""))
+        if profile.comment_user_id:
+            return profile.comment_user_id
+    except Exception:
+        pass          # 档案缺失不该挡下发；退回全局管理员身份
     return ram_approval._approval_comment_user_id()
 
 
@@ -69,7 +82,8 @@ def _post_credential_comment(grant: dict, creds: dict, instance_code: str) -> No
 
 
 def _alert_creds_undelivered(grant: dict) -> None:
-    chat = settings.TEMP_AK_CHAT_ID or settings.FEISHU_CHAT_ID
+    from . import accounts
+    chat = accounts.chat_id_for(grant)      # 按该凭证所属账号取群
     if not chat:
         return
     try:
@@ -84,15 +98,46 @@ def _alert_creds_undelivered(grant: dict) -> None:
 
 # ── 文本 ──────────────────────────────────────────────────────────────────────
 
+def _subject_label(grant: dict) -> str:
+    """主体那一栏的叫法。单一来源在 accounts.subject_label_for，本函数只是本模块的短别名。"""
+    from . import accounts
+    return accounts.subject_label_for(grant)
+
+
+def _access_lines(grant: dict) -> list[str]:
+    """连接信息：地域 + 外网 Endpoint + 桶域名。
+
+    **必须给**：桶在哪个地域就得用哪个地域的 endpoint，否则 OSS 直接回 403
+    `The bucket you are attempting to access must be addressed using the specified endpoint`
+    —— 使用方会以为凭证无效。region 取自 grant（由桶映射解析），缺失时不瞎猜、只提示自查。
+    """
+    region = (grant.get("region") or "").strip()
+    bucket = (grant.get("bucket") or "").strip()
+    if not region:
+        return ["地域/Endpoint：未知（该桶未配地域映射，请按控制台上该桶的外网 Endpoint 连接）"]
+    # 仓库里有**两套地域写法**：permsync.BUCKET_MAP 存的是已带前缀的 `oss-ap-southeast-1`
+    # （默认账号 resolve_bucket 的回退表），而 TEMP_AK_*_BUCKET_MAP 存的是裸 `cn-shenzhen`。
+    # 不归一就会拼出 `oss-oss-ap-southeast-1.aliyuncs.com` —— 一个解析不了的域名，
+    # 使用方拿到等于没拿到，正是这几行要避免的事（tester 实测复现）。
+    host = region if region.startswith("oss-") else f"oss-{region}"
+    ep = f"{host}.aliyuncs.com"
+    lines = [f"地域：{region}", f"外网 Endpoint：{ep}"]
+    if bucket:
+        lines.append(f"桶域名：{bucket}.{ep}")
+    return lines
+
+
 def credential_text(grant: dict, creds: dict) -> str:
     """凭证正文（含 secret/token，仅贴进审批评论，出现一次）。"""
     mode_cn = ("STS 临时凭证（含 SecurityToken，到点自动失效）" if creds.get("mode") == "sts"
                else "长期 AccessKey（权限内嵌生效/到期时间，到期后调用被拒并自动清理）")
+    label = _subject_label(grant)
     lines = [
-        "数据外采访问凭证（请妥善保存并转交外采企业）",
+        "数据访问凭证（请妥善保存并转交使用方）",
         f"凭证ID：{grant.get('grant_id')}（延长/撤销时填此 ID）",
-        f"外采企业：{grant.get('enterprise') or '-'}",
+        f"{label}：{grant.get('enterprise') or '-'}",
         f"授权范围：{o.scope_line(grant)}",
+        *_access_lines(grant),
         f"有效期：{o.fmt_window(grant)}",
         f"凭证类型：{mode_cn}",
         "",
@@ -103,10 +148,16 @@ def credential_text(grant: dict, creds: dict) -> str:
         lines.append(f"SecurityToken：{creds['security_token']}")
     if grant.get("source_ips"):
         lines.append(f"出口 IP 限制：仅 {', '.join(grant['source_ips'])} 可用")
+    if grant.get("note"):
+        # 备注是申请人自由填的文本，会进凭证评论正文。**必须压成一行**：留着换行就能伪造
+        # 「AccessKey Secret：…」这样的假行、或塞进误导性的操作指引，而正文是使用方唯一的凭证来源。
+        note = re.sub(r"\s+", " ", str(grant["note"])).strip()
+        if note:
+            lines.append(f"备注：{note[:200]}")
     lines += [
         "",
         "· 仅在生效~到期区间内、且仅对上述桶/目录有效；超时或超范围调用一律被拒。",
-        "· Secret 请立即保存后转交外采企业，切勿截图外传或提交代码仓库。",
+        "· Secret 请立即保存后转交使用方，切勿截图外传或提交代码仓库。",
     ]
     return "\n".join(lines)
 
@@ -116,7 +167,7 @@ def _extended_text(grant: dict) -> str:
     return "\n".join([
         "访问凭证有效期已延长",
         f"凭证ID：{grant.get('grant_id')}",
-        f"外采企业：{grant.get('enterprise') or '-'}",
+        f"{_subject_label(grant)}：{grant.get('enterprise') or '-'}",
         f"授权范围：{o.scope_line(grant)}",
         f"新有效期：{o.fmt_window(grant)}",
         "AccessKey 不变、无需更换；到期后自动失效。",

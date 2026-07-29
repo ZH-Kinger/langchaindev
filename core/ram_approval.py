@@ -1,6 +1,7 @@
 """Feishu approval app integration for Aliyun RAM account creation."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -1186,6 +1187,8 @@ def save_approval_failure(
         "instance_code": instance_code,
         "result_status": "failed",
         "error_message": str(exc),
+        # 终态标记：确定性失败（密码不合策略等）→ _is_instance_done 认它，后续事件不再重跑、不再重复评论
+        "error_terminal": _is_terminal_error(exc),
         "updated_at_ms": _now_ms(),
     }
     if req:
@@ -1241,9 +1244,34 @@ def _save_instance_record(instance_code: str, patch: dict[str, Any]) -> None:
         logger.warning("[ram_approval] failed to save Redis record", exc_info=True)
 
 
+# 确定性失败：重试一万次结果一样，必须人改了表单重新提交才行。命中即把该实例置终态，
+# 后续事件不再重跑建号流程 —— 否则飞书为一个实例推 N 个事件，就会把同一条错误评论刷 N 遍
+# （真机 BC9CE2EB 那单：7 个事件里 3 个被"正在处理中"拦掉、3 个真执行 → 3 条相同评论）。
+# 用户改完密码会**新开一个审批实例**（新 instance_code），不受本终态影响。
+# **刻意只列窄而明确的几个**：曾放过 invalidparameter/malformed，但它们是宽泛子串，任何瞬时错误
+# （网关 5xx、限流）只要文本里碰巧带上就会被永久标成终态、失去自愈能力。而"同一错误只播报一次"
+# 的闸门已经覆盖了**所有**失败的刷屏问题，所以终态标记只需管确定性那一小类，不必也不该放宽。
+_TERMINAL_ERROR_MARKERS = (
+    "invalidpassword",          # 阿里/火山：密码不符合策略（真机 BC9CE2EB 那单）
+    "password policy",
+    "密码不符合",
+    "invalidloginname",         # 登录名非法
+)
+
+
+def _is_terminal_error(exc: Exception) -> bool:
+    """是不是"重试也没用、要改表单"的确定性失败。判不准时**按可重试处理**（宁可多试也别把
+    网络抖动/限流误判成永久失败而拒绝自愈）。"""
+    text = str(exc).lower()
+    return any(m in text for m in _TERMINAL_ERROR_MARKERS)
+
+
 def _is_instance_done(instance_code: str) -> bool:
     record = load_approval_record(instance_code)
-    return record.get("result_status") in {"success", "dry_run"}
+    if record.get("result_status") in {"success", "dry_run"}:
+        return True
+    # 确定性失败也算终态（见 _TERMINAL_ERROR_MARKERS 处说明）。瞬时失败仍可重试自愈。
+    return bool(record.get("result_status") == "failed" and record.get("error_terminal"))
 
 
 def _claim_instance(instance_code: str) -> str:
@@ -1301,11 +1329,31 @@ def _humanize_error(exc: Exception) -> str:
             pass
     blob = f"{code} {msg} {raw}".lower()
     if "invalidpassword" in blob or ("password" in blob and any(k in blob for k in ("policy", "satisfy", "weak", "密码"))):
+        # 必须交代"子用户可能已建"这件事：密码是建号链的**最后一步**（get_user→create_user→…→
+        # create_login_profile），撞策略时用户往往已经建出来了。但它**没入组、无权限、无 AccessKey**
+        # （入组在开通登录之后），且重提**同名**会命中 get_user 直接续做、不会重复建号 —— 那个用户就是断点。
+        # 不写清楚的话，运维看到云上多出个用户会去手动删、或改个登录名重提（那才会真留下永久空壳）。
         return ("登录密码不符合密码策略（一般需 8–32 位，且同时包含大写字母、小写字母、数字、特殊字符）。"
-                "请修改登录密码后重新提交审批。")
+                "请修改登录密码后重新提交审批。"
+                "注意：本次可能已创建子用户，但它未加入任何用户组、无任何权限、无 AccessKey；"
+                "用**相同登录名**重新提交会自动复用并补齐，不会重复建号，请勿手动删除或改名。")
     if code or msg:
         return f"{code}: {msg}".strip(" :")
     return raw[:300]
+
+
+def _claim_failure_notice(instance_code: str, text: str) -> bool:
+    """失败播报的"只报一次"闸门：键含错误签名 → 同实例同错误只过一次，换了错误还能再报。
+
+    Redis 不可用时放行（宁可重复也别漏报失败——漏报会让人以为审批成功了）。
+    """
+    sig = hashlib.md5(text.encode("utf-8")).hexdigest()[:12]
+    try:
+        return bool(get_redis().set(f"{REDIS_INSTANCE_PREFIX}failnotice:{instance_code}:{sig}",
+                                    1, nx=True, ex=7 * 86400))
+    except Exception:
+        logger.warning("[ram_approval] 失败播报闸门不可用，放行（可能重复评论）", exc_info=True)
+        return True
 
 
 def notify_failure(
@@ -1316,6 +1364,11 @@ def notify_failure(
     approval_comment_id: str = "",
 ) -> None:
     text = f"RAM 子账号审批执行失败\n审批实例: {instance_code or '-'}\n错误: {_humanize_error(exc)}"
+    # 同一实例 + 同一条错误只播报一次。终态标记已挡掉确定性失败的重跑，这里再兜住瞬时失败重试
+    # （重试三次都超时也只该看到一条），以及任何将来新增的重入路径。换了错误内容仍会再报（有信息量）。
+    if instance_code and not _claim_failure_notice(instance_code, text):
+        logger.info("[ram_approval] 相同失败已播报过，跳过重复评论 instance=%s", instance_code)
+        return
     if _delivery_mode() in {"approval_comment", "comment"} and instance_code:
         try:
             _send_approval_comment(

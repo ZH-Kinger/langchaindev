@@ -12,6 +12,18 @@ from core import ram_approval
 RAM = "RAMCODE-1111"
 TAK = "TAKCODE-2222"
 EXT = "EXTCODE-3333"
+CODE_1949 = "0133C4FC-8793-4FF3-A759-C4ECE8AC1FF9"   # 第二主账号「数据访问凭证申请（产线）」真机 code
+
+
+@pytest.fixture(autouse=True)
+def _no_extra_accounts(monkeypatch):
+    """#63 后白名单会并入**所有已注册账号**的发放 code。本文件按「恰好三个 code」断言，
+    因此必须把第二主账号档案清干净——否则跑在配了 1949 的环境（服务器 .env / 容器）上
+    会多出一个真实 code 而红。多账号自身的白名单行为在
+    `test_temp_ak_account_isolation.py` 里单独覆盖。"""
+    for name in ("TEMP_AK_1949_APPROVAL_CODE",
+                 "ALIYUN_1949_ACCESS_KEY_ID", "ALIYUN_1949_ACCESS_KEY_SECRET"):
+        monkeypatch.setattr(routes.settings, name, "", raising=False)
 
 
 @pytest.fixture
@@ -65,6 +77,31 @@ def client():
 def test_allowlist_includes_all_three_when_enabled(wl_env):
     al = routes._approval_allowlist()
     assert al == {RAM, TAK, EXT}
+
+
+def test_allowlist_grows_to_four_with_second_aliyun_account(wl_env, monkeypatch):
+    """#63 正向面：注册第二主账号（1949）后白名单**应当**变成 4 个并含它的发放 code。
+
+    上面那条 autouse 把 1949 清空是为了让「恰好三个」可断言；光有它会把本次新功能测漏，
+    故这里正向钉一次：清配置 ≠ 该功能不存在。（延长/撤销复用 EXT，不新增 code。）"""
+    monkeypatch.setattr(routes.settings, "TEMP_AK_1949_APPROVAL_CODE", CODE_1949)
+    monkeypatch.setattr(routes.settings, "ALIYUN_1949_ACCESS_KEY_ID", "LTAI_1949")
+    monkeypatch.setattr(routes.settings, "ALIYUN_1949_ACCESS_KEY_SECRET", "SK_1949")
+    al = routes._approval_allowlist()
+    assert al == {RAM, TAK, EXT, CODE_1949}
+    assert len(al) == 4
+
+
+def test_allowlist_second_account_code_routes_to_issue_handler(wl_env, monkeypatch,
+                                                               spawn_spy, client):
+    """并且这个 code 真能被放行、进发放处理器（不是只进集合、事件却被丢弃）。"""
+    monkeypatch.setattr(routes.settings, "TEMP_AK_1949_APPROVAL_CODE", CODE_1949)
+    monkeypatch.setattr(routes.settings, "ALIYUN_1949_ACCESS_KEY_ID", "LTAI_1949")
+    monkeypatch.setattr(routes.settings, "ALIYUN_1949_ACCESS_KEY_SECRET", "SK_1949")
+    from core.temp_ak_issuance import approval as tak_approval
+    resp = _post(client, _approval_event(CODE_1949, eid="e_1949"))
+    assert resp.status_code == 200
+    assert spawn_spy == [tak_approval.handle_temp_ak_event]
 
 
 def test_allowlist_excludes_temp_ak_when_disabled(monkeypatch):

@@ -11,15 +11,27 @@ _STAGE_CN = {"NEW": "待发放", "ISSUED": "已发放", "REVOKED": "已吊销/�
 _PLATFORM_CN = {"aliyun": "阿里云 OSS", "volcano": "火山云 TOS"}
 
 
+def _subject_label(grant: dict) -> str:
+    """主体那一栏的叫法。单一来源在 accounts.subject_label_for，本函数只是本模块的短别名。"""
+    from . import accounts
+    return accounts.subject_label_for(grant)
+
+
+def _account_tag(grant: dict) -> str:
+    """非默认账号在卡片标题上标出账号，避免两个主账号的回执在同一个群里分不清。"""
+    slug = (grant.get("account") or "").strip()
+    return f"（账号{slug}）" if slug else "（数据外采）"
+
+
 def receipt_card(grant: dict):
     """内部回执（脱敏，不含 secret/token）。"""
     from . import orchestrator as o
     color = "green" if grant.get("stage") == o.STAGE_ISSUED else "grey"
-    return card("✅ 临时 AK 已发放（数据外采）", [
+    return card(f"✅ 临时 AK 已发放{_account_tag(grant)}", [
         fields(("任务ID", f"`{grant.get('grant_id')}`"),
                ("平台", _PLATFORM_CN.get(grant.get("platform"), grant.get("platform", ""))),
                ("模式", _MODE_CN.get(grant.get("mode"), grant.get("mode", "")))),
-        div(f"**外采企业**：{grant.get('enterprise') or '-'}\n"
+        div(f"**{_subject_label(grant)}**：{grant.get('enterprise') or '-'}\n"
             f"**授权**：{o.scope_line(grant)}\n"
             f"**有效期**：{o.fmt_window(grant)}\n"
             + (f"**RAM 用户/AK**：`{grant.get('user_name')}` / `{grant.get('ak_id')}`\n"
@@ -36,7 +48,7 @@ def status_card(grant: dict):
         fields(("任务ID", f"`{grant.get('grant_id')}`"),
                ("平台", _PLATFORM_CN.get(grant.get("platform"), grant.get("platform", ""))),
                ("模式", _MODE_CN.get(grant.get("mode"), grant.get("mode", "")))),
-        div(f"**外采企业**：{grant.get('enterprise') or '-'}\n"
+        div(f"**{_subject_label(grant)}**：{grant.get('enterprise') or '-'}\n"
             f"**授权**：{o.scope_line(grant)}\n"
             f"**有效期**：{o.fmt_window(grant)}\n"
             + (f"**失败原因**：{grant.get('error')}" if grant.get("error") else "")),

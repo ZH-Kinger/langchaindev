@@ -29,8 +29,19 @@ def _sts_limit() -> int:
     return min(int(settings.TEMP_AK_STS_MAX_SECONDS), STS_HARD_CAP)
 
 
-def classify_mode(expire: float, now: Optional[float] = None) -> str:
-    """expire−now ≤ 上限（≤43200）→ sts；否则 → ram。"""
+def classify_mode(expire: float, now: Optional[float] = None, profile=None) -> str:
+    """expire−now ≤ 上限（≤43200）→ sts；否则 → ram。
+
+    **非默认账号一律 RAM，绝不 STS（fail-closed）**：STS 分支用的是全局 Master AK 去
+    AssumeRole `settings.TEMP_AK_OSS_ROLE_ARN` —— 那是**现有账号**的宽 OSS 角色。若让第二账号的
+    申请走这条，签出来的会是现有账号身份的凭证，申请人填一个现有账号的桶就能越权拿到其数据，
+    正是多账号隔离要防的事。第二账号也没有、也不该有这样一个宽角色。
+    不能只依赖线上把 TEMP_AK_STS_MAX_SECONDS 设成 0——那个配置的代码默认值是 43200（危险侧）。
+    """
+    from . import accounts
+    slug = getattr(profile, "slug", accounts.DEFAULT_SLUG) if profile is not None else accounts.DEFAULT_SLUG
+    if slug != accounts.DEFAULT_SLUG:
+        return RAM_MODE
     now = now if now is not None else time.time()
     window = max(0.0, float(expire) - now)
     return STS_MODE if window <= _sts_limit() else RAM_MODE
@@ -43,7 +54,7 @@ def _sts_duration(expire: float, now: Optional[float] = None) -> int:
 
 def plan(grant: dict) -> dict:
     """dry-run：只产计划、不调云。返回描述本次将如何发放的 dict（含 policy 预览）。"""
-    mode = grant.get("mode") or classify_mode(grant["expire"])
+    mode = grant.get("mode") or classify_mode(grant["expire"], profile=_grant_profile(grant))
     nb, exp = grant["not_before"], grant["expire"]
     src_ips = grant.get("source_ips") or None
     prefix = grant.get("prefix", "")
@@ -68,7 +79,7 @@ def issue(grant: dict) -> dict:
     STS：assume_role_with_policy（含 token，到点自灭，无需清理）。
     方案 B：建 RAM user（无控制台/无组）+ 建 AK + 建/附时间窗 policy（到期由 cleanup 硬删）。
     """
-    mode = grant.get("mode") or classify_mode(grant["expire"])
+    mode = grant.get("mode") or classify_mode(grant["expire"], profile=_grant_profile(grant))
     if mode == STS_MODE:
         return _issue_sts(grant)
     return _issue_ram(grant)
@@ -76,6 +87,15 @@ def issue(grant: dict) -> dict:
 
 def _issue_sts(grant: dict) -> dict:
     from utils import aliyun_sts
+    from . import accounts
+    # 纵深防御：即便上游 mode 判定被绕过/被畸形记录带进来，也绝不用现有账号的 Master AK +
+    # 现有账号的角色 ARN 给别的账号签凭证（那会把 A 账号的数据权限发给 B 账号的申请人）。
+    # **两套真相源都要看**：只看 grant["account"] 的话，`account 被抹掉 + grant_id 仍是
+    # tak1949-` 这种畸形记录会通过账号门（auditor 实测复现过），与 RAM 路径的校验不对称。
+    if accounts.assert_account_consistent(grant) != accounts.DEFAULT_SLUG:
+        raise IssueError(
+            f"账号 {grant.get('account')} 不支持 STS 单发（该分支只对默认主账号有效，"
+            f"其角色 ARN 属于默认账号）；本单应走方案 B 长期 AK。这是隔离硬门，不要绕过。")
     if not settings.TEMP_AK_OSS_ROLE_ARN:
         raise IssueError("STS 分支缺 TEMP_AK_OSS_ROLE_ARN（宽 OSS 角色）")
     doc = policy.build_session_policy(
@@ -93,7 +113,7 @@ def _issue_sts(grant: dict) -> dict:
 
 def _issue_ram(grant: dict) -> dict:
     from alibabacloud_ram20150501 import models as m
-    client = permsync_client()
+    client = permsync_client(grant)          # 按 grant 所属账号取 AK
     user = grant["user_name"]
     pol_name = grant["policy_name"]
 
@@ -155,7 +175,7 @@ def rewrite_ram_window(grant: dict) -> None:
     import json as _json
     if not grant.get("policy_name"):
         raise IssueError("方案 B 延期缺 policy_name")
-    client = permsync_client()
+    client = permsync_client(grant)          # 按 grant 所属账号取 AK
     doc = policy.build_policy_with_window(
         grant["bucket"], prefix=grant.get("prefix", ""), caps=grant.get("caps") or [],
         not_before=grant["not_before"], expire=grant["expire"],
@@ -165,8 +185,26 @@ def rewrite_ram_window(grant: dict) -> None:
         set_as_default=True, rotate_strategy="DeleteOldestNonDefaultVersionWhenLimitExceeded"))
 
 
-def permsync_client():
-    """RAM 可写 AK 客户端（复用 oss_perm 那把 ALIYUN_ACCESS_KEY_*；Master AK 只有 STS+RAMReadOnly 建不了号）。"""
+def _grant_profile(grant: dict | None):
+    """grant → 账号档案（供 mode 判定与凭证选择）。档案缺失时退默认档：mode 判定退默认只会
+    **更保守**（默认档才可能判 STS），而真正的硬门在 _issue_sts 里按 grant["account"] 再拦一次。"""
+    from . import accounts
+    try:
+        return accounts.by_slug((grant or {}).get("account", ""))
+    except Exception:
+        return accounts.default()
+
+
+def permsync_client(grant: dict | None = None):
+    """RAM 可写 AK 客户端。**按 grant 所属账号取该账号自己的 AK**。
+
+    不传 grant（或 grant 无 account）时复用 oss_perm 那把 ALIYUN_ACCESS_KEY_*，与多账号化前一致。
+    Master AK 只有 STS+RAMReadOnly，建不了号，所以这里不能用它。
+    """
+    from . import accounts
+    slug = accounts.assert_account_consistent(grant or {})   # 两套账号真相源必须一致
+    if slug != accounts.DEFAULT_SLUG:
+        return accounts.ram_client(accounts.by_slug(slug))
     from core.oss_perm.permsync import make_ram_client
     return make_ram_client()
 
