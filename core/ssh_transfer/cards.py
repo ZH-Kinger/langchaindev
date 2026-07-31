@@ -94,13 +94,27 @@ def result_card(job: dict):
     ok = job["stage"] == "DONE"
     created, finished = job.get("created_ts", 0), job.get("finished_ts", 0)
     if ok:
-        return card(f"✅ 泰国迁移完成", [
+        els = [
             fields(("任务ID", f"`{job['job_id']}`"),
                    ("数据量", fmt_size(job.get("bytes_total", 0))),
                    ("对象数", str(job.get("objects_total", 0))),
                    ("耗时", fmt_duration(created, finished))),
             div(f"**源** `{job.get('source_uri')}`\n**目的** `{job.get('dest_uri')}`"),
-        ], color="green")
+        ]
+        # 端到端校验结论必须在**成功卡**上可见。不显示的话，把 SSH_STAGE2_VERIFY 关掉后
+        # 这张卡与以前一模一样 —— 那个开关就成了隐形的 fail-open ���门（「成功」到底核过没核过，
+        # 看卡片看不出来）。所以：核过就写明核了什么，没核就明确警示。
+        v = job.get("verify") or {}
+        if v.get("passed") is True:
+            els.append(div("**端到端校验** ✓ 已核对（对象覆盖 / 字节总量 / 逐文件字节 / 抽样内容）\n"
+                           + "\n".join(f"· {ln}" for ln in (v.get("summary") or "").splitlines()
+                                       if ln.strip())))
+        elif v.get("passed") is None:
+            els.append(div("**⚠ 本次未做端到端校验**（`SSH_STAGE2_VERIFY=false`）——"
+                           "「完成」仅代表传输器自己报了成功，未核对数据是否完整。"))
+        else:
+            els.append(div("**⚠ 无校验记录**——本任务未经端到端核对。"))
+        return card(f"✅ 泰国迁移完成", els, color="green")
     elements = [
         fields(("任务ID", f"`{job['job_id']}`"), ("阶段", job.get("stage", "")),
                ("结束", fmt_ts(finished))),

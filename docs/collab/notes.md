@@ -665,3 +665,20 @@ dev 的默认反射是**先拉子 agent**、不是自己扛。下面的活**默�
   · 容器复跑待 dev 部署（当前服务器 `2808296` 尚无 endpoint 归一 / 桶名反查 / #64 三批改动）。
 
 [2026-07-29 TESTER] **#63+#64 容器复跑收口（dev 已部署 `8ae8a26`，已核容器内三批改动全在位）**：服务器容器 aiops-bot 全量 **1807 passed / 2 failed / 3 skipped / 9 deselected**。2 failed 恒为 matplotlib 基线（`test_gpu_distribution::test_dist_url_and_summary_card` + `test_wants_metrics_chart::test_process_message_attaches_chart_for_metrics`，容器无该模块、任何 commit 都复现）；**上一轮那 11 条「未部署」红全部转绿**。`-k "temp_ak or ram_approval"` 子集容器内 564 passed / 3 skipped（3 skip = pypinyin 降级两条 + h5py）。本机同口径 1811 passed / 1 skipped / 0 failed。**#63 与 #64 至此单测+容器两侧全绿，既存失败仅 matplotlib 环境基线。**
+
+[2026-07-31 DEV] **段2 架构换血：SGP rsync 转发 → 泰国 ossutil 直拉新加坡 OSS（#66）**
+  · **起因**：泰国迁移 `sgp-6796f12de0af`（19.527 TiB / 75850 对象）段2 只有 **27 MB/s**，ETA 9 天。排查后确认瓶颈是**单条 TCP 流**，不是带宽包：SGP 实例出口上限实测 6144 Mb/s(768 MB/s)，链路 RTT 30ms 零丢包，ossfs2 读 530 MB/s。并行流实测可扩展（1流26 / 4流42.6 / 8流78.3 MB/s，且都是在既有 rsync 占 27MB/s **之外**测得）。
+  · **走过的弯路（记账，别重复）**：先做了「按源一级目录切分 + xargs -P 并行 rsync」（#65），auditor 报 2 HIGH（顶层散文件静默不传、缺 rc 被聚合成 0）+ 4 MED 全部修完、1811 零回归 —— 但随后实测**泰国直连新加坡 OSS 单流就有 90 MB/s、8 流 230 MB/s、实跑 289 MB/s**，比并行 rsync 快一倍以上且完全不占 SGP 带宽。用户拍板改架构。并行 rsync 保留为 `SSH_STAGE2_MODE=rsync` 回滚路径（**休眠代码，未随本批过闸，下一批补审**）。
+  · **段1 保留**（杭州→新加坡 wuji-sing）：杭州出境限速，泰国直拉杭州慢（泰国→杭州 RTT 83ms vs →新加坡 31ms）。砍掉的只是「SGP 机器转发数据」这个动作。
+  · **控制面 vs 数据面**：控制面 bot→SGP→泰国**双跳**（复用现有 `SGP_SSH_KEY_ENC`，**零新增凭证** —— bot 本来没有到泰国的 key，SGP 上早已配好免密）；数据面泰国↔新加坡 OSS 直连、不经 SGP。
+  · **双跳的引号地狱 → 一律 base64**：bot 拼串 → SGP shell → 泰国 shell 三层解析。本次踩了两次（变量被吃掉、`unexpected EOF`）。内层脚本统一 base64 后传，外层只留一层双引号。**禁止再手写多层引号。** 另：我在探针脚本里三次犯「双引号内写反引号被命令替换」，同类问题。
+  · **真机核实的 ossutil 事实**（泰国 2.3.0，查 `cp --help`，不猜）：`-j/--job`（**默认仅 3**）、`--parallel`、`-u/--update`、`--checkpoint-dir`、`-e`、`--region`、`-f` 全支持；**`--jobs` 不存在**。`-u` 语义 = 跳过「已存在**且比源更新**」，**mtime 相等不跳过**（实测会重下 → rsync 已传的 402 GB 会重来一遍，约 24 分钟，已接受）。`--job` 16→32 只多 2%，已近饱和。
+  · **端到端校验层（`core/ssh_transfer/verify.py`）**：不采信 ossutil 的「Success」。L1 源对象覆盖 / L2 字节总量（**只统计源 key 集合内**的目的字节）/ L3 逐文件字节 / L4 抽样从 OSS 重下 + `cmp`。源清单 bot 侧列、目的清单泰国侧列，**互不采信对方汇总数**。校验不过**或校验本身崩掉**都判 FAILED（fail-closed：「不知道对不对」必须当「不对」）。
+  · **自己抓出的两个设计错**：① 判据最初用「源对象数 == 目的对象数」—— 目的端是共享盘、有历史文件就误报失败，运维会学会忽略校验结果、校验就废了；改成「源的每个对象都在且字节一致」+ extra 只报不判失败。② L4 最初用纯 Python 算 CRC64，对 400MB 文件要几分钟、不可用；改成重下 + `cmp`。
+  · **auditor 两轮结论**：第一轮（并行 rsync）2 HIGH + 4 MED + 8 LOW，全修；第二轮（ossutil + verify）**1 HIGH 阻塞**（`_sample_compare` heredoc 可被 OSS 对象 key 打断 → 泰国生产机 RCE，同 #51 同类同靶机）+ 4 MED。已全修：heredoc 升级 **base64 + NUL**（仅 base64 只堵住命令执行、没堵住换行拆条）；verify 加 `ssh:transfer:verify:{job}` NX 闸门（**耗时远超对账 180s stale 门 → 会被重复触发 → 多份 job dict last-write-wins 可能把 FAILED 覆盖成 DONE，这是真 fail-open**）；`_list_dest`/`_sample_compare` 查 rc + 结尾哨兵（原先丢 rc，把「校验自己挂了」渲染成「目的端缺 7.5 万个」，运维的合理反应是重传 19.5TiB）；`find -printf` 改 `%s\t%P\0`（`%P\t%s\n` 遇含换行文件名错行 —— 并行 unit 清单已因同一坑修过，verify 这条是回退）。
+  · **单一真相源**：目的目录抽成 `paths.dest_dir()`。verify 的全部判据都建立在「我算的目录 == 传输器写的目录」，漂移即「校验了个空目录」，而空目录表现为「缺 7.5 万个」。
+  · **认领在跑的任务**（采纳 auditor 最小修法，不走重试按钮）：marker 布局刻意与人工切换那单逐字一致；新增 `stage2_mode_of(job)`（`stage2_mode` → `handoff.engine` → **回退 rsync**，绝不默认 ossutil，否则所有历史 job 被误判）。已手改 Redis：`stage2_mode=ossutil` + **`DEL dataflow:notified:sgp-6796f12de0af`**（当初占它压切换造成的假失败卡，不删真正的完成卡会被 NX 闸门静默吞 —— #37/HIGH-A1 老坑）。`stage` **暂留 FAILED**，等新代码部署后再改 STAGE2（服务器旧代码没有 engine_ossutil，提前改会被 rsync 探针判失败）。
+  · **部署前真机已核**（auditor MED-4，比 stage2_mode 更严重）：`stage2.pid`=3739340 存活且 cmdline 含 ossutil → 存活守卫有效，重试不会起第二个进程往同一目录覆写；wrapper cmdline 结尾确有 `; echo $? > .../stage2.rc` → 跑完会写退出码；`get_oss_auth("")` 能列 `wuji-sing`。
+  · **顺带修的既存缺陷**：`--rsync-path=sudo rsync` 裸展开会被拆词（方案 B 一开就必挂）；rsync 加 `-s/--secluded-args`（泰国侧 rsync 也是 3.2.7，已核）；`_start_stage` 缺段下发锁（段1 rc 落盘到状态写回有最长 60s 窗口，期间任何 refresh 都会再起一次段2）。
+  · **泰国侧安全**：`~/.ossutilconfig` 权限 664（同机其他账号可读 AK/SK）→ 已收紧 600，内容未动、在跑的 ossutil 未受影响。
+  · **未完**：并行 rsync 的 40 条旧用例重写中（clamp 32→10、settings 改存字符串两组已过）；`.env.example` 从来就没有 SSH 迁移链那批 key（既存遗漏）。

@@ -171,6 +171,14 @@ def _no_real_ssh(monkeypatch):
         monkeypatch.setattr(_eng, "_client", _blocked, raising=False)
     except Exception:
         pass
+    # 段2 端到端校验默认关：它要走 SSH 到泰国 + 列 OSS 全量清单，单测里既连不上也不该连。
+    # 线上默认是**开**（SSH_STAGE2_VERIFY=true），校验接线本身由
+    # tests/unit/test_ssh_transfer_ossutil_direct.py 显式开关两种路径专项覆盖。
+    try:
+        from config.settings import settings as _s
+        monkeypatch.setattr(_s, "SSH_STAGE2_VERIFY", False, raising=False)
+    except Exception:
+        pass
     yield
 
 

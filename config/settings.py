@@ -393,8 +393,39 @@ class Config:
         "THAI_DEST_ROOT", "/mnt/data04/296834/Wuji-Algorithm@wuji.tech/data")
     THAI_RSYNC_SUDO        = os.environ.get("THAI_RSYNC_SUDO", "false")   # true=方案B(--rsync-path=sudo rsync)
     THAI_RSYNC_BWLIMIT     = os.environ.get("THAI_RSYNC_BWLIMIT", "")     # 空=不限速
+    # 段2 并行 rsync 流数。单条 TCP 在 SGP→泰国 30ms RTT 下被窗口/整形卡在 ~26-35MB/s，
+    # 真机实测聚合吞吐随流数近线性上涨（1流 26MB/s → 4流 43MB/s → 8流 78MB/s，链路未饱和）。
+    # 按源一级目录切分，每个目录一条 rsync；1=退回单流（老行为）。SGP 8 核，8 流时 ssh 加密约占 25%。
+    # **刻意存原始字符串、不在 import 期 int()**：`.env` 写成空值或非数字会让整个 bot 起不来，
+    # 而这只是个性能旋钮。转换与钳位在 engine_ssh._stage2_streams()（非法值退回单流）。
+    # 上限 10 由泰国 sshd 的 MaxStartups 决定，见 engine_ssh._STAGE2_MAX_STREAMS。
+    THAI_RSYNC_STREAMS     = os.environ.get("THAI_RSYNC_STREAMS", "8")
     SSH_TRANSFER_APPROVAL_TB = float(os.environ.get("SSH_TRANSFER_APPROVAL_TB", 1))
     SSH_TRANSFER_CHAT_ID   = os.environ.get("SSH_TRANSFER_CHAT_ID", "")
+    # ── 段2 执行方式：ossutil(默认, 泰国直拉) / rsync(旧, SGP 转发) ─────────────
+    # 真机实测(2026-07-31, 同一份 19.5TiB)：SGP→泰国 rsync 单流 27MB/s、8流 78MB/s；
+    # 泰国 ossutil 直拉新加坡 OSS **289MB/s**（快 10 倍，且不占 SGP 出口带宽、少一次中转拷贝）。
+    # 保留 rsync 分支只为可回滚（设 SSH_STAGE2_MODE=rsync 即退回旧路径）。
+    # 段1 不动：杭州出境限速，泰国直拉杭州慢（泰国→杭州 83ms vs →新加坡 31ms）。
+    SSH_STAGE2_MODE        = os.environ.get("SSH_STAGE2_MODE", "ossutil")
+    # 段1 落点 = 段2 源：SGP 那个 ossfs2 挂载点背后的新加坡桶（/etc/ossfs2_sgp.conf 的 oss_bucket）
+    SGP_OSS_BUCKET         = os.environ.get("SGP_OSS_BUCKET", "wuji-sing")
+    # 泰国拉取用的 endpoint/region。**显式给、不吃泰国 ~/.ossutilconfig 的默认值**：
+    # 那文件人工维护，被改回杭州或加速域名会让任务静默变慢，异地 endpoint 更会被 OSS 直接 403。
+    THAI_OSS_ENDPOINT      = os.environ.get("THAI_OSS_ENDPOINT", "oss-ap-southeast-1.aliyuncs.com")
+    THAI_OSS_REGION        = os.environ.get("THAI_OSS_REGION", "ap-southeast-1")
+    # ossutil cp 并发。--job 默认仅 3，必须显式给；实测 16→32 只多 2%，已接近饱和，别再往上调。
+    THAI_OSSUTIL_JOBS      = os.environ.get("THAI_OSSUTIL_JOBS", "32")
+    THAI_OSSUTIL_PARALLEL  = os.environ.get("THAI_OSSUTIL_PARALLEL", "8")
+    # 泰国侧 marker/checkpoint 根目录（$HOME 由远端 shell 展开，不在本地解析）。
+    # 默认值与 2026-07-31 人工切换那单**逐字一致**，部署后可直接认领在跑的任务、不重传。
+    THAI_WORK_DIR          = os.environ.get("THAI_WORK_DIR", "$HOME/.ossutil_jobs")
+    # 段2 完成后自动跑四层端到端校验（对象数/总字节/逐文件字节/抽样内容），不过则整链判失败。
+    # 关掉它等于「只信 ossutil 的退出码」——21TB 静默少传是最坏结局，别关。
+    SSH_STAGE2_VERIFY      = os.environ.get("SSH_STAGE2_VERIFY", "true").lower() == "true"
+    # 同 THAI_RSYNC_STREAMS：存原始字符串，转换/钳位在使用处。上面刚写完「不在 import 期 int()，
+    # 否则 .env 写错整个 bot 起不来」，这里再 int() 就自相矛盾了。
+    SSH_STAGE2_VERIFY_SAMPLES = os.environ.get("SSH_STAGE2_VERIFY_SAMPLES", "5")
 
     # Redis
     REDIS_HOST     = os.environ.get("REDIS_HOST", "127.0.0.1")

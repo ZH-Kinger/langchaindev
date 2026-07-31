@@ -92,3 +92,16 @@ def build_plan(source_raw: str, dest_subdir: str = "") -> Plan:
     plan = parse_source(source_raw)
     plan.dest_subdir = _norm_dest_subdir(dest_subdir)
     return plan
+
+
+def dest_dir(dest_root: str, *, source_prefix: str, dest_rel: str = "") -> str:
+    """段2 目标目录（**单一���相源**），恰好一个尾斜杠。
+
+    为什么必须只有一份实现：传输器写哪个目录、校验查哪个目录，靠的是这两处算出同一个字符串。
+    各算一遍的话，任何一次改动漂移都会让校验去查一个空目录 —— 而空目录的表现是
+    「目的端缺 75850 个」，运维的合理反应是重传 19.5TiB。
+    归一尾斜杠也在这里做：dest_rel / source_prefix 本身以 `/` 结尾，直接拼会拼出 `//`。
+    """
+    root = (dest_root or "").rstrip("/")
+    rel = (dest_rel or source_prefix or "").strip("/")
+    return f"{root}/{rel}/" if rel else f"{root}/"

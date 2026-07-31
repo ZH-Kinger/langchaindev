@@ -214,8 +214,26 @@ Background threads start with `bot` mode:
 
 ### SSH 迁移链 — 杭州 OSS → 新加坡 → 泰国 (`core/ssh_transfer/`)
 
-给泰国 H200 机房送数据：bot 用 paramiko 遥控新加坡（SGP）ECS 跑两段。段1 `ossutil cp` 杭州 OSS → SGP 本地挂载盘 `/mnt/sgp_oss`；段2 `rsync` SGP → 泰国服务器。状态机 `NEW→STAGE1→STAGE2→DONE|FAILED`，Redis `ssh:transfer:job:{job_id}`（30 天 TTL），job 前缀 `sgp-`。
+给泰国 H200 机房送数据，两段：**段1** `ossutil cp` 杭州 OSS → SGP 上的 ossfs2 挂载盘 `/mnt/sgp_oss`（背后是新加坡桶 `SGP_OSS_BUCKET`=`wuji-sing`）；**段2** 泰国服务器 `ossutil` **直连新加坡 OSS 拉取**。状态机 `NEW→STAGE1→STAGE2→DONE|FAILED`，Redis `ssh:transfer:job:{job_id}`（30 天 TTL），job 前缀 `sgp-`。
 
+**段2 为什么是「泰国直拉」而不是「SGP rsync 推」**（2026-07-31 换的架构，同一份 19.5 TiB 实测）：SGP→泰国 rsync 单流 27 MB/s、8 流并行 78 MB/s；泰国 ossutil 直拉新加坡桶 **289 MB/s**（快 10 倍）。瓶颈是「SGP 那一跳」本身，不是带宽包（SGP 出口上限实测 768 MB/s）。改后还**完全不占 SGP 带宽、少一次中转拷贝**。旧的并行 rsync 引擎保留为回滚路径（`SSH_STAGE2_MODE=rsync`）。
+**段1 不能砍**：杭州出境限速，泰国直拉杭州慢（泰国→杭州 RTT 83ms vs →新加坡 31ms），中转桶这一跳有价值。
+
+- **段2 引擎 `engine_ossutil.py`**：控制面 bot→SGP→泰国**双跳 SSH**（复用现有 `SGP_SSH_KEY_ENC`，**零新增凭证**——bot 本来没有到泰国的 key，SGP 上早已配好免密）；数据面泰国↔新加坡 OSS 直连、**不经 SGP**。marker（pid/rc/log）落在**泰国** `$HOME/.ossutil_jobs/<job_id>/`。
+  - **双跳的内层脚本一律 base64 传递**：bot 拼串→SGP shell→泰国 shell 三层解析，手写多层引号必崩（开发时踩了两次：变量被吃掉、`unexpected EOF`）。base64 只含 `A-Za-z0-9+/=`，外层留一层双引号即可。**禁止再手写嵌套引号。**
+  - **ossutil flag 已在泰国 2.3.0 上逐个核实**（查 `cp --help`，不猜）：`-j/--job`（**默认仅 3，必须显式给**）、`--parallel`、`-u/--update`、`--checkpoint-dir`、`-e`、`--region`、`-f`（detached 跑必须给，否则交互提示会永久挂住）；**`--jobs` 不存在**。`-u` 语义 = 跳过「已存在**且比源更新**」，**mtime 相等不跳过**（会重下）。`--job` 16→32 只多 2%，已近饱和，别再往上调。
+  - `stage_progress` **刻意不返回 pct**：ossutil 在 Scanning 阶段的百分比分母是「已扫到的量」、会虚高，而 `progress_line` 优先用 `job["pct"]` → 会把假百分比钉在卡片上。留 None 让上层用 `bytes_done/bytes_total` 算真值；`bytes_done` 含 `skipped:`（续跑不低估）。
+- **引擎分派按 job 记录、不按当前配置**（`orchestrator.stage2_mode_of`）：`job["stage2_mode"]` → `job["handoff"]["engine"]`（人工接管标记）→ **回退 rsync**。绝不默认 ossutil，否则本次改动前建的所有 job 都会被拿错探针查 marker → 误判「进程异常退出」。任务跑起来后有人改 `SSH_STAGE2_MODE` 同理会拿错引擎。
+- **端到端校验 `verify.py`（段2 报成功后必跑，不过则整链 FAILED）**：**不采信传输器的「Success」**——21 TB 迁移最坏的结局不是失败，而是「报成功但少数据」，几个月后训练读到坏文件才发现、那时源可能已清理。四层：L1 源对象是否全部覆盖 / L2 字节总量（**只统计源 key 集合内**的目的字节）/ L3 逐文件字节（L1/L2 会被「多一个少一个刚好抵消」骗过，L3 不会）/ L4 抽样从 OSS 重下 + `cmp` 逐字节。**源清单在 bot 侧列、目的清单在泰国侧列，互不采信对方汇总数。**
+  - **fail-closed**：校验不过、或校验本身崩掉，都判 FAILED——「不知道对不对」必须当「不对」。
+  - **判据是「源的每个对象都在且字节一致」，不是两边数量/总量相等**：目的目录是共享数据盘，有历史/别人的文件是正常的，拿数量相等当判据会让正常情况报失败、运维就学会忽略校验结果了。`extra` 只报不判失败。
+  - **区分「数据问题」与「校验环境问题」**：样本全取样失败（凭证过期 / `/tmp` 放不下 blob）→ `env_issue=True`、文案写「校验环境问题（非数据不一致）」。都判不通过，但不能让人拿着「数据不一致」去重传 21 TB。
+  - **并发闸门 `ssh:transfer:verify:{job_id}`（NX, TTL 2h）**：一趟校验几分钟到几十分钟、期间不刷 `updated_ts`，180s 后对账就判失联→再跑一次；多份 job dict last-write-wins **可能把 FAILED 覆盖成 DONE**（真 fail-open）。抢不到锁 → 保持 STAGE2、不给任何结论。
+  - 远端清单用 `find -printf '%s\t%P\0'`（NUL 分隔、字节数在前）+ **结尾哨兵 + 查 rc**：`%P\t%s\n` 遇含换行文件名会错行；丢 rc 则 find 超时会被渲染成「目的端缺 7.5 万个」，运维的合理反应是重传。缺哨兵一律抛错「本次不给校验结论」。
+  - 抽样清单（文件名来自 **OSS 对象 key，外部可控**）走 **base64 + NUL**，**绝不用 heredoc**：一个内容为结束标记的 key 就能提前终止 heredoc、让后续内容在泰国生产机上被当命令执行。
+  - 校验结论**必须显示在成功卡上**（`cards.result_card`）：不显示的话，关掉 `SSH_STAGE2_VERIFY` 后卡片与以前一模一样，那个开关就成了隐形的 fail-open 后门。
+- **目的目录只有一份实现** `paths.dest_dir()`：传输器写哪、校验查哪靠它算出同一个串；漂移即「校验了个空目录」，而空目录表现为「缺 7.5 万个」。
+- **段下发锁** `ssh:transfer:stagelaunch:{job_id}:{stage}`（NX, TTL 180s）：段1 rc 落盘到 `stage=STAGE2` 写回 Redis 之间有最长 60s 窗口，期间任何 `refresh()`（文本查询/按钮/对账兜底）都会再起一次段2。输家**不写 Redis 但回读刷新本地 job dict**（否则调用方那份永远停在旧 stage，7 天后用陈旧对象写 FAILED、覆盖赢家的 DONE）。
 - **执行模型**：起任务 = 一条短 SSH 命令 `nohup bash -c '<work>; echo $? > rc' > log 2>&1 & echo $! > pid`；轮询 = 只读 `rc`/`kill -0 pid` marker，**从不通过 SSH 读长输出**（避 paramiko 大输出死锁 + 容器重启丢 channel）。每 job 一个工作目录 `{SGP_WORK_DIR}/{job_id}/`。rc 语义：段1 只有 `0` 算成功；段2 `0` 与 `24`（源文件传输中消失）都算成功。
 - **凭证与主机认证**：私钥是 Fernet 密文 `SGP_SSH_KEY_ENC`，运行时解密进内存（**绝不落盘**，解密结果不含 `-----BEGIN` 直接报错）；host key 固定 `SGP_SSH_HOST_KEY` + `RejectPolicy`（**禁 AutoAdd，fail-closed**）。
 - **注入面**：源桶/前缀/目标子目录全部先过 `paths` 的**严格白名单**（桶名 OSS 规范正则；每级 `\A[A-Za-z0-9._-]+\Z`，禁 `..`、空格、shell 元字符，尾锚用 `\Z` 而非 `$` 以封住结尾换行）——`shlex.quote` 只护 SGP 那一层 shell，段2 是 `ssh` 双跳、到泰国生产机上会再解一层。
@@ -228,7 +246,10 @@ Background threads start with `bot` mode:
 - **估算与审批**：`estimate_source` 走 SGP 上的 `ossutil du`，正则锚定 `total object sum size` / `total du size`（旧写法会先命中表头再跨行吞到 object count，把 22MB 读成 3B、绕过审批门），返回 `(bytes, objects, ok)`；`ok=False` → `needs_approval(size_known=False)` **fail-safe 当作需审批**，不 fail-open 放行大迁移。
 - **未修的已知缺口**：`start_stage1` / `estimate_source` **都不带 `-e/--endpoint`**，完全依赖 SGP 上写死杭州的 `~/.ossutilconfig` → **源桶不在杭州则段1 必挂**（rc=2，403 `must be addressed using the specified endpoint`；前一单 `sgp-841b88a7b0dd` 即此）。与 ossfs2 修复互不影响。
 - **入口**：飞书发「数据迁移（泰国H200）」等意图（`_is_ssh_transfer_intent`，**必须排在跨云 transfer 意图之前**，否则「数据迁移」会被跨云入口抢走）→ 录入卡（源 + 目标子目录）→ 确认卡（估算 + 超阈值仅管理员）→ 后台 `run_to_completion` 推进度/结果卡；CLI `python -m core.ssh_transfer.cli plan|apply|status`。**没有 Agent 工具**。目标子目录语义：内容铺进该目录，不再套一层源目录名；空则镜像源前缀。
-- **Config**：`SSH_TRANSFER_ENABLED`、`SGP_SSH_HOST/PORT/USER/KEY_ENC/HOST_KEY`、`SGP_OSS_MOUNT`、`SGP_WORK_DIR`、`SGP_OSSUTIL_JOBS`、`THAI_HOST/PORT/USER/DEST_ROOT`、`THAI_RSYNC_SUDO`（`true`=方案 B `--rsync-path=sudo rsync`）、`THAI_RSYNC_BWLIMIT`、`SSH_TRANSFER_APPROVAL_TB`、`SSH_TRANSFER_CHAT_ID`。依赖 `paramiko` → **部署需 `docker compose up -d --build`**，不是普通 deploy。
+- **Config**：`SSH_TRANSFER_ENABLED`、`SGP_SSH_HOST/PORT/USER/KEY_ENC/HOST_KEY`、`SGP_OSS_MOUNT`、`SGP_OSS_BUCKET`（段1 落点=段2 源的新加坡桶，默认 `wuji-sing`，须与 `/etc/ossfs2_sgp.conf` 的 `oss_bucket` 一致）、`SGP_WORK_DIR`、`SGP_OSSUTIL_JOBS`、`THAI_HOST/PORT/USER/DEST_ROOT`、`SSH_STAGE2_MODE`（`ossutil` 默认 / `rsync` 回滚）、`THAI_OSS_ENDPOINT`+`THAI_OSS_REGION`（**显式给、不吃泰国 `~/.ossutilconfig` 的默认值**——那文件人工维护，被改回杭州或加速域名会静默变慢、异地 endpoint 更会被 OSS 直接 403）、`THAI_OSSUTIL_JOBS`/`THAI_OSSUTIL_PARALLEL`、`THAI_WORK_DIR`（含 `$HOME`，**由远端 shell 展开**）、`SSH_STAGE2_VERIFY`（默认 true，**别关**）、`SSH_STAGE2_VERIFY_SAMPLES`、`THAI_RSYNC_STREAMS`/`THAI_RSYNC_SUDO`/`THAI_RSYNC_BWLIMIT`（仅 rsync 回滚路径用）、`SSH_TRANSFER_APPROVAL_TB`、`SSH_TRANSFER_CHAT_ID`。
+  性能旋钮（`THAI_RSYNC_STREAMS`/`THAI_OSSUTIL_*`/`SSH_STAGE2_VERIFY_SAMPLES`）**刻意存原始字符串、不在 import 期 `int()`**：`.env` 写成空值或非数字会让 `config.settings` 整个 import 失败、**bot 起不来**，而它们只是旋钮。转换与钳位在使用处（非法值退回安全默认）。
+  依赖 `paramiko` → **部署需 `docker compose up -d --build`**，不是普通 deploy。
+- **泰国侧前置（人工一次性）**：装 `ossutil`（现 2.3.0）+ 配好 `~/.ossutilconfig`（能读 `SGP_OSS_BUCKET`），**权限须 600**（曾是 664，同机其他账号可读 AK/SK）。目标盘挂载点是 `/mnt/data04/296834`（WekaFS，比 `/mnt/data04` 深一层，`df /mnt/data04` 看到的是根分区、会误判容量不足）。sshd `MaxStartups` 取默认 `10:30:100` → rsync 回滚路径的并发上限被钉在 10（`engine_ssh._STAGE2_MAX_STREAMS`）。
 
 ### Cross-Cloud Transfer (`core/transfer/`)
 

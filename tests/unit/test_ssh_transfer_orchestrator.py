@@ -162,6 +162,17 @@ def new_job(plan):
     return orch.create_job_record(plan, open_id="u1")
 
 
+@pytest.fixture(autouse=True)
+def _stage2_rsync_mode(monkeypatch):
+    """本文件的用例打的是 rsync 引擎的桩，显式钉住 rsync 模式。
+
+    段2 默认已改为「泰国 ossutil 直拉」（`SSH_STAGE2_MODE=ossutil`），不钉的话这些用例会
+    走到 engine_ossutil 上、桩不生效。ossutil 那条路径由
+    tests/unit/test_ssh_transfer_ossutil_direct.py 专门覆盖。
+    """
+    monkeypatch.setattr(orch.settings, "SSH_STAGE2_MODE", "rsync", raising=False)
+
+
 def test_poll_once_stage1_done_starts_stage2(monkeypatch, new_job):
     from unittest.mock import MagicMock
     new_job["stage"] = STAGE_STAGE1

@@ -50,6 +50,23 @@ def capture_run(monkeypatch):
     return box
 
 
+# 并行段2 上线后，`failure_detail(STAGE2)` 会**先**发一条 `_stage2_failed_units` 探针
+# （列 stage2.unit-*.rc 里退出码不在 {0,24} 的分片），再发原来那条 grep 探针。
+# 下面这两个助手把「排在探针后面」这件事显式化，免得每个 stage2 用例各自数下标数错。
+# 段1 不受影响（不发分片探针）——这也是「只在段2 多花一次 SSH」的回归钉子。
+_NO_FAILED_UNITS = ""            # 分片探针无输出 = 没有失败分片 = 走原来那条 stage2.log 路径
+
+
+def _stage2_outs(*outs):
+    """给 STAGE2 用例排队输出：第一条固定喂给分片探针，其余按原顺序。"""
+    return [_NO_FAILED_UNITS, *outs]
+
+
+def _grep_cmd(box, stage):
+    """取「grep 日志」那条命令（段2 时它排在分片探针之后）。"""
+    return box["cmds"][1] if stage == STAGE2 else box["cmds"][0]
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 一、start_stage1 flags 回归钉死（ossfs2 EINVAL 真机回归）
 # ══════════════════════════════════════════════════════════════════════════════
@@ -138,10 +155,10 @@ def test_failure_detail_summary_report_count_and_first_cause(capture_run):
 
 def test_failure_detail_no_report_path_returns_summary_only(capture_run):
     """② 没有报告路径（rsync 就没有 report）→ 只回汇总行，且不发第二条命令。"""
-    capture_run["outs"] = ["rsync error: some files could not be transferred (code 23)\n"]
+    capture_run["outs"] = _stage2_outs("rsync error: some files could not be transferred (code 23)\n")
     detail = engine_ssh.failure_detail("sgp-abc123", STAGE2)
     assert detail == "rsync error: some files could not be transferred (code 23)"
-    assert len(capture_run["cmds"]) == 1, "无 .report 路径不该再发第二条命令"
+    assert len(capture_run["cmds"]) == 2, "无 .report 路径不该再发第三条命令（1=分片探针 2=grep）"
     assert "失败对象" not in detail and "首条根因" not in detail
 
 
@@ -211,7 +228,7 @@ def test_failure_detail_truncated_to_detail_max(capture_run):
 
 def test_failure_detail_clips_each_line_to_line_max(capture_run):
     """逐行截断：单条超长行被截到 `_DETAIL_LINE_MAX`（240），不许一行吃掉整个预算。"""
-    capture_run["outs"] = ["rsync error: " + "X" * 500 + "\n"]
+    capture_run["outs"] = _stage2_outs("rsync error: " + "X" * 500 + "\n")
     detail = engine_ssh.failure_detail("sgp-abc123", STAGE2)
     assert engine_ssh._DETAIL_LINE_MAX == 240
     assert len(detail) == engine_ssh._DETAIL_LINE_MAX
@@ -258,9 +275,9 @@ def test_failure_detail_probe_translates_cr_to_lf(capture_run):
 
 def test_failure_detail_probe_greps_expected_markers(capture_run):
     """筛选正则含 ossutil/rsync 的关键标记，且按 job/stage 定位到对应 log marker。"""
-    capture_run["outs"] = ["\n"]
+    capture_run["outs"] = _stage2_outs("\n")
     engine_ssh.failure_detail("sgp-abc123", STAGE2)
-    cmd = capture_run["cmds"][0]
+    cmd = _grep_cmd(capture_run, STAGE2)
     for token in ("FinishWithError", "Error occurs", "rsync error", "rsync:", "Error:"):
         assert token in cmd
     assert engine_ssh._marker("sgp-abc123", STAGE2, "log") in cmd
@@ -346,7 +363,7 @@ def test_failure_detail_accepts_dotted_dashed_report_path(capture_run):
 
 def test_failure_detail_stage2_einval_no_ossfs2_conclusion(capture_run):
     """段2 的 EINVAL 不套段1 的 ossfs2 结论（段2 是 rsync 到泰国本地盘，原因不同）。"""
-    capture_run["outs"] = ["rsync: write failed: invalid argument\n"]
+    capture_run["outs"] = _stage2_outs("rsync: write failed: invalid argument\n")
     detail = engine_ssh.failure_detail("sgp-abc123", STAGE2)
     assert "ossfs2" not in detail
     assert "--part-size" not in detail

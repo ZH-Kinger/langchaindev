@@ -1294,10 +1294,25 @@ def _h_retry_ssh_transfer(action_val, open_id, chat_id, form_value):
     job["error"] = ""
     job["error_detail"] = ""   # 跟 error 一起清：留着上一轮明细会和新一轮的失败原因自相矛盾
     job["launched"] = False
+    # 并行段2 的分片计数也要清：探针只在有 unit 日志时回这两个键，退回单流后它们会永久残留，
+    # 卡片一直显示「分片 50/50」像是已经传完了。
+    job.pop("units_total", None)
+    job.pop("units_done", None)
+    # 上一轮的校验结论同样是陈旧态（同 error_detail 的理由）。不清的话：run1 校验失败留下
+    # verify.passed=False → run2 传完后某个 actor 抢校验锁失败 → 回读到这条旧结论就
+    # `return True` 晋级 DONE ⇒ **run2 从未被校验过却算成功**，违背 fail-closed 初衷。
+    job.pop("verify", None)
     orchestrator._save(job)
     try:
         from utils.redis_client import get_redis
-        get_redis().delete(f"ssh:transfer:launch:{job_id}", f"dataflow:notified:{job_id}")
+        # 分段下发锁（stagelaunch）也必须清：它 TTL 180s，不清的话这段时间内的重试会被静默跳过。
+        # 校验锁 TTL 2h：持锁者被 kill（容器重启/OOM）时不会自己释放，重试每轮都 defer、
+        # job 干等 2 小时。retry 本就是「运维手动救场」的入口，多删这一把成本为零。
+        get_redis().delete(
+            f"ssh:transfer:launch:{job_id}", f"dataflow:notified:{job_id}",
+            f"ssh:transfer:verify:{job_id}",
+            f"ssh:transfer:stagelaunch:{job_id}:{orchestrator.STAGE_STAGE1}",
+            f"ssh:transfer:stagelaunch:{job_id}:{orchestrator.STAGE_STAGE2}")
     except Exception:
         pass
     return _h_confirm_ssh_transfer({"job_id": job_id}, open_id, chat_id, form_value, reply_v2=False)
