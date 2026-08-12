@@ -21,6 +21,20 @@ from core.dsw_scheduler import (_redis_get, _redis_set, _redis_delete,
 from . import gpu_flow, messaging
 
 
+def _is_admin(open_id: str) -> bool:
+    """管理员判定 —— **fail-closed，别改成裸的 `open_id == ADMIN`**。
+
+    原写法是各处散落的 `if open_id != settings.ADMIN_FEISHU_OPEN_ID: 拒绝`。当
+    `ADMIN_FEISHU_OPEN_ID` 未配置时它是空串，而 open_id 也可能是空串（老式回调取不到操作人、
+    schema 2.0 路径的 `or ""` 兜底），于是 `"" != ""` 为 False → **管理员门禁全部放行**。
+    隔离热备机、新部署、配置漏填都会踩到这个组合。
+
+    这里显式要求：管理员必须已配置，且 open_id 非空并精确相等。
+    """
+    admin_id = getattr(settings, "ADMIN_FEISHU_OPEN_ID", "") or ""
+    return bool(admin_id) and bool(open_id) and open_id == admin_id
+
+
 # ── MFU 日报区域切换：返回新卡片原地替换（只读 Redis 缓存，秒回；绝不同步采集）──
 
 def _h_mfu_region(action_val, open_id, chat_id, form_value):
@@ -301,7 +315,7 @@ def _h_reject_gpu(action_val, open_id, chat_id, form_value):
 
 def _h_approve_oss_perm(action_val, open_id, chat_id, form_value):
     from config.settings import settings as _cfg
-    if open_id != _cfg.ADMIN_FEISHU_OPEN_ID:
+    if not _is_admin(open_id):
         return {"toast": {"type": "error", "content": "仅管理员可批准下发"}}
 
     level = action_val.get("level", "dir") if isinstance(action_val, dict) else "dir"
@@ -332,7 +346,7 @@ def _h_approve_oss_perm(action_val, open_id, chat_id, form_value):
 
 def _h_approve_oss_perm_selected(action_val, open_id, chat_id, form_value):
     from config.settings import settings as _cfg
-    if open_id != _cfg.ADMIN_FEISHU_OPEN_ID:
+    if not _is_admin(open_id):
         return {"toast": {"type": "error", "content": "仅管理员可批准下发"}}
 
     fv = form_value or {}
@@ -534,7 +548,7 @@ def _h_confirm_transfer(action_val, open_id, chat_id, form_value, *, reply_v2=Tr
     )
     job = orchestrator.set_same_name_policy(job, same_name_policy)
 
-    if orchestrator.needs_approval(job.get("bytes_total", 0)) and open_id != settings.ADMIN_FEISHU_OPEN_ID:
+    if orchestrator.needs_approval(job.get("bytes_total", 0)) and not _is_admin(open_id):
         return {"toast": {"type": "error", "content": "\u8d85\u8fc7\u5ba1\u6279\u9608\u503c\uff0c\u4ec5\u7ba1\u7406\u5458\u53ef\u786e\u8ba4\u4e0b\u53d1"}}
 
     # \u8fde\u70b9\u201c\u786e\u8ba4\u8fc1\u79fb\u201d\uff08\u4e0d\u540c\u786e\u8ba4\u5361 \u2192 \u4e0d\u540c msg_id\uff0c\u5185\u5bb9\u53bb\u91cd\u6321\u4e0d\u4f4f\uff09\u4f1a\u5404\u8d77\u4e00\u4e2a\u8f6e\u8be2\u7ebf\u7a0b\u3001\u5404\u5237\u8fdb\u5ea6/\u7ed3\u679c\u5361\u3002
@@ -1244,7 +1258,7 @@ def _h_confirm_ssh_transfer(action_val, open_id, chat_id, form_value, *, reply_v
     if job["stage"] not in (orchestrator.STAGE_NEW, orchestrator.STAGE_FAILED):
         return {"toast": {"type": "info", "content": f"任务已在 {job['stage']}，无需重复"}}
     if (orchestrator.needs_approval(job.get("bytes_total", 0), job.get("estimate_ok", True))
-            and open_id != settings.ADMIN_FEISHU_OPEN_ID):
+            and not _is_admin(open_id)):
         return {"toast": {"type": "error", "content": "超过审批阈值，仅管理员可确认下发"}}
     try:
         from utils.redis_client import get_redis
@@ -1372,7 +1386,7 @@ def _h_confirm_pfs_transfer(action_val, open_id, chat_id, form_value, *, reply_v
         return {"toast": {"type": "info", "content": f"任务已在 {job['stage']}，无需重复"}}
     # 治理收紧（用户拍板 MED-2）：自报预估量可篡改、不可信 → 确认下发**一律**需管理员，
     # 不论自报大小；自报量只用于卡片显示。堵住"非管理员自报小值绕过审批"。
-    if open_id != settings.ADMIN_FEISHU_OPEN_ID:
+    if not _is_admin(open_id):
         return {"toast": {"type": "error", "content": "PFS 跨云直传需管理员确认下发，请联系管理员。"}}
     try:
         from utils.redis_client import get_redis

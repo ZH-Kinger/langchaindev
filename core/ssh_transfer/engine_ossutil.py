@@ -120,7 +120,18 @@ def start_stage2(job_id: str, *, source_prefix: str, dest_rel: str = "") -> None
     # 目标目录只有一份实现（paths.dest_dir）：校验层查的必须与这里写的逐字相同，见该函数注释。
     dest = paths.dest_dir(dest_root, source_prefix=source_prefix, dest_rel=dest_rel)
     jd = _work_dir(job_id)
-    # 路径都经 paths 层白名单校验过，这里仍全部 shlex.quote：泰国是生产机，纵深防御。
+    # ⚠️ 安全边界的真相（别被下面的 shlex.quote 误导）：
+    #    这些值被拼进 `WORK="..."` 这个**双引号赋值**里，而 shlex.quote 产生的是单引号包裹 ——
+    #    单引号在双引号上下文里只是普通字符，**挡不住 $(...)、反引号、${...}**。实测
+    #    `WORK="ossutil cp '/mnt/x/$(touch /tmp/PWNED)/'"` 在赋值那一刻就会执行 touch。
+    #    所以 shlex.quote 在这里**不构成纵深防御**，它只在下面那些普通命令位置才真正有效。
+    #
+    #    这条链路上唯一真实的防线是 `paths` 层的白名单（`_SEG_RE` = [A-Za-z0-9._-]，不含
+    #    $ ` { }，且显式拒 `..` 与空段）。目前构造不出可用载荷，靠的全是它。
+    #
+    #    **禁止放宽 `_SEG_RE`**，也不要因为"反正有 shlex.quote"而放松任何一级校验 ——
+    #    这里通往泰国生产机，注入即 RCE。要彻底修，把 src/dest/flags 当位置参数传给内层
+    #    `bash -s -- "$@"`，或改用 bash 数组 `"${WORK[@]}"`，别再往双引号字符串里拼。
     script = f'''
 set -u
 JD="{jd}"

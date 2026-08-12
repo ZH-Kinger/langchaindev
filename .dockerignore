@@ -1,0 +1,62 @@
+# 构建上下文排除表 —— 安全承重件，别随手放宽。
+#
+# 为什么必须有这个文件：Dockerfile 的 `COPY . .` 会把构建上下文整个拷进镜像的一层，而部署
+# 目录同时也是 compose 的 build context 且放着 .env —— 没有这份排除表，每次
+# `docker compose up -d --build` 都会把凭证文件连同日志一起固化进镜像层，之后任何拿到镜像
+# 的人都能读出来。镜像层是只读快照，事后删文件也删不掉历史层。
+#
+# 运行时不受影响：docker-compose 用 `.:/app` 绑定挂载，容器跑起来后读的是宿主机上的真实文件，
+# 不是镜像层里的副本。所以这里排除得越干净越好。
+
+# ── 凭证 ──
+# 用 `.env*` 而非 `.env` + `.env.*`：后者漏掉 .envrc / .env-prod / .env_bak 这类无点变体。
+# .dockerignore 逐行匹配、最后命中者胜，所以否定模式必须写在后面。
+.env*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+.ssh/
+.aws/
+.claude/
+.deployed_commit
+
+# ── 运行时产物（镜像里不需要，Dockerfile 第 36 行会 mkdir 空目录）──
+logs/
+sessions/
+vector_db/
+models/
+data/
+*.log
+
+# ── RAG 相关：镜像内 langchain-chroma 被注释掉、RAG mode 本就不可用（见 Dockerfile 第 27-28 行）──
+#    向量库与模型缓存动辄上百 MB，进镜像纯属浪费
+
+# ── 版本控制与本地环境 ──
+.git/
+.gitignore
+.gitattributes
+.venv/
+.venv-linux/
+venv/
+.idea/
+.vscode/
+
+# ── Python 缓存 ──
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# ── 测试与文档（不参与运行）──
+tests/
+docs/
+*.md
+!README.md
+
+# ── 部署脚本（在宿主机跑，不进容器）──
+deploy.ps1
+infra/

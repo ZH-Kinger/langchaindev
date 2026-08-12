@@ -1,4 +1,5 @@
 ﻿"""Flask Webhook 路由：/feishu/event、/feishu/card_action、/health + run() 入口。"""
+import hmac
 import json
 import re
 import threading
@@ -38,29 +39,61 @@ def _approval_allowlist() -> set:
     return codes
 
 
+def _extract_request_token(data: dict) -> str:
+    """取飞书请求里的验证 token（在飞书后台 → 事件订阅 → Verification Token 里找）。
+
+    位置随事件格式而异：schema 2.0 在 `header.token`；旧版 v1（leave_approval 等审批事件、
+    challenge、老式卡片回调）在顶层 `data["token"]`。两处都取，否则旧版回调（无 header）会因
+    取不到 token 被 403 误杀。
+    """
+    if not isinstance(data, dict):        # body 是 JSON 数组/标量时 .get 会 AttributeError → 500
+        return ""
+    header = data.get("header")
+    header = header if isinstance(header, dict) else {}
+    token = header.get("token") or data.get("token") or ""
+    return token if isinstance(token, str) else ""
+
+
+def _token_verified(data: dict) -> bool:
+    """入站请求验证 token 校验 —— /feishu/event 与 /feishu/card_action 共用这一把门。
+
+    未配置 `FEISHU_VERIFICATION_TOKEN` 时返回 True（保持既有降级行为，不让未配置的环境直接瘫），
+    但 `run()` 启动时会打 ERROR 告警说明此时门是敞的。常数时间比较，避免逐字节比较的时序侧信道。
+
+    **必须先 encode 成 bytes**：`hmac.compare_digest` 对含非 ASCII 字符的 str 会抛
+    `TypeError: comparing strings with non-ASCII characters is not supported`。token 来自外部
+    请求体，攻击者随手传个中文/西里尔字母就能让视图抛异常 → Flask 500，而 500 会经
+    utils/logger 的 ERROR 回调**给管理员刷飞书私信** —— 等于把一道鉴权门变成免鉴权的告警放大器。
+    """
+    expected = settings.FEISHU_VERIFICATION_TOKEN
+    if not expected:
+        return True
+    return hmac.compare_digest(
+        _extract_request_token(data).encode("utf-8"), str(expected).encode("utf-8")
+    )
+
+
 @app.route("/feishu/event", methods=["GET", "POST"])
 def feishu_event():
     data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):   # body 为 JSON 数组/标量时，后续 .get 会 AttributeError → 500
+        data = {}
 
     # ① URL 验证（首次配置时飞书发送 challenge）
     if data.get("type") == "url_verification":
         return jsonify({"challenge": data.get("challenge", "")})
 
-    header = data.get("header", {})
+    header = data.get("header")
+    header = header if isinstance(header, dict) else {}   # 同上：header 非 dict 时下面的 .get 会 500
 
-    # ② 可选：验证 token（在飞书后台 → 事件订阅 → Verification Token 里找）
-    #   token 位置随事件格式而异：schema 2.0 在 header.token；旧版 v1（如 leave_approval
-    #   等审批事件、challenge）在顶层 data["token"]。两处都取，否则旧版审批回调（无 header）
-    #   会因取不到 token 被 403 误杀。
-    verification_token = settings.FEISHU_VERIFICATION_TOKEN
-    request_token = header.get("token") or data.get("token")
-    if verification_token and request_token != verification_token:
+    # ② 可选：验证 token（token 取值位置见 _extract_request_token）
+    if not _token_verified(data):
         logger.warning(
             "[feishu_event] invalid token type=%s approval_code=%s instance=%s has_token=%s",
             header.get("event_type") or data.get("type") or "-",
             ram_approval.event_log_summary(data).get("approval_code") or "-",
             ram_approval.event_log_summary(data).get("instance_code") or "-",
-            bool(request_token),
+            bool(_extract_request_token(data)),
         )
         return jsonify({"code": 1, "msg": "invalid token"}), 403
 
@@ -173,9 +206,25 @@ def feishu_card_action():
         return jsonify({"challenge": challenge})
 
     data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):   # body 为 JSON 数组/标量时，后续 .get 会 AttributeError → 500
+        data = {}
 
     if data.get("type") == "url_verification":
         return jsonify({"challenge": data.get("challenge", "")})
+
+    # 验证 token —— 与 /feishu/event 同一把门。**这道校验是安全承重件，别拆**：
+    # 本路由把请求体里的 open_id（operator.operator_id.open_id / data.open_id / data.user_id）
+    # 当作操作人身份传给 _process_action，而多个 handler 拿它做管理员判定 —— OSS 权限下发
+    # (_h_approve_oss_perm[_selected])、跨云/SSH/PFS 迁移的超阈值确认下发。少了这道门，任何人
+    # POST 一个把 open_id 填成管理员的请求，就能过掉上述全部管理员门禁（open_id 在组织内可见，
+    # 不是秘密）。事件订阅那条 card.action.trigger 走 /feishu/event、本来就过了同一把门，只有
+    # 这条老式卡片回调路径此前是敞的。
+    if not _token_verified(data):
+        logger.warning(
+            "[card_action] invalid token has_token=%s keys=%s",
+            bool(_extract_request_token(data)), list(data.keys()),
+        )
+        return jsonify({"code": 1, "msg": "invalid token"}), 403
 
     # schema 2.0 卡片回调：动作在 data["event"]（与事件订阅 card.action.trigger 同构），
     # 旧解析按 data["action"] 取不到值（action/open_id 全空）→ 统一走 2.0 解析。
@@ -215,14 +264,28 @@ def feishu_card_action():
 
 
 
-def _ram_api_authorized() -> bool:
-    expected = getattr(settings, "RAM_QUERY_API_TOKEN", "") or getattr(settings, "FEISHU_VERIFICATION_TOKEN", "")
+def _api_token_ok(expected: str) -> bool:
+    """比对请求里带的 token。常数时间比较；两侧 encode 成 bytes（compare_digest 对非 ASCII 的
+    str 会抛 TypeError，token 来自外部请求 → 不 encode 就是个可匿名触发的 500）。"""
     if not expected:
         return False
     auth = request.headers.get("Authorization", "")
     bearer = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
     supplied = request.headers.get("X-API-Token", "") or bearer or request.args.get("token", "")
-    return supplied == expected
+    return hmac.compare_digest(str(supplied).encode("utf-8"), str(expected).encode("utf-8"))
+
+
+def _ram_api_authorized() -> bool:
+    """`/api/ram/user` 门禁：**只认 `RAM_QUERY_API_TOKEN`，不回退**。
+
+    原实现回退到 `FEISHU_VERIFICATION_TOKEN`，而线上 `RAM_QUERY_API_TOKEN` 恰好为空 → 这个
+    对外只读接口一直在拿 webhook 的验证 token 当钥匙。两个面共用一把钥匙意味着任一侧泄漏
+    另一侧全开：拿到本接口 token 的人可以伪造 `/feishu/card_action`、把 open_id 填成管理员，
+    过掉 OSS 权限下发、PFS 直传确认，以及跨云/SSH 迁移超阈值时的确认门（见 `_token_verified`
+    的注释）。故 fail-closed：
+    没配专用 token 就一律 403。
+    """
+    return _api_token_ok(getattr(settings, "RAM_QUERY_API_TOKEN", ""))
 
 
 @app.route("/api/ram/user", methods=["GET", "POST"])
@@ -254,21 +317,17 @@ def api_ram_user():
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 def _gpu_dist_authorized() -> bool:
-    """页面 token 门禁：优先 GPU_DIST_TOKEN，回退 RAM_QUERY_API_TOKEN / FEISHU_VERIFICATION_TOKEN。"""
-    expected = (getattr(settings, "GPU_DIST_TOKEN", "")
-                or getattr(settings, "RAM_QUERY_API_TOKEN", "")
-                or getattr(settings, "FEISHU_VERIFICATION_TOKEN", ""))
-    if not expected:
-        return False
-    auth = request.headers.get("Authorization", "")
-    bearer = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
-    supplied = request.headers.get("X-API-Token", "") or bearer or request.args.get("token", "")
-    return supplied == expected
+    """页面 token 门禁：**只认 `GPU_DIST_TOKEN`，不回退**（同 `_ram_api_authorized` 的理由）。
+
+    这个页面的链接会被当按钮推进飞书群，token 明文拼在 URL query 里 —— 一旦回退到
+    `FEISHU_VERIFICATION_TOKEN`，等于把 webhook 入站门的钥匙广播给群里每个人。
+    """
+    return _api_token_ok(getattr(settings, "GPU_DIST_TOKEN", ""))
 
 
 @app.route("/gpu/distribution", methods=["GET"])
 def gpu_distribution_page():
-    """GPU 卡分布实时页面（自动刷新 HTML）。token 门禁（GPU_DIST_TOKEN 优先）。"""
+    """GPU 卡分布实时页面（自动刷新 HTML）。token 门禁：**只认 GPU_DIST_TOKEN，无回退**。"""
     if not getattr(settings, "GPU_DIST_ENABLED", True):
         return "gpu distribution disabled", 404
     if not _gpu_dist_authorized():
@@ -401,6 +460,17 @@ def run(host: str = "0.0.0.0", port: int = 8088, debug: bool = False):
             lambda msg: messaging._send_text_to(settings.ADMIN_FEISHU_OPEN_ID, settings.FEISHU_CHAT_ID, msg)
         )
         logger.info("错误飞书推送已注册 → %s", settings.ADMIN_FEISHU_OPEN_ID)
+
+    # ── 启动校验：验证 token 缺失 = 入站门全敞 ─────────────────────────────
+    # 放在错误回调注册之后，好让这条 ERROR 直接推到管理员飞书。不做 SystemExit：未配置 token 的
+    # 环境（隔离热备机）应当能起来，但必须让人看见门是敞的。
+    if not settings.FEISHU_VERIFICATION_TOKEN:
+        logger.error(
+            "[启动校验] FEISHU_VERIFICATION_TOKEN 未配置 → /feishu/event 与 /feishu/card_action "
+            "的入站校验全部跳过。card_action 的操作人 open_id 取自请求体，此时管理员门禁"
+            "（OSS 权限下发 / 跨云·SSH·PFS 迁移下发）可被任意伪造请求绕过。"
+            "请在 .env 填 FEISHU_VERIFICATION_TOKEN 后 force-recreate 容器（restart 不重载 env_file）。"
+        )
 
     logger.info("正在初始化 Agent（首次加载模型，请稍候）...")
     try:

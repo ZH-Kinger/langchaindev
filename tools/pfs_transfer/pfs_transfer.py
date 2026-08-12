@@ -50,7 +50,11 @@ def manage_pfs_transfer(action: str, source: str = "", dest: str = "", same_name
             # force 逃生口不能绕过 admin 门（否则非管理员「apply force=true」即绕过卡片路的 admin 门）。
             # CLI 走 orchestrator 直连、不经本工具，其 --force 属服务器特权运维、可接受。
             from config.settings import settings
-            if open_id != settings.ADMIN_FEISHU_OPEN_ID:
+            # 管理员未配置时必须拒绝：本工具的 open_id 默认值是空串，若 ADMIN 也为空则
+            # `"" != ""` 为假 → 任何人一句「apply」就过门。这是零成本触发，比 H1（诱导模型
+            # 填出管理员 open_id）容易得多。与 core/feishu_bot/actions._is_admin 同一姿态。
+            if not settings.ADMIN_FEISHU_OPEN_ID or not open_id \
+                    or open_id != settings.ADMIN_FEISHU_OPEN_ID:
                 return "❌ PFS 跨云直传需管理员确认下发，请联系管理员（或走飞书确认卡由管理员点确认）。"
             if need and not force:
                 return f"⚠️ 需管理员确认。管理员带 force=true 执行。计划：{plan.summary()}"

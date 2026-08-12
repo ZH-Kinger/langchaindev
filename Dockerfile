@@ -9,8 +9,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc g++ libsqlite3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple \
-    && pip config set global.trusted-host mirrors.aliyun.com
+# 只设 index-url，**不要加 trusted-host**：index-url 本就是 https，而 `pip config set
+# global.trusted-host` 会对该源关闭证书校验，且写进镜像的 pip.conf 长期生效（后续在容器里
+# 手动 pip install 也一样不校验）。纯粹减防护、零收益。
+RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple
 
 # 1) CPU 版 PyTorch（避开 NVIDIA 全家桶）
 #    放在 COPY requirements.txt 之前，作独立缓存层：torch 版本固定、不依赖 requirements 内容，

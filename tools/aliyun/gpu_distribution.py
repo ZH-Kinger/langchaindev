@@ -470,6 +470,10 @@ def build_html(g: dict, series: dict = None, token: str = "", refresh_secs: int 
 
     return f"""<!doctype html><html lang="zh"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<!-- 本页 URL 里带着 ?token=…，而页面会从 registry.npmmirror.com / cdn.jsdelivr.net 取外链脚本。
+     旧 WebView 的默认 referrer 策略会把**含 query 的完整 URL** 放进 Referer 发给那些第三方域，
+     等于把访问 token 交出去。no-referrer 一刀切断，页面本身不依赖 Referer。 -->
+<meta name="referrer" content="no-referrer">
 <title>GPU 卡分布</title>
 <style>
 :root{{color-scheme:light dark}}
@@ -532,10 +536,16 @@ def dist_url() -> str:
     base = (settings.GPU_DIST_BASE_URL or "").rstrip("/")
     if not base:
         return ""
-    token = (getattr(settings, "GPU_DIST_TOKEN", "")
-             or settings.RAM_QUERY_API_TOKEN or settings.FEISHU_VERIFICATION_TOKEN or "")
-    q = f"?token={token}" if token else ""
-    return f"{base}/gpu/distribution{q}"
+    # **只用 GPU_DIST_TOKEN，绝不回退到 RAM_QUERY_API_TOKEN / FEISHU_VERIFICATION_TOKEN**：
+    # 这个链接会被当按钮推进飞书群（messages.py 的卡分布摘要卡），token 明文拼在 URL query 里。
+    # 回退到 FEISHU_VERIFICATION_TOKEN 就等于把 webhook 入站门的钥匙广播给群里每个人 ——
+    # 拿到它即可伪造 /feishu/card_action、把 open_id 填成管理员，过掉全部管理员门禁。
+    token = getattr(settings, "GPU_DIST_TOKEN", "") or ""
+    if not token:
+        # 与"无基址"同处理：返回空串 → summary_card 的 `if url:` 不渲染按钮。
+        # 否则会推给用户一个不带 token 的链接，点进去必吃 _gpu_dist_authorized 的 403。
+        return ""
+    return f"{base}/gpu/distribution?token={token}"
 
 
 def summary_card(g: dict, url: str = ""):

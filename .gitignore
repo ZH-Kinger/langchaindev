@@ -56,3 +56,6 @@ data/logs/
 # ===== 系统文件 =====
 .DS_Store
 Thumbs.db
+
+# 本机 Linux 测试环境（Windows 拷来的 .venv 在 Linux 上不可用）
+.venv-linux/

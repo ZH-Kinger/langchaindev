@@ -6,6 +6,24 @@
 
 ## [Unreleased]
 
+### Security
+
+一轮安全加固，覆盖入站鉴权、构建产物、管理员门禁与数据保留期。原则是把散落的判定收敛成单一入口，并把默认失败方向统一改成 fail-closed。
+
+- **`/feishu/card_action` 补上验证 token 校验**：`/feishu/event` 一直有这道门，卡片回调路由没有。抽出 `_extract_request_token()` / `_token_verified()` 供两条入站路由共用，避免以后再长出第三个没有校验的路由。`hmac.compare_digest` 两侧先 `encode("utf-8")` —— 该函数对含非 ASCII 的 str 会抛 `TypeError`，而 token 取自请求体，不编码就会让畸形输入变成 500；配合 `data` / `header` / `token` 的 `isinstance` 兜底，畸形请求体一律走正常 403
+- **新增 `.dockerignore`**：`Dockerfile` 的 `COPY . .` 会把构建上下文整个拷进镜像的一层，而部署目录同时是 build context 且含 `.env` 与日志。排除表覆盖 `.env*`（含 `.envrc` 这类无点变体）、`*.pem` / `*.key` / `id_rsa*` / `.ssh/` / `.aws/`、`logs/` / `sessions/` / `.git/` / 虚拟环境。运行时不受影响（compose 以 `.:/app` 绑定挂载，容器读的是宿主机真实文件）
+- **token 不再跨用途回退**：`/api/ram/user` 与 `/gpu/distribution` 原本在缺专用 token 时会逐级回退到 `FEISHU_VERIFICATION_TOKEN`，等于让不同的暴露面共用同一把钥匙。三处改为只认各自专用 token、无回退；`RAM_QUERY_API_TOKEN`、`GPU_DIST_TOKEN` 一并加进 `Config._REQUIRED_FIELDS`，未配置时启动即告警。`dist_url()` 在缺 token 时返回空串，摘要卡不再渲染一个点进去必然 403 的按钮；GPU 页面加 `referrer: no-referrer`，避免带 query 的 URL 经 Referer 外泄给外链 CDN
+- **管理员门禁 fail-closed**：新增 `actions._is_admin()` 收敛 5 处散落判定 —— 原写法在 `ADMIN_FEISHU_OPEN_ID` 未配置时会因 `"" != ""` 为假而全员放行。`tools/pfs_transfer`、`tools/temp_ak_issuance` 两处同款兜底
+- **缺管理员配置时不再自动批准 GPU 工单**：改为拒绝并评论提示。该分支必须过 `_mark_approval_notified` NX 闸门 —— 它不写工单状态、每轮轮询都会重新捞到该工单，而轮询间隔只有 20 秒，不去重会刷成每天数千条 Jira 评论
+- **`ram_approval:instance:{code}` 加 90 天保留期**：该记录在失败分支会写入申请人姓名/邮箱/手机号，此前 `r.set` 无 `ex=`、永不过期，是项目里唯一没有保留期的命名空间（其余 7~30 天）
+- `REDIS_PASSWORD` 加进 `Config._REQUIRED_FIELDS`（redis-py 对空串不发 AUTH，此前缺失时启动零提示）
+- `Dockerfile` 移除 `pip config set global.trusted-host`：index-url 本就是 https，该行只是对该源关闭证书校验，且会写进镜像 pip.conf 长期生效
+- `core/ssh_transfer/engine_ossutil.py` 修正一处**与实现不符的注释**：原注释宣称参数经 `shlex.quote` 构成纵深防御，但这些值被拼进**双引号赋值**，单引号在该上下文只是普通字符。真正的防线是 `paths` 层白名单，注释已改为事实并标注禁止放宽 `_SEG_RE`
+- `requirements.txt` 补 `matplotlib`：`utils/chart_builder.py` 直接 import 但从未声明，此前依赖传递安装
+- 测试：新增 143 例安全回归（token 门禁 67 / API token fail-closed 35 / 管理员门禁 28 / 调度器审批门 13），全量 **2231 passed**。每条拒绝用例均装哨兵断言危险动作未被执行——只断言状态码不作数
+
+> **部署提醒**：本批含 `.dockerignore` 与 `requirements.txt` 变更 → 必须 `docker compose up -d --build`，普通 restart 式部署不会生效。上线前先配置 `RAM_QUERY_API_TOKEN` 并 force-recreate（`restart` 不重载 `env_file`），否则 `/api/ram/user` 将全量 403。
+
 ### Added
 - **第二阿里云主账号（`1949`）接入临时 AK/SK 发放**（`core/temp_ak_issuance/accounts.py`，`2808296`）：新增 `AccountProfile` 档案注册表，一个 Bot 给两个主账号发凭证。**不是复制一份代码**——延长/撤销审批被两账号共用同一个 definitionCode，同一 code 只能有一个处理器认领，副本必然一个抢到另一个永远收不到，故必须由单一处理器按「凭证ID → grant → 账号」分派、grant 带账号维度。隔离项：凭证（各账号自己的 RAM 可写 AK，显式传参）/ Redis（`temp_ak:` vs `temp_ak_1949:`）/ 凭证ID（`tak-` vs `tak1949-`）/ RAM 登录名（`tempak-` vs `tempak-1949-`）/ 显示名后缀 / 桶表 / 表单字段映射 / 内部回执群。新审批「数据访问凭证申请（产线）」`0133C4FC-…`（使用人名称 / 权限设置 / DateInterval / 访问目录 / 备注，无「平台」单选＝恒阿里云）；延长/撤销复用 `E9333E62-…` 无需另建
 - 临时凭证正文补**地域 / 外网 Endpoint / 桶域名**三行：深圳的桶用杭州 endpoint 会被 OSS 回 403 `must be addressed using the specified endpoint`，使用方会以为凭证无效

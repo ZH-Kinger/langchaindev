@@ -35,6 +35,9 @@ REDIS_INSTANCE_PREFIX = "ram_approval:instance:"
 REDIS_LOCK_PREFIX = "ram_approval:lock:"
 REDIS_INDEX_KEY = "ram_approval:instances"
 REDIS_LOCK_TTL_SECONDS = 600
+# 建号审批处理记录的保留期。失败记录含员工 PII（姓名/邮箱/手机号/申请理由），
+# 此前是 r.set 无 TTL → 永久留存。90 天足够排查与"相同登录名重提续做"的幂等判断。
+INSTANCE_RECORD_TTL_SECONDS = 90 * 86400
 
 APPROVED_STATUSES = {
     "APPROVED",
@@ -1238,7 +1241,12 @@ def _save_instance_record(instance_code: str, patch: dict[str, Any]) -> None:
         if "created_at_ms" not in current:
             current["created_at_ms"] = _now_ms()
         current.update({k: v for k, v in patch.items() if v is not None})
-        r.set(key, json.dumps(current, ensure_ascii=False, sort_keys=True))
+        # 必须带 TTL：失败记录里含 login_name / display_name / email / mobile_phone /
+        # reason / comments（见 save_approval_failure），原本 r.set 无 ex= → 永不过期，
+        # 每次建号失败就在 Redis 里永久沉淀一份员工 PII。这是全项目唯一没有保留期的命名空间
+        # （grant 30 天、六条搬运链 job 30 天、对话历史 7 天）。90 天足够排查与幂等续做。
+        r.set(key, json.dumps(current, ensure_ascii=False, sort_keys=True),
+              ex=INSTANCE_RECORD_TTL_SECONDS)
         r.zadd(REDIS_INDEX_KEY, {instance_code: int(current.get("updated_at_ms") or _now_ms())})
     except Exception:
         logger.warning("[ram_approval] failed to save Redis record", exc_info=True)

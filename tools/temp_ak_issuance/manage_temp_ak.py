@@ -68,7 +68,10 @@ def manage_temp_ak(action: str, bucket: str = "", prefix: str = "", caps: str = 
 
         if action == "revoke":
             from config.settings import settings
-            if open_id != settings.ADMIN_FEISHU_OPEN_ID:
+            # 管理员未配置时必须拒绝：open_id 默认空串，ADMIN 也为空则 `"" != ""` 为假 →
+            # 任何人一句「revoke tak-xxx」就能吊销外部方的凭证。同 pfs_transfer 的注释。
+            if not settings.ADMIN_FEISHU_OPEN_ID or not open_id \
+                    or open_id != settings.ADMIN_FEISHU_OPEN_ID:
                 return "❌ 手动吊销需管理员操作。"
             if not grant_id:
                 return "❌ revoke 需要 grant_id（tak-…）。"

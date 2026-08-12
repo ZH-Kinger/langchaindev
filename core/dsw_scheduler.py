@@ -490,9 +490,21 @@ def _process_new_ticket(ticket: dict) -> None:
             else:
                 logger.debug("[Scheduler] 工单 %s 等待管理员审批中", key)
         else:
-            # 无管理员配置 → 自动批准
-            _set_approved(key)
-            logger.warning("[Scheduler] ADMIN_FEISHU_OPEN_ID 未配置，工单 %s 自动批准", key)
+            # 无管理员配置 → **拒绝，不再自动批准**（原为 fail-open）。
+            # 自动批准意味着：只要 ADMIN_FEISHU_OPEN_ID 漏配（新部署、隔离热备机、.env 改动后
+            # 用 restart 而非 force-recreate 导致没重载），任何人提个 Jira 工单就能让 bot 直接
+            # 建出 GPU 实例——真金白银，且无人审批、无人知情。缺配置时正确的姿态是停下来喊人。
+            #
+            # **必须过 _mark_approval_notified 闸门**（与上面的兄弟分支同款）：本分支既不
+            # _set_approved 也不写 _redis_set(key)，工单会一直停在 Jira「待办」被每轮捞回来，
+            # 而 TICKET_POLL_INTERVAL 只有 20 秒 → 不去重就是 180 条评论/小时、4320 条/天。
+            if _mark_approval_notified(key):
+                logger.error(
+                    "[Scheduler] ADMIN_FEISHU_OPEN_ID 未配置 → 工单 %s 不予自动批准。"
+                    "请配置管理员 open_id 后 force-recreate 容器（restart 不重载 env_file）。", key)
+                add_comment(key, "⚠️ 系统未配置审批管理员，无法自动建实例，请联系运维。")
+            else:
+                logger.debug("[Scheduler] 工单 %s 缺管理员配置，已提示过，静默跳过", key)
         if not _is_approved(key):
             return
 

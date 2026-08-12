@@ -149,7 +149,7 @@ def test_dist_url_and_summary_card(monkeypatch):
     from tools.aliyun import gpu_distribution as G
     from config.settings import settings
     monkeypatch.setattr(settings, "GPU_DIST_BASE_URL", "http://x:8088")
-    monkeypatch.setattr(settings, "RAM_QUERY_API_TOKEN", "TK")
+    monkeypatch.setattr(settings, "GPU_DIST_TOKEN", "TK")
     assert G.dist_url() == "http://x:8088/gpu/distribution?token=TK"
     monkeypatch.setattr(settings, "GPU_DIST_BASE_URL", "")
     assert G.dist_url() == ""   # 无基址 → 空
@@ -161,6 +161,36 @@ def test_dist_url_and_summary_card(monkeypatch):
         "total_cards": 64, "used_cards": 20, "active_cards": 20, "user_count": 1}
     sc = json.dumps(G.summary_card(g, "http://x/gpu/distribution?token=T"), ensure_ascii=False)
     assert "打开实时页面" in sc and "北京" in sc and "张三" in sc
+
+
+def test_dist_url_never_leaks_webhook_token(monkeypatch):
+    """安全回归：`dist_url` 只认 `GPU_DIST_TOKEN`，**绝不回退**到另外两个 token。
+
+    这个链接会被当按钮推进飞书群（卡分布摘要卡），token 明文拼在 URL query 里。原实现是
+    `GPU_DIST_TOKEN or RAM_QUERY_API_TOKEN or FEISHU_VERIFICATION_TOKEN`，而线上
+    `GPU_DIST_TOKEN` 一旦为空就会把 webhook 的验证 token 广播给群里每个人 —— 拿到它即可
+    伪造 /feishu/card_action、把 open_id 填成管理员，过掉全部管理员门禁。
+
+    本用例把两个不该被用的 token 都设上、把该用的置空，断言两者都没进链接。且此时
+    `dist_url` 返回空串（fail-closed）—— 而不是返回一个不带 token 的链接，那会让
+    `summary_card` 渲染出一个点进去必吃 403 的死按钮。
+    """
+    from tools.aliyun import gpu_distribution as G
+    from config.settings import settings
+    monkeypatch.setattr(settings, "GPU_DIST_BASE_URL", "http://x:8088")
+    monkeypatch.setattr(settings, "GPU_DIST_TOKEN", "")
+    monkeypatch.setattr(settings, "RAM_QUERY_API_TOKEN", "RAM-TOKEN-SHOULD-NOT-LEAK")
+    monkeypatch.setattr(settings, "FEISHU_VERIFICATION_TOKEN", "WEBHOOK-TOKEN-SHOULD-NOT-LEAK")
+    url = G.dist_url()
+    assert url == "", f"缺专用 token 时应返回空串（不渲染按钮），实际: {url}"
+    assert "SHOULD-NOT-LEAK" not in url
+
+    # 空串 → 摘要卡不渲染「打开实时页面」按钮
+    import json
+    g = {"gathered_at": 1700000000, "regions": [], "users": [],
+         "total_cards": 0, "used_cards": 0, "active_cards": 0, "user_count": 0}
+    sc = json.dumps(G.summary_card(g, url), ensure_ascii=False)
+    assert "SHOULD-NOT-LEAK" not in sc
 
 
 def test_gpu_dist_intent():

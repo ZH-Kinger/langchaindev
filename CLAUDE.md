@@ -107,7 +107,7 @@ tools/
 
 SSH 迁移链（`core/ssh_transfer`）与同云桶间迁移（`core/bucket_transfer`）**只有飞书卡片 + CLI 两个入口，没有 Agent 工具**。
 
-All tools subclass `BaseOpsTool` (`tools/base_tool.py`) for audit logging and data-path resolution.
+`BaseOpsTool` (`tools/base_tool.py`) 提供 data-path 解析与一个 `log_operation` 日志方法。**注意它不是安全边界**：只有 `tools/ops/analysis.py` 与 `tools/ops/system.py` 各建了一个实例当路径工具用，基类里**没有任何鉴权、二次确认或审计落盘**，写工具也没有调用 `log_operation`。别以为"继承了基类就有兜底"。
 
 ### Agent Tool Routing (`core/agent.py::_select_tools`)
 
@@ -120,6 +120,8 @@ Three tiers, in order:
 `INTENT_DESCRIPTIONS` keys must match `TOOL_GROUPS` keys; the intent router prompt is built dynamically from these descriptions.
 
 ### Aliyun STS Multi-Tenant Credentials
+
+> ⚠️ **下面描述的是设计目标，生效有前提**：本节的多租户隔离要求 `ALIYUN_BOT_MASTER_AK_ID/SECRET` 与 `ALIYUN_BOT_ROLE_MAPPING`（或 `ALIYUN_BOT_ROLE_DEFAULT`）都已配置；任一缺失则 `_do_assume_role` 恒返 None。此外 `aliyun_client_factory` 在 STS 失败时会回落全局 AK 且当前无开关可关 —— 所以部署新环境时**务必先确认这几项已配好并观察日志里没有降级告警**，否则「不使用共享 AK」这个前提并不成立。
 
 The bot never calls Aliyun with a global AK for user-initiated actions. Flow:
 
@@ -324,7 +326,7 @@ Generates a least-privilege custom RAM policy per algo-team member from a Feishu
 
 Single client, `decode_responses=True`. Failures degrade silently. Key namespaces in use（新功能在前）:
 - `temp_ak:grant:{grant_id}` / `temp_ak_1949:grant:{grant_id}` — 30-day TTL, 临时凭证发放记录，**按账号档案分命名空间**（`accounts.AccountProfile.redis_prefix`）。**只存 `ak_id`，绝不存 secret/token**。配套 NX 锁 `temp_ak*:lock:*`。
-- `ram_approval:instance:{code}` — RAM/IAM 建号审批处理记录（含 `result_status`/`error_terminal`）；`ram_approval:lock:{code}` 600s NX 防并发重投；`ram_approval:instances` zset 索引；`ram_approval:instance:failnotice:{code}:{sig}` 7-day，同实例同错误只评论一次的播报闸门。
+- `ram_approval:instance:{code}` — 90-day TTL（每次写刷新），RAM/IAM 建号审批处理记录（含 `result_status`/`error_terminal`，失败记录含申请人姓名/邮箱/手机号，故必须有保留期）；`ram_approval:lock:{code}` 600s NX 防并发重投；`ram_approval:instances` zset 索引；`ram_approval:instance:failnotice:{code}:{sig}` 7-day，同实例同错误只评论一次的播报闸门。
 - `pfs:transfer:job:{job_id}` — 30-day TTL, PFS 直传三段链状态（段完成标记 `sink_done`/`cross_done`/`preheat_done` + 三个子 job_id）；`pfs:transfer:launch:*` 下发 NX 锁。
 - `ssh:transfer:job:{job_id}` — 30-day TTL, 杭州→新加坡→泰国两段链状态（`stage1_rc`/进度采样/`error_detail`）。
 - `vepfs:dataflow:job:{job_id}` — 30-day TTL, 火山 vePFS 预热/沉降 task state (operation/fs/sub_path/tos/task_id/progress).
@@ -338,7 +340,7 @@ Single client, `decode_responses=True`. Failures degrade silently. Key namespace
 - `capacity:snapshot:{vendor}:{bucket}:{prefix}` — 30-day TTL, last capacity scan per target (for delta).
 - `agent:chat_history:{session_id}` — 20-message list, FIFO trimmed via pipeline `rpush + ltrim`；`agent:chat_summary:{session_id}` 滚动摘要（两者 7-day 空闲 TTL）。
 - `aliyun:sts:{open_id}:{role_arn}` — STS credential cache, TTL = `ALIYUN_STS_DURATION_SECONDS - 300`.
-- `user:ak:{open_id}` — encrypted user AK/SK; 30-day idle TTL via `USER_AK_IDLE_TTL_SECONDS`.
+- `feishu:user_creds:{open_id}` — encrypted user AK/SK（Fernet）; 30-day idle TTL via `USER_AK_IDLE_TTL_SECONDS`。（旧文档误记为 `user:ak:{open_id}`，实际前缀见 `utils/aliyun_user_creds.py:24`。）
 - `feishu:event_dedup:{event_id}` — 1h TTL, primary mechanism for webhook idempotency (in-memory `_seen_events_fallback` set only when Redis is down).
 - `dsw:ticket:{ticket_key}` — 7-day TTL, scheduler state.
 - `analysis:{file_name}:{mtime}` — 5-min TTL result cache for alarm analysis (mtime in key auto-invalidates on file change).
@@ -365,7 +367,7 @@ Flat package: `routes.py` (Flask app + `/feishu/event` `/feishu/card_action` `/h
 3. 搬运链入口，顺序固定：**PFS 直传（须同时提到 vepfs+cpfs）→ SSH 迁移链（泰国 H200）→ 桶间迁移 → CPFS/vePFS 预热沉降向导 → 跨云迁移**。越通用的话术越靠后，否则「数据迁移」「迁移」会被前面的入口抢走。
 4. 火山 IAM / 阿里 RAM 账号查询入口。
 5. GPU intent（资源 + 动作词，或训练类话术）→ action-button card，草稿存 Redis（`JIRA_ENABLED=false` 时回停用提示）。
-6. AK-binding intent → Fernet-encrypted save to `user:ak:{open_id}`。
+6. AK-binding intent → Fernet-encrypted save to `feishu:user_creds:{open_id}`。
 7. 其余 → `core.agent._build_executor()`（full `ALL_TOOLS`，非流式）→ 飞书回复卡（仅命中指标词/监控意图时附趋势图）。
 
 Event dedup uses Redis `SET NX` with TTL (`_is_duplicate_event`). App access token is cached inside `tools/feishu/notify._get_access_token`.
