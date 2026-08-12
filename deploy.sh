@@ -19,6 +19,7 @@
 #   ./deploy.sh --build              # 重启改为 up -d --build（改了依赖/Dockerfile 时用）
 #   ./deploy.sh --dry-run            # 只打印将要做什么，不碰服务器
 #   ./deploy.sh --skip-health        # 跳过部署后的 /health 轮询
+#   ./deploy.sh --with-rag-assets    # 顺带补传 RAG 模型缓存+向量库（~391M，默认不传）
 #   SERVER=root@<ip> ./deploy.sh     # 覆盖目标主机（默认读 ssh 别名 bot-new）
 #
 # 前置：本机 ssh 能免密连上 $SERVER。若用别名 bot-new，需要 ~/.ssh/config 里有对应条目：
@@ -37,6 +38,7 @@ REF="HEAD"
 SKIP_HEALTH=0
 DO_BUILD=0
 DRY_RUN=0
+WITH_RAG=0
 
 C_STEP=$'\033[36m'; C_WARN=$'\033[33m'; C_ERR=$'\033[31m'; C_OK=$'\033[32m'; C_OFF=$'\033[0m'
 step() { printf '%s==> %s%s\n' "$C_STEP" "$*" "$C_OFF"; }
@@ -50,6 +52,7 @@ while [ $# -gt 0 ]; do
         --build)       DO_BUILD=1; shift ;;
         --dry-run)     DRY_RUN=1; shift ;;
         --skip-health) SKIP_HEALTH=1; shift ;;
+        --with-rag-assets) WITH_RAG=1; shift ;;
         -h|--help)     sed -n '2,30p' "$0"; exit 0 ;;
         *)             die "未知参数：$1（-h 看用法）" ;;
     esac
@@ -168,21 +171,34 @@ printf '%s\n' "$OUT" | grep -q REMOTE_SYNC_OK || { printf '%s\n' "$OUT"; die "�
 # ── 7. RAG 模型缓存 / 向量库缺失自动补传 ─────────────────────────────────────
 # 嵌入模型(text2vec-base-chinese, ~391M) + ChromaDB 被 .gitignore 排除，git archive 永远
 # 同步不了。新机上缺了不会报错，只在用户问知识库类问题时才炸（离线加载失败去连 huggingface）。
+# 默认**只探测不补传**：目标镜像里 langchain-chroma 是被注释掉的（见 Dockerfile 的说明），
+# RAG mode 本就不可用、这份缓存用不上，每次部署自动推 391M 纯属浪费且会拖长部署。
+# 真要用 RAG 时加 --with-rag-assets 显式补传。
 PROBE="$REMOTE/models/model_cache/models--shibing624--text2vec-base-chinese"
-HAS_MODEL="$(ssh_run "find '$PROBE' -name config.json 2>/dev/null | head -1" || true)"
-if [ -z "$(printf '%s' "$HAS_MODEL" | tr -d '[:space:]')" ]; then
-    if [ -d "$REPO/models/model_cache/models--shibing624--text2vec-base-chinese" ]; then
-        warn "服务器缺 RAG 嵌入模型缓存，补传 models/model_cache + vector_db（~391M，一次性）…"
-        ssh_run "mkdir -p '$REMOTE/models/model_cache' '$REMOTE/vector_db'"
-        scp -q -r "$REPO/models/model_cache/." "$SERVER:$REMOTE/models/model_cache/" \
-            || warn "模型补传失败，RAG 仍不可用，可手动 scp models/model_cache"
-        [ -d "$REPO/vector_db" ] && scp -q -r "$REPO/vector_db/." "$SERVER:$REMOTE/vector_db/" || true
-        ok "模型/向量库补传完成"
+# 用 test -d 而不是 find：find 在父目录不存在时行为随实现而异（曾导致探测结果时对时错），
+# test -d 的退出码是明确的；再用 exit code 而非 stdout 判定，避免 ssh 端任何输出污染判断。
+if ssh_run "test -d '$PROBE'" 2>/dev/null; then
+    step "RAG 嵌入模型缓存已在服务器"
+elif [ "$WITH_RAG" -eq 1 ]; then
+    LOCAL_MC="$REPO/models/model_cache"
+    if [ -d "$LOCAL_MC/models--shibing624--text2vec-base-chinese" ]; then
+        warn "补传 models/model_cache + vector_db（~391M，一次性）…"
+        ssh_run "mkdir -p '$REMOTE/models' '$REMOTE/vector_db'"
+        # scp 目标写父目录、源写目录本身；写成 "src/." 会被新版 OpenSSH（SFTP 后端）拒绝：
+        # scp: error: unexpected filename: .
+        if scp -q -r "$LOCAL_MC" "$SERVER:$REMOTE/models/"; then
+            [ -d "$REPO/vector_db" ] && scp -q -r "$REPO/vector_db" "$SERVER:$REMOTE/" || true
+            # 传完必须复验：曾经出现过 scp 失败却照样打 ✓ 的假成功
+            if ssh_run "test -d '$PROBE'"; then ok "模型/向量库补传完成并复验通过"
+            else warn "补传后复验仍未找到 $PROBE，请手动检查"; fi
+        else
+            warn "模型补传失败（scp 非零退出），RAG 仍不可用"
+        fi
     else
-        warn "本地也没有 models/model_cache（未跑过 ingest.py？），跳过补传——服务器 RAG 将不可用"
+        warn "本地也没有 models/model_cache（未跑过 ingest.py？），无法补传"
     fi
 else
-    step "RAG 嵌入模型缓存已在服务器（跳过补传）"
+    step "服务器无 RAG 模型缓存（该镜像未装 langchain-chroma、RAG 本就不可用）。需要时加 --with-rag-assets"
 fi
 
 # ── 8. 健康校验 ─────────────────────────────────────────────────────────────
