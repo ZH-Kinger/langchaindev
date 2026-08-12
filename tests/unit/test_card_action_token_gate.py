@@ -399,3 +399,76 @@ def test_extract_token_tolerates_non_dict_data():
     from core.feishu_bot import routes
     for bogus in ([1, 2], "s", 42, None):
         assert routes._extract_request_token(bogus) == ""
+
+
+# ── 10. 双通道 token：事件订阅与旧式卡片回调各带各的 Verification Token ──────────
+#
+# 飞书对同一次卡片点击双投递，两条走开放平台里两处**不同的配置**，token 也不同：
+#   · 事件订阅 card.action.trigger → header.token = FEISHU_VERIFICATION_TOKEN
+#   · 旧式「消息卡片 → 请求网址」   → 顶层 token   = FEISHU_CARD_VERIFICATION_TOKEN
+# 线上实测确认过（旧式那条 has_token=True 但与事件订阅 token 不匹配、长度也不同）。
+# 只认一个会让另一条每次点击都被拒 —— 功能不塌（另一条会执行动作），但持续刷 invalid token
+# 噪音、把真攻击信号淹掉，且失去冗余。
+
+CARD_TOKEN = "card-request-url-verification-token-42chars"
+
+
+@pytest.fixture
+def both_tokens(monkeypatch):
+    from config.settings import settings
+    monkeypatch.setattr(settings, "FEISHU_VERIFICATION_TOKEN", TOKEN)
+    monkeypatch.setattr(settings, "FEISHU_CARD_VERIFICATION_TOKEN", CARD_TOKEN)
+    monkeypatch.setattr(settings, "ADMIN_FEISHU_OPEN_ID", ADMIN)
+    return settings
+
+
+def test_card_token_accepted_on_legacy_delivery(both_tokens, sentinel):
+    """旧式回调带卡片那套 token → 放行（这正是线上被误拒的那条）。"""
+    resp = _client().post("/feishu/card_action",
+                          json=_legacy_body(token=CARD_TOKEN, open_id="ou_normal"))
+    assert resp.status_code == 200
+    assert len(sentinel["process"]) == 1
+
+
+def test_event_token_still_accepted_when_card_token_configured(both_tokens, sentinel):
+    """加了第二个 token 不能把原来的挤掉——两个都要认。"""
+    resp = _client().post("/feishu/card_action", json=_v2_body(header_token=TOKEN))
+    assert resp.status_code == 200
+    assert len(sentinel["trigger"]) == 1
+
+
+def test_unknown_token_still_rejected_with_both_configured(both_tokens, sentinel):
+    """白名单是"两个已知值"，不是"任意值"——第三个 token 仍必须被拒。"""
+    resp = _client().post("/feishu/card_action", json=_legacy_body(token="some-other-token"))
+    assert resp.status_code == 403
+    _assert_untouched(sentinel)
+
+
+def test_card_token_unset_keeps_original_behavior(token_configured, sentinel):
+    """未配置卡片 token 时行为与加这个特性之前**逐字一致**：只认事件订阅那个。"""
+    from config.settings import settings
+    assert not getattr(settings, "FEISHU_CARD_VERIFICATION_TOKEN", "")
+    assert _client().post("/feishu/card_action", json=_legacy_body(token=TOKEN)).status_code == 200
+    sentinel["process"].clear()
+    assert _client().post("/feishu/card_action", json=_legacy_body(token=CARD_TOKEN)).status_code == 403
+    _assert_untouched(sentinel)
+
+
+def test_both_tokens_unset_still_degrades_open(monkeypatch, sentinel):
+    """两个都没配 → 维持既有降级放行（别让未配置的环境直接瘫）。"""
+    from config.settings import settings
+    monkeypatch.setattr(settings, "FEISHU_VERIFICATION_TOKEN", "")
+    monkeypatch.setattr(settings, "FEISHU_CARD_VERIFICATION_TOKEN", "")
+    assert _client().post("/feishu/card_action", json=_legacy_body()).status_code == 200
+
+
+def test_token_source_hint_names_the_match(both_tokens):
+    """src= 只回名字不回值；能区分两套 token，便于日后判断是配置漂移还是真攻击。"""
+    from core.feishu_bot import routes
+    assert routes._token_source_hint(TOKEN) == "VERIFICATION_TOKEN"
+    assert routes._token_source_hint(CARD_TOKEN) == "CARD_VERIFICATION_TOKEN"
+    assert routes._token_source_hint("") == "empty"
+    hint = routes._token_source_hint("x" * 42)
+    assert hint == "unknown(len=42)"
+    for bad in (TOKEN, CARD_TOKEN):          # 绝不能把 token 值本身写进日志
+        assert bad not in routes._token_source_hint("x" * 42)

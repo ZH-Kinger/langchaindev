@@ -54,20 +54,39 @@ def _extract_request_token(data: dict) -> str:
     return token if isinstance(token, str) else ""
 
 
-def _token_source_hint(supplied: str) -> str:
-    """诊断用：判断收到的 token 是不是某个**已知**的 secret，只回名字、绝不回值。
+def _accepted_tokens() -> list:
+    """可接受的入站验证 token 集合。
 
-    背景：飞书对同一次卡片点击双投递（旧式「卡片请求地址」+ 事件订阅 card.action.trigger）。
-    线上观察到旧式那条带的 token 与 `FEISHU_VERIFICATION_TOKEN` 不匹配（has_token=True 但被拒），
-    而 2.0 那条的 header.token 正常通过。需要判明旧式那个 token 到底是什么，才能决定是补配
-    还是就让它 403。**这是临时诊断，查清后即可删。**
+    飞书对**同一次卡片点击双投递**，两条走的是开放平台里两处**不同的配置**，各带各的 token：
+      · 事件订阅 `card.action.trigger`  → `header.token`  = `FEISHU_VERIFICATION_TOKEN`
+      · 旧式「消息卡片 → 请求网址」      → 顶层 `token`     = `FEISHU_CARD_VERIFICATION_TOKEN`
+
+    线上实测确认过这一点：旧式那条 `has_token=True` 却与事件订阅的 token 不匹配，长度也不同。
+    只认前者的话，旧式那条**每次点击都会被拒** —— 功能不受影响（2.0 那条会把动作执行掉，
+    且 403 发生在去重之前、不占去重名额），但会持续产生 `invalid token` 噪音，把真正需要
+    警觉的攻击信号淹掉；同时也失去了双通道冗余。
+
+    两个都收**不构成放宽**：白名单里仍然只有"本应用在飞书控制台配置过的、由飞书签发的
+    secret"，攻击者两个都拿不到。未配置的那个不会进集合（空值被过滤）。
+    """
+    return [t for t in (settings.FEISHU_VERIFICATION_TOKEN,
+                        getattr(settings, "FEISHU_CARD_VERIFICATION_TOKEN", "")) if t]
+
+
+def _token_source_hint(supplied: str) -> str:
+    """判断收到的 token 是不是某个**已知**的 secret，只回名字、绝不回值。
+
+    **保留价值（不是临时诊断）**：配好两套 token 之后，`invalid token` 应当变成罕见事件 ——
+    那时每一条都值得看，而 `src=` 能立刻区分「配置漂移/token 轮换忘了同步」与「真有人在打」。
+    只回名字不回值，日志里不会留下任何可利用的材料。
     """
     if not supplied:
         return "empty"
     for name, val in (
-        ("VERIFICATION_TOKEN", settings.FEISHU_VERIFICATION_TOKEN),
-        ("APP_SECRET",         getattr(settings, "FEISHU_APP_SECRET", "")),
-        ("APP_ID",             getattr(settings, "FEISHU_APP_ID", "")),
+        ("VERIFICATION_TOKEN",      settings.FEISHU_VERIFICATION_TOKEN),
+        ("CARD_VERIFICATION_TOKEN", getattr(settings, "FEISHU_CARD_VERIFICATION_TOKEN", "")),
+        ("APP_SECRET",              getattr(settings, "FEISHU_APP_SECRET", "")),
+        ("APP_ID",                  getattr(settings, "FEISHU_APP_ID", "")),
     ):
         if val and hmac.compare_digest(str(supplied).encode("utf-8"), str(val).encode("utf-8")):
             return name
@@ -85,12 +104,13 @@ def _token_verified(data: dict) -> bool:
     请求体，攻击者随手传个中文/西里尔字母就能让视图抛异常 → Flask 500，而 500 会经
     utils/logger 的 ERROR 回调**给管理员刷飞书私信** —— 等于把一道鉴权门变成免鉴权的告警放大器。
     """
-    expected = settings.FEISHU_VERIFICATION_TOKEN
-    if not expected:
+    accepted = _accepted_tokens()
+    if not accepted:
         return True
-    return hmac.compare_digest(
-        _extract_request_token(data).encode("utf-8"), str(expected).encode("utf-8")
-    )
+    supplied = _extract_request_token(data).encode("utf-8")
+    # 逐个比对且**不短路**：any() 本身会短路，但每次比较都是常数时间的，
+    # 命中与否只影响比较次数（≤2），不泄漏 token 内容。
+    return any(hmac.compare_digest(supplied, str(e).encode("utf-8")) for e in accepted)
 
 
 @app.route("/feishu/event", methods=["GET", "POST"])

@@ -40,6 +40,11 @@ class Config:
     FEISHU_APP_SECRET         = os.environ.get("FEISHU_APP_SECRET", "")
     FEISHU_CHAT_ID            = os.environ.get("FEISHU_CHAT_ID", "")
     FEISHU_VERIFICATION_TOKEN = os.environ.get("FEISHU_VERIFICATION_TOKEN", "")
+    # 飞书「消息卡片 → 请求网址配置」那处有**独立的** Verification Token，与上面「事件订阅」
+    # 的不是同一个（线上实测：旧式卡片回调带的 token 长度都不同）。两处配置都会对同一次点击
+    # 投递一份，只认事件订阅那个会让旧式那条每次都被拒 → 持续刷 invalid token 噪音、且失去
+    # 双通道冗余。留空则只接受事件订阅那个（行为与配置本项之前完全一致）。
+    FEISHU_CARD_VERIFICATION_TOKEN = os.environ.get("FEISHU_CARD_VERIFICATION_TOKEN", "")
     # GPU 申请表单卡片模板 ID（飞书卡片构建器发布后获取，留空则降级为 action buttons 卡片）
     FEISHU_GPU_CARD_TEMPLATE_ID    = os.environ.get("FEISHU_GPU_CARD_TEMPLATE_ID", "")
     FEISHU_AK_REGISTER_TEMPLATE_ID = os.environ.get("FEISHU_AK_REGISTER_TEMPLATE_ID", "")
