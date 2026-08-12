@@ -54,6 +54,26 @@ def _extract_request_token(data: dict) -> str:
     return token if isinstance(token, str) else ""
 
 
+def _token_source_hint(supplied: str) -> str:
+    """诊断用：判断收到的 token 是不是某个**已知**的 secret，只回名字、绝不回值。
+
+    背景：飞书对同一次卡片点击双投递（旧式「卡片请求地址」+ 事件订阅 card.action.trigger）。
+    线上观察到旧式那条带的 token 与 `FEISHU_VERIFICATION_TOKEN` 不匹配（has_token=True 但被拒），
+    而 2.0 那条的 header.token 正常通过。需要判明旧式那个 token 到底是什么，才能决定是补配
+    还是就让它 403。**这是临时诊断，查清后即可删。**
+    """
+    if not supplied:
+        return "empty"
+    for name, val in (
+        ("VERIFICATION_TOKEN", settings.FEISHU_VERIFICATION_TOKEN),
+        ("APP_SECRET",         getattr(settings, "FEISHU_APP_SECRET", "")),
+        ("APP_ID",             getattr(settings, "FEISHU_APP_ID", "")),
+    ):
+        if val and hmac.compare_digest(str(supplied).encode("utf-8"), str(val).encode("utf-8")):
+            return name
+    return f"unknown(len={len(supplied)})"
+
+
 def _token_verified(data: dict) -> bool:
     """入站请求验证 token 校验 —— /feishu/event 与 /feishu/card_action 共用这一把门。
 
@@ -221,8 +241,10 @@ def feishu_card_action():
     # 这条老式卡片回调路径此前是敞的。
     if not _token_verified(data):
         logger.warning(
-            "[card_action] invalid token has_token=%s keys=%s",
-            bool(_extract_request_token(data)), list(data.keys()),
+            "[card_action] invalid token has_token=%s src=%s keys=%s",
+            bool(_extract_request_token(data)),
+            _token_source_hint(_extract_request_token(data)),   # 临时诊断，见该函数注释
+            list(data.keys()),
         )
         return jsonify({"code": 1, "msg": "invalid token"}), 403
 
