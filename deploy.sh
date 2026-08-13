@@ -20,6 +20,7 @@
 #   ./deploy.sh --dry-run            # 只打印将要做什么，不碰服务器
 #   ./deploy.sh --skip-health        # 跳过部署后的 /health 轮询
 #   ./deploy.sh --with-rag-assets    # 顺带补传 RAG 模型缓存+向量库（~391M，默认不传）
+#   ./deploy.sh --skip-scope-check   # 跳过部署后的飞书权限自检
 #   SERVER=root@<ip> ./deploy.sh     # 覆盖目标主机（默认读 ssh 别名 bot-new）
 #
 # 前置：本机 ssh 能免密连上 $SERVER。若用别名 bot-new，需要 ~/.ssh/config 里有对应条目：
@@ -39,6 +40,7 @@ SKIP_HEALTH=0
 DO_BUILD=0
 DRY_RUN=0
 WITH_RAG=0
+SKIP_SCOPE=0
 
 C_STEP=$'\033[36m'; C_WARN=$'\033[33m'; C_ERR=$'\033[31m'; C_OK=$'\033[32m'; C_OFF=$'\033[0m'
 step() { printf '%s==> %s%s\n' "$C_STEP" "$*" "$C_OFF"; }
@@ -53,6 +55,7 @@ while [ $# -gt 0 ]; do
         --dry-run)     DRY_RUN=1; shift ;;
         --skip-health) SKIP_HEALTH=1; shift ;;
         --with-rag-assets) WITH_RAG=1; shift ;;
+        --skip-scope-check) SKIP_SCOPE=1; shift ;;
         -h|--help)     sed -n '2,30p' "$0"; exit 0 ;;
         *)             die "未知参数：$1（-h 看用法）" ;;
     esac
@@ -201,9 +204,40 @@ else
     step "服务器无 RAG 模型缓存（该镜像未装 langchain-chroma、RAG 本就不可用）。需要时加 --with-rag-assets"
 fi
 
+# ── 8a. 飞书权限自检 ────────────────────────────────────────────────────────
+# 为什么放在部署流程里：飞书权限缺失是**静默**的——消息卡片照发（那些只要 im:*），
+# 而 Bitable 写入、审批回拉这些后台路径会安静地失败，要等下一次巡检报错、或等有人问
+# 「我的号怎么没建出来」才发现。2026-08-13 就这么挂了近一天。部署是天然的检查点。
+#
+# **刻意不让它影响退出码**：权限归属飞书控制台，与本次代码部署是否成功无关。把部署标记成
+# 失败会诱使人去回滚代码——而代码根本没问题，回滚只会浪费时间并掩盖真正的原因。所以只
+# 大声报告。要跳过用 --skip-scope-check。
+run_scope_check() {
+    [ "$SKIP_SCOPE" -eq 1 ] && return 0
+    ssh_run "test -f '$REMOTE/scripts/check_feishu_scopes.py'" 2>/dev/null || {
+        step "（服务器上还没有 scripts/check_feishu_scopes.py，跳过权限自检）"; return 0; }
+    echo
+    step "飞书权限自检（只读探测，不发消息不传图）"
+    local out rc
+    out="$(ssh_run "cd '$REMOTE' && docker compose exec -T -w /app bot python scripts/check_feishu_scopes.py" 2>&1)" && rc=0 || rc=$?
+    printf '%s\n' "$out" | sed 's/^/    /'
+    if [ "$rc" -ne 0 ]; then
+        echo
+        warn "──────────────────────────────────────────────────────────"
+        warn "  权限自检未通过（上面有明细）。代码部署本身是成功的。"
+        warn "  飞书权限改动必须【创建版本 → 发布 → 管理员审核】才生效。"
+        warn "  修完可单独重跑，不必重新部署："
+        warn "    ssh $SERVER 'cd $REMOTE && docker compose exec -T -w /app bot \\"
+        warn "        python scripts/check_feishu_scopes.py'"
+        warn "──────────────────────────────────────────────────────────"
+    fi
+    return 0
+}
+
 # ── 8. 健康校验 ─────────────────────────────────────────────────────────────
 if [ "$SKIP_HEALTH" -eq 1 ]; then
     ok "已跳过 /health 校验。部署完成：$SHA"
+    run_scope_check
     exit 0
 fi
 
@@ -214,6 +248,7 @@ for i in $(seq 1 12); do
     if printf '%s' "$HEALTH" | grep -qE '"status"[[:space:]]*:[[:space:]]*"ok"'; then
         printf '    %s\n' "$HEALTH"
         ok "部署完成并健康：$SHA  $SUBJECT"
+        run_scope_check
         echo
         step "别忘了人工验一次（本项目改鉴权时的必查项）："
         echo "    · 在飞书点一次任意卡片按钮 —— 验证入站 token 门禁没把按钮打死"
