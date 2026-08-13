@@ -68,13 +68,36 @@ RAM_DOC_LIMIT = 6144               # 自定义策略文档字符上限
 # ---------------------------------------------------------------------------
 # 飞书读取
 # ---------------------------------------------------------------------------
+def _feishu_detail(resp, what):
+    """HTTP 层出错时，把飞书响应体里的 code/msg 一起抛出来。
+
+    **别改回裸 `raise_for_status()`**：飞书把"缺哪个权限"写在 body 的 `msg` 里
+    （如 `Access denied. One of the following scopes is required: [bitable:app, ...]`），
+    而 `raise_for_status()` 在读 body 之前就抛，那段信息整个丢掉、只剩
+    `400 Client Error: Bad Request for url: ...`。2026-08-13 线上真踩过：应用的
+    bitable 权限被误删，这里只报 400，排查得靠猜；而同类调用 capacity_bitable 先读
+    json 再判 code，一眼就看出是权限问题。
+
+    本函数刻意在 permsync 内自带一份而不从 utils 引入：本模块只依赖 stdlib+requests，
+    保持 `python core/oss_perm/permsync.py` 可直接运行（它有 __main__ 入口）。
+    """
+    if resp.status_code < 400:
+        return
+    try:
+        j = resp.json()
+        extra = f"code={j.get('code')} msg={j.get('msg')}"
+    except Exception:
+        extra = (resp.text or "")[:300]
+    raise RuntimeError(f"{what} 失败: HTTP {resp.status_code} {extra}")
+
+
 def feishu_token(app_id, app_secret):
     r = requests.post(
         f"{FEISHU_BASE}/auth/v3/tenant_access_token/internal",
         json={"app_id": app_id, "app_secret": app_secret},
         timeout=30,
     )
-    r.raise_for_status()
+    _feishu_detail(r, "获取 tenant_access_token")
     data = r.json()
     if data.get("code") != 0:
         raise RuntimeError(f"获取 tenant_access_token 失败: {data}")
@@ -91,7 +114,7 @@ def feishu_search_all(token, app_token, table_id):
         if page_token:
             params["page_token"] = page_token
         r = requests.post(url, headers=headers, params=params, json={}, timeout=30)
-        r.raise_for_status()
+        _feishu_detail(r, f"读取表 {table_id}")   # 权限缺失在这里表现为 HTTP 400，详情在 body 里
         data = r.json()
         if data.get("code") != 0:
             raise RuntimeError(f"读取表 {table_id} 失败: {data}")

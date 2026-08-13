@@ -128,6 +128,26 @@ class RamAccountResult:
 
 
 
+
+def _feishu_detail(resp, what: str) -> None:
+    """HTTP 层出错时，把飞书响应体里的 code/msg 一起抛出来。
+
+    **别改回裸 `raise_for_status()`**：飞书把"缺哪个权限"写在 body 的 `msg` 里
+    （如 `Access denied. One of the following scopes is required: [...]`），而
+    `raise_for_status()` 在读 body 之前就抛，那段信息整个丢掉、只剩一个
+    `400 Client Error`。本文件这两处尤其要紧——回拉审批实例是建号/发凭证的**唯一门禁**，
+    它一旦因权限被删而失败，运维看到的必须是"缺哪个 scope"，而不是一个光秃秃的 HTTP 码。
+    """
+    if resp.status_code < 400:
+        return
+    try:
+        j = resp.json()
+        extra = f"code={j.get('code')} msg={j.get('msg')}"
+    except Exception:
+        extra = (resp.text or "")[:300]
+    raise RamApprovalError(f"{what} 失败: HTTP {resp.status_code} {extra}")
+
+
 def event_log_summary(payload: dict[str, Any]) -> dict[str, str]:
     return {
         "event_type": _event_type(payload),
@@ -243,7 +263,7 @@ def fetch_approval_instance(instance_code: str) -> dict[str, Any]:
         headers={"Authorization": f"Bearer {token}"},
         timeout=20,
     )
-    resp.raise_for_status()
+    _feishu_detail(resp, "获取飞书审批实例")
     data = resp.json()
     if data.get("code") != 0:
         raise RamApprovalError(f"获取飞书审批实例失败: {data.get('msg') or data}")
@@ -1070,7 +1090,7 @@ def _send_approval_comment(
         json=body,
         timeout=20,
     )
-    resp.raise_for_status()
+    _feishu_detail(resp, "写入飞书审批评论")
     data = resp.json()
     if data.get("code") != 0:
         raise RamApprovalError(f"写入飞书审批评论失败: {data.get('msg') or data}")
