@@ -6,6 +6,50 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **临时 AK 凭证：桶不在映射表时实时探测地域**（`core/temp_ak_issuance/orchestrator.py`）
+
+  线上现象是「凭证发了但用不了，像是权限策略没建好」。实际不是：策略是好的 —— RAM policy 的
+  ARN 是 `acs:oss:*:*:{bucket}`，**region 位本就是通配符，地域根本不参与策略构造**。
+
+  真实因果链：桶 `wuji-rl-dataset` 既不在 `permsync.BUCKET_MAP`（只有 4 个桶）也不在
+  `TEMP_AK_*_BUCKET_MAP` → `resolve_bucket()` 兜底返回空 region → 凭证正文的
+  「地域 / 外网 Endpoint / 桶域名」三行退化成「未知」→ 使用方随手用了默认 endpoint →
+  OSS 回 403 `must be addressed using the specified endpoint`。
+
+  **要记住的是这一条**：这个 403 与「没有权限」的 403 长得一模一样，所以现场第一反应必然是
+  查策略、查 RAM、查时间窗 —— 方向整个跑偏。以后再遇到「凭证发了但 403」，先看正文里的
+  Endpoint 对不对，再查权限。
+
+  修法：映射表查不到时用**该账号自己的凭证**实时探一次 `GetBucketLocation`。新桶不必先维护
+  映射表。几条刻意的设计：
+
+  - **探不到一律返回空，绝不回退默认地域。** 一个自信的错地域比「未知」更坏 —— 使用方会照着
+    连，再拿到那个与「没权限」同形的 403。返回空则正文如实写「未知，请按控制台自查」
+  - **不复用 `tools.aliyun.oss.detect_bucket_region`**：它按 `open_id` 走 client factory 取默认
+    账号凭证（读桶地域的权限是按账号授的，拿 A 的 AK 问 B 的桶只会 403），且失败会静默回退默认
+    地域 —— 两条都与上面的原则冲突
+  - **探测异常绝不让发放失败**：地域只影响正文展示，policy/issuer 完全不用它
+  - 成功缓存 24h、**失败只缓存 300s**：grant 一旦落库 region 就写死了，不能让一次瞬时抖动把某个
+    桶永久钉成「未知」
+  - 失败日志只记 `status/code/request_id`，**绝不记 `e.body`** —— `SignatureDoesNotMatch` 的
+    body 里带 AccessKeyId 与 StringToSign
+  - 探测前过桶名正则、探测后过地域正则：前者挡掉中文展示名（`oss2.Bucket()` 构造器会在 try 之外
+    抛 ClientError），后者挡掉 `region_from_endpoint` 对意外域名吐出的垃圾串（`data.example.com`
+    → `data`，正文会写成「地域：data」）
+
+- **单测网络兜底：桩掉桶地域探测**（`tests/conftest.py`）
+
+  上面那个改动会让 `resolve_bucket()` 在 map-miss 时发真实 OSS 请求，而**多个既有用例正好走
+  map-miss**。原有的 `requests.post/get` 兜底**挡不住它** —— oss2 走的是
+  `requests.Session().request(...)`，不经过被桩的模块级函数。而 `.env` 里是真 AK，于是单测会拿
+  生产凭证对真桶发签名请求。正反对照实测：停用兜底时 `resolve_bucket("wuji-rl-dataset")` 返回
+  `("cn-hangzhou", ...)`（真出网了），启用后返回 `("", ...)`。
+
+  桩的是最内层的 `_probe_region_once`，缓存/校验/账号隔离这些逻辑仍被测到。同时清模块级缓存
+  —— 它跨文件残留会导致顺序相关的偶发失败。
+
 ### Security
 
 一轮安全加固，覆盖入站鉴权、构建产物、管理员门禁与数据保留期。原则是把散落的判定收敛成单一入口，并把默认失败方向统一改成 fail-closed。

@@ -106,6 +106,98 @@ def release(lock_key: str) -> None:
 
 # ── 桶解析 ────────────────────────────────────────────────────────────────────
 
+# 桶地域探测结果缓存：(账号 slug, 桶名) → (裸 region, 过期时间戳)。
+# 成功长缓存（桶地域几乎不变），失败短缓存（见 probe_bucket_region 里的说明）。
+_REGION_PROBE_CACHE: dict[tuple, tuple] = {}
+_PROBE_TTL_OK = 24 * 3600
+_PROBE_TTL_FAIL = 300
+# OSS 桶名规范：小写字母/数字/连字符，首尾字母数字，3–63 位
+_BUCKET_NAME_RE = re.compile(r"\A[a-z0-9][a-z0-9\-]{1,61}[a-z0-9]\Z")
+# 合法地域形如 cn-hangzhou / ap-southeast-1
+_REGION_RE = re.compile(r"\A[a-z]{2}-[a-z0-9\-]+\Z")
+
+
+def probe_bucket_region(bucket: str, profile=None) -> str:
+    """用**该账号自己的凭证**实时探测桶地域（GetBucketLocation）。返回裸 region；探不到返回 ""。
+
+    为什么不复用 `tools.aliyun.oss.detect_bucket_region`（两条都是硬伤，不是风格问题）：
+
+    ① **它按 open_id 走 client factory，取到的是默认账号的凭证。** OSS 桶名是全局唯一的，
+       所以不会探到「另一个账号的同名桶」；但**读桶地域的权限是按账号授的** —— 拿默认账号的 AK
+       去问别的账号的桶，正常结果就是 403、探不到。用该档自己的凭证才是能探到的那条路。
+       （审计更正：早先这里写的理由是"可能撞上同名桶"，那不成立，桶名全局唯一。）
+
+    ② **它探测失败会静默回退到默认地域。** 对凭证发放来说，一个自信的错地域比「未知」更坏：
+       使用方会照着连，拿到 403 `must be addressed using the specified endpoint` —— 这个报错
+       和「没权限」长得一模一样，排查方向整个跑偏（本次线上问题就是这么来的）。
+       所以这里失败一律返回 ""，让 delivery._access_lines 如实显示「未知」并提示去控制台自查。
+
+    探测本身**绝不能让发放失败**：地域只影响凭证正文里的连接信息三行，探不到照发。
+    """
+    bucket = (bucket or "").strip()
+    # 申请人常把中文展示名填进来（"杭州-xxx"）。oss2.Bucket() 的构造器会对非法桶名抛
+    # ClientError，而那是在下面的 try 之外抛的 —— 先在这儿挡掉，省一条无谓的堆栈。
+    if not bucket or not _BUCKET_NAME_RE.match(bucket):
+        return ""
+    p = profile or accounts.default()
+    key = (p.slug, bucket)
+    hit = _REGION_PROBE_CACHE.get(key)
+    if hit is not None and hit[1] > time.time():
+        return hit[0]
+
+    region = ""
+    if p.ak_id and p.ak_secret:
+        try:
+            region = _probe_region_once(bucket, p.ak_id, p.ak_secret)
+        except Exception:
+            logger.warning("[temp_ak] %s 探测桶 %s 地域失败，按未知处理", p.label, bucket,
+                           exc_info=True)
+    else:
+        logger.warning("[temp_ak] %s 缺 AK，无法探测桶 %s 的地域", p.label, bucket)
+
+    # region_from_endpoint 对意外域名会吐出**非空但没意义**的串（`data.example.com` → `data`），
+    # 那会让正文写出「地域：data」—— 比「未知」更误导，正好违背本函数"绝不猜"的前提。
+    if region and not _REGION_RE.match(region):
+        logger.warning("[temp_ak] 桶 %s 探到的地域 %r 不像合法地域，按未知处理", bucket, region)
+        region = ""
+
+    # 负缓存只给短 TTL：一次瞬时失败（限流/抖动）不该让这个桶**永远**是「未知」——
+    # 而 grant 一旦落库就把 region 写死了（create_grant_record），重投也走幂等短路。
+    _REGION_PROBE_CACHE[key] = (region, time.time() + (_PROBE_TTL_OK if region else _PROBE_TTL_FAIL))
+    if region:
+        logger.info("[temp_ak] 桶 %s 地域实时探测为 %s（映射表里没有它）", bucket, region)
+    return region
+
+
+def _probe_region_once(bucket: str, ak: str, sk: str, *, timeout: int = 10) -> str:
+    """一次 GetBucketLocation。跨地域时 OSS 会拒绝并在响应里带上正确 endpoint，照样能捞出来。"""
+    import oss2
+    from tools.aliyun.oss import region_from_endpoint
+
+    auth = oss2.Auth(ak, sk)
+    # 先用任意一个 endpoint 问：桶在本地域就直接拿到 location；不在则走下面的 except 分支。
+    probe = oss2.Bucket(auth, "https://oss-cn-hangzhou.aliyuncs.com", bucket,
+                        connect_timeout=timeout)
+    try:
+        return region_from_endpoint(probe.get_bucket_location().location)
+    except oss2.exceptions.OssError as e:
+        # 异地桶：正确 endpoint 在响应头或 body 的 <Endpoint> 里。
+        headers = getattr(e, "headers", None) or {}
+        for k in ("x-oss-region", "X-Oss-Region"):
+            if headers.get(k):
+                return region_from_endpoint(headers[k])
+        m = re.search(r"<Endpoint>\s*([^<]+?)\s*</Endpoint>", getattr(e, "body", "") or "")
+        if m:
+            return region_from_endpoint(m.group(1).strip())
+        # 探不到的原因值得留痕，否则线上只看到「未知」却不知道是限流、无权限还是桶不存在。
+        # **只记 status/code/request_id，绝不记 e.body** —— SignatureDoesNotMatch 的 body 里
+        # 带 AccessKeyId 和 StringToSign，进日志就是凭证泄漏。
+        logger.warning("[temp_ak] 探测桶 %s 地域未果：status=%s code=%s req_id=%s",
+                       bucket, getattr(e, "status", "?"), getattr(e, "code", "?"),
+                       getattr(e, "request_id", "?"))
+        return ""     # 桶不存在 / 无权限 / 其它 —— 一律当探不到，**不猜**
+
+
 def resolve_bucket(display: str, profile=None) -> tuple[str, str]:
     """展示桶名 → (region, real_bucket)。先查该账号的桶映射(JSON)，再回退 permsync.BUCKET_MAP，
     都没有则把 display 当真实桶名原样用（region 未知留空）。
@@ -134,7 +226,10 @@ def resolve_bucket(display: str, profile=None) -> tuple[str, str]:
         for region, bucket in BUCKET_MAP.values():
             if bucket == display:
                 return region, bucket
-    return "", display   # 映射里查不到：当真实桶名用，地域未知
+    # 映射表里查不到：当真实桶名用，并**实时探一次地域**。新桶不必先维护映射表，
+    # 这正是线上那单的成因 —— wuji-rl-dataset 不在表里，region 留空，凭证正文
+    # 三行连接信息退化成「未知」，使用方随手用了默认 endpoint 拿到 403。
+    return probe_bucket_region(display, p), display
 
 
 def _derive_user_name(spec: dict, instance_code: str, profile=None) -> str:

@@ -133,6 +133,28 @@ def _no_real_feishu_or_network(monkeypatch):
     # 注：不全局桩 notify._get_access_token —— test_notify_token_cache 要测真函数。
     #     下面的 requests 兜底已挡住取 token 的真实 HTTP，网络安全不依赖桩掉它。
 
+    # 1.5) 桶地域探测兜底：**任何测试都不许真发 OSS 请求**。
+    #
+    # 为什么必须在全局 conftest 挡：`resolve_bucket()` 在映射表查不到时会实时探测桶地域，
+    # 而**多个既有用例正好走 map-miss**（test_temp_ak_account_isolation / test_temp_ak_orchestrator）。
+    # 下面那层 requests.post/get 兜底**挡不住它** —— oss2 走的是 `requests.Session().request(...)`，
+    # 不经过被桩的模块级函数。而 .env 里是真 AK，于是单测会拿生产凭证对真桶发签名请求；
+    # 桶名恰好真实存在时（wuji-sing）探测还会成功，把断言 `== ("", "wuji-sing")` 打红。
+    # 这个坑是审计抓出来的，本机实测复现过（200 + 真 request-id）。
+    #
+    # 桩最内层的 `_probe_region_once` 而不是 `probe_bucket_region`：缓存、region 校验、
+    # 账号隔离这些逻辑仍然要被测到，只把出网那一下换掉。要测探测本身的用例自行覆盖它。
+    try:
+        from core.temp_ak_issuance import orchestrator as _tak_orch
+
+        import os as _os
+        if not _os.environ.get("DT_DISABLE_PROBE_GUARD"):     # 反向对照用，平时恒生效
+            monkeypatch.setattr(_tak_orch, "_probe_region_once",
+                                lambda *a, **k: "", raising=False)
+        _tak_orch._REGION_PROBE_CACHE.clear()   # 模块级缓存，跨文件会残留 → 顺序相关偶发
+    except Exception:
+        pass
+
     # 2) 裸 HTTP 兜底：requests.post/get 返回安全假响应（不出网）。测试可自行覆盖。
     try:
         import requests
