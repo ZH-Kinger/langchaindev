@@ -201,7 +201,10 @@ def _is_ssh_transfer_intent(text: str) -> bool:
     compact = re.sub(r"\s+", "", text or "").lower().replace("（", "(").replace("）", ")")
     if any(w in compact for w in _SSH_TRANSFER_WORDS):
         return True
-    return "泰国" in compact and ("迁移" in compact or "h200" in compact)
+    # 「曦望」是泰国那个机房的正式名 —— 用户按名字发「数据迁移(曦望)」也要认。
+    # 保留「泰国」判据：老话术和历史卡片仍在用，不能因为改名就失效。
+    return ("泰国" in compact or "曦望" in compact or "xiwang" in compact) and \
+           ("迁移" in compact or "h200" in compact or "搬运" in compact)
 
 
 # PFS 跨云直传（vePFS↔CPFS）：同时提到两种 PFS 名 = 明确 PFS↔PFS（区别于只提一个 PFS+对象存储的

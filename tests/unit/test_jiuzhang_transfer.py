@@ -183,3 +183,30 @@ def test_estimate_regex_anchored(monkeypatch):
 def test_estimate_failure_reports_not_ok(monkeypatch):
     monkeypatch.setattr(engine, "run", lambda s, **k: (0, "no du output", ""))
     assert engine.estimate_source("b", "p/") == (0, 0, False)
+
+
+# ── 意图互斥：两条链都含「迁移」，判据必须能分开 ──────────────────────────
+
+@pytest.mark.parametrize("text,jz,xw", [
+    # 九章：判据要求出现「九章/jiuzhang/b200」
+    ("数据迁移(九章b200)", True, False),
+    ("九章b200", True, False),
+    ("迁移到九章", True, False),
+    ("九章集群搬运", True, False),
+    # 曦望（泰国）：正式名与旧称都要认 —— 改名不能让历史话术失效
+    ("数据迁移(曦望)", False, True),
+    ("曦望迁移", False, True),
+    ("数据迁移（泰国H200）", False, True),
+    ("迁移到泰国", False, True),
+    # 泛化话术两条都不该抢
+    ("跨云迁移", False, False),
+    ("桶间迁移", False, False),
+])
+def test_intents_are_mutually_exclusive(text, jz, xw):
+    """**同时命中就是 bug** —— messages.py 里靠书写顺序先到先得，
+    两条都命中意味着改一次顺序就会静默换掉目的机房。"""
+    from core.feishu_bot import messages as m
+    assert m._is_jiuzhang_transfer_intent(text) is jz, text
+    assert m._is_ssh_transfer_intent(text) is xw, text
+    assert not (m._is_jiuzhang_transfer_intent(text) and m._is_ssh_transfer_intent(text)), \
+        f"「{text}」两条链都命中，目的机房会取决于代码书写顺序"
