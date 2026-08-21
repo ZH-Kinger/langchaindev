@@ -209,6 +209,19 @@ def _is_ssh_transfer_intent(text: str) -> bool:
 _PFS_TRANSFER_WORDS = ("pfs直传", "pfs跨云", "跨云pfs", "pfs互传", "pfs之间")
 
 
+# 九章（北京 B200）迁移：单跳直连，与泰国那条互斥。判据要求同时出现「九章/jiuzhang/b200」
+# 与迁移动作词 —— 只写「迁移」会被泛化入口抢走（那正是 ssh 意图必须排在 transfer 前面的原因）。
+_JIUZHANG_WORDS = ("九章b200", "九章 b200", "jiuzhangb200", "九章迁移", "迁移到九章", "九章集群")
+
+
+def _is_jiuzhang_transfer_intent(text: str) -> bool:
+    compact = re.sub(r"\s+", "", text or "").lower().replace("（", "(").replace("）", ")")
+    if any(w.replace(" ", "") in compact for w in _JIUZHANG_WORDS):
+        return True
+    return ("九章" in compact or "jiuzhang" in compact) and \
+           ("迁移" in compact or "b200" in compact or "搬运" in compact)
+
+
 def _is_pfs_transfer_intent(text: str) -> bool:
     compact = re.sub(r"\s+", "", text or "").lower()
     if "vepfs" in compact and "cpfs" in compact:
@@ -269,7 +282,7 @@ def _is_volcano_account_query_entry_intent(text: str) -> bool:
 
 # 进度查询：拦在 Agent 之前，避免 LLM 劫持 + 吃旧会话历史
 _PROGRESS_QUERY_RE = re.compile(r"(查询进度|进度查询|查进度|任务进度|查询任务)")
-_JOB_ID_RE = re.compile(r"\b(vepfs-[0-9a-fA-F]{6,}|cpfs-[0-9a-fA-F]{6,}|tr-[0-9a-fA-F]{6,}|sgp-[0-9a-fA-F]{6,}|xpfs-[0-9a-fA-F]{6,})\b")
+_JOB_ID_RE = re.compile(r"\b(vepfs-[0-9a-fA-F]{6,}|cpfs-[0-9a-fA-F]{6,}|tr-[0-9a-fA-F]{6,}|sgp-[0-9a-fA-F]{6,}|jz-[0-9a-fA-F]{6,}|xpfs-[0-9a-fA-F]{6,})\b")
 
 
 def _is_progress_query_text(text: str) -> bool:
@@ -685,6 +698,12 @@ def _process_message(message_id: str, chat_id: str, user_text: str, open_id: str
     # 是 PFS↔PFS 直传的明确信号，须先拦，避免被单 PFS 的预热/沉降或泛「迁移」词抢走。
     if settings.PFS_TRANSFER_ENABLED and _is_pfs_transfer_intent(user_text):
         from core.pfs_transfer.cards import entry_card
+        messaging._feishu_reply_card(message_id, entry_card())
+        return
+
+    # 九章（北京B200）：判据比泰国那条更具体（要求出现「九章/b200」），排在它前面。
+    if _is_jiuzhang_transfer_intent(user_text):
+        from core.jiuzhang_transfer.cards import entry_card
         messaging._feishu_reply_card(message_id, entry_card())
         return
 

@@ -882,6 +882,7 @@ def _dataflow_reconcile_specs() -> list[dict]:
     from core.bucket_transfer import orchestrator as bk, cards as bkc
     from core.ssh_transfer import orchestrator as sh, cards as shc
     from core.pfs_transfer import orchestrator as pf, cards as pfc
+    from core.jiuzhang_transfer import orchestrator as jz, cards as jzc
     return [
         {"name": "transfer", "o": tr, "cards": trc, "active": {tr.STAGE_CROSSING},
          "chat": lambda: settings.TRANSFER_CHAT_ID or settings.FEISHU_CHAT_ID, "cleanup": None},
@@ -898,6 +899,11 @@ def _dataflow_reconcile_specs() -> list[dict]:
         {"name": "pfs", "o": pf, "cards": pfc,
          "active": {pf.STAGE_SINKING, pf.STAGE_CROSSING, pf.STAGE_PREHEATING},
          "chat": lambda: settings.PFS_TRANSFER_CHAT_ID or settings.FEISHU_CHAT_ID, "cleanup": None},
+        # 九章（单段链）：refresh 只轮询、不重新提交；校验阶段有独立 NX 闸门，见 orchestrator._do_verify
+        {"name": "jiuzhang", "o": jz, "cards": jzc,
+         "active": {jz.STAGE_PULLING, jz.STAGE_VERIFYING},
+         "chat": lambda: getattr(settings, "JIUZHANG_CHAT_ID", "") or settings.FEISHU_CHAT_ID,
+         "cleanup": None},
     ]
 
 

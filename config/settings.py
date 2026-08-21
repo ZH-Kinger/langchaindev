@@ -405,6 +405,31 @@ class Config:
     # 而这只是个性能旋钮。转换与钳位在 engine_ssh._stage2_streams()（非法值退回单流）。
     # 上限 10 由泰国 sshd 的 MaxStartups 决定，见 engine_ssh._STAGE2_MAX_STREAMS。
     THAI_RSYNC_STREAMS     = os.environ.get("THAI_RSYNC_STREAMS", "8")
+    # ── 九章（北京 B200）迁移链：杭州 OSS → 九章本地盘，单跳直连 ──────────────
+    # 与泰国链的差异：不经中转、目的盘是 GPFS（非 FUSE，不需要单分片降速）。
+    # 私钥默认复用 SGP 那把（同一把已在九章的 authorized_keys2 里），可单独覆盖。
+    JIUZHANG_HOST          = os.environ.get("JIUZHANG_HOST", "221.199.124.79")
+    JIUZHANG_PORT          = int(os.environ.get("JIUZHANG_PORT", 30019))
+    JIUZHANG_USER          = os.environ.get("JIUZHANG_USER", "root")
+    JIUZHANG_SSH_KEY_ENC   = os.environ.get("JIUZHANG_SSH_KEY_ENC", "")   # 留空回退 SGP_SSH_KEY_ENC
+    # host key **必填**，留空拒绝连接（禁 AutoAdd，fail-closed）。ssh-keyscan -p 30019 <host> 取。
+    JIUZHANG_HOST_KEY      = os.environ.get(
+        "JIUZHANG_HOST_KEY",
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG/xXjWiBWRmptgBOeIpBUojRpEf61uGWfy7qS4xWZwH")
+    JIUZHANG_DEST_ROOT     = os.environ.get("JIUZHANG_DEST_ROOT", "/root/nas")
+    JIUZHANG_WORK_DIR      = os.environ.get("JIUZHANG_WORK_DIR", "$HOME/.jiuzhang_jobs")
+    # 显式给 endpoint/region，不吃九章 ~/.ossutilconfig 的默认值（那文件人工维护）
+    JIUZHANG_OSS_ENDPOINT  = os.environ.get("JIUZHANG_OSS_ENDPOINT", "oss-cn-hangzhou.aliyuncs.com")
+    JIUZHANG_OSS_REGION    = os.environ.get("JIUZHANG_OSS_REGION", "cn-hangzhou")
+    # 旋钮存原始字符串、不在 import 期 int()：.env 写成空值会让整个 settings import 失败、bot 起不来
+    JIUZHANG_OSSUTIL_JOBS     = os.environ.get("JIUZHANG_OSSUTIL_JOBS", "32")
+    JIUZHANG_OSSUTIL_PARALLEL = os.environ.get("JIUZHANG_OSSUTIL_PARALLEL", "8")
+    JIUZHANG_ESTIMATE_TIMEOUT = os.environ.get("JIUZHANG_ESTIMATE_TIMEOUT", "600")
+    JIUZHANG_VERIFY        = os.environ.get("JIUZHANG_VERIFY", "true")     # **别关**
+    JIUZHANG_VERIFY_SAMPLES = os.environ.get("JIUZHANG_VERIFY_SAMPLES", "5")
+    JIUZHANG_APPROVAL_TB   = os.environ.get("JIUZHANG_APPROVAL_TB", "")    # 留空回退 SSH_TRANSFER_APPROVAL_TB
+    JIUZHANG_CHAT_ID       = os.environ.get("JIUZHANG_CHAT_ID", "")
+
     SSH_TRANSFER_APPROVAL_TB = float(os.environ.get("SSH_TRANSFER_APPROVAL_TB", 1))
     SSH_TRANSFER_CHAT_ID   = os.environ.get("SSH_TRANSFER_CHAT_ID", "")
     # ── 段2 执行方式：ossutil(默认, 泰国直拉) / rsync(旧, SGP 转发) ─────────────

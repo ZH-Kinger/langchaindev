@@ -1444,6 +1444,98 @@ def _h_retry_pfs_transfer(action_val, open_id, chat_id, form_value):
     return _h_confirm_pfs_transfer({"job_id": job_id}, open_id, chat_id, form_value, reply_v2=False)
 
 
+# -- 九章（北京 B200）迁移：单跳直连 --------------------------------------------
+
+def _cfg_jz_chat():
+    return getattr(settings, "JIUZHANG_CHAT_ID", "") or settings.FEISHU_CHAT_ID
+
+
+def _h_submit_jiuzhang_transfer(action_val, open_id, chat_id, form_value):
+    """录入卡提交 -> 后台解析+估算（在九章上跑 ossutil du）-> 推确认卡。
+
+    估算放后台：几十万对象的 du 要几分钟，卡在回调里会超时（飞书要求 <3s 应答）。
+    """
+    fv = form_value or {}
+    source = (fv.get("source") or "").strip()
+    dest = (fv.get("dest") or "").strip()
+    if not source:
+        return {"toast": {"type": "error", "content": "请填写源 OSS 路径"}}
+
+    def _do() -> None:
+        from core.dsw_scheduler import _send_card, _send_text
+        from core.jiuzhang_transfer import orchestrator as o
+        from core.jiuzhang_transfer.cards import confirm_card
+        from core.ssh_transfer import paths
+        try:
+            plan = o.build_plan(source, dest)
+            b, n, ok = o.estimate_source(plan)
+            job = o.create_job_record(plan, open_id=open_id)
+            job.update(bytes_total=b, objects_total=n, estimate_ok=ok)
+            o._save(job)
+            _send_card(open_id, _cfg_jz_chat(), confirm_card(job, o.needs_approval(b, ok)))
+        except paths.SshPathError as e:
+            _send_text(open_id, _cfg_jz_chat(), f"路径错误：{e}")
+        except Exception as e:
+            logger.error("[JZ] submit failed", exc_info=True)
+            _send_text(open_id, _cfg_jz_chat(), f"请求处理失败：{e}")
+
+    threading.Thread(target=_do, daemon=True).start()
+    return {"toast": {"type": "success", "content": "正在解析+估算，稍候推送确认卡"}}
+
+
+def _h_confirm_jiuzhang_transfer(action_val, open_id, chat_id, form_value, *, reply_v2=True):
+    """确认下发。超阈值（或大小未知）需管理员 —— 与泰国链同一道门，不放宽。"""
+    job_id = action_val.get("job_id", "") if isinstance(action_val, dict) else ""
+    if not job_id:
+        return {"toast": {"type": "error", "content": "缺少任务 ID"}}
+    from core.jiuzhang_transfer import orchestrator as o
+    from core.jiuzhang_transfer.cards import progress_card_v2, result_card
+    job = o.get_job(job_id)
+    if not job:
+        return {"toast": {"type": "error", "content": "任务不存在或已过期"}}
+    if job["stage"] not in (o.STAGE_NEW, o.STAGE_FAILED):
+        return {"toast": {"type": "info", "content": f"任务已在 {job['stage']}，无需重复"}}
+    if (o.needs_approval(job.get("bytes_total", 0), job.get("estimate_ok", True))
+            and not _is_admin(open_id)):
+        return {"toast": {"type": "error", "content": "超过阈值（或大小未知），需管理员确认下发。"}}
+    if open_id and not job.get("created_by"):
+        job["created_by"] = open_id
+    job["launched"] = True
+    o._save(job)
+
+    def _run() -> None:
+        from core.dsw_scheduler import _claim_dataflow_notify, _send_card
+
+        def _on(j):
+            if j.get("stage") in (o.STAGE_DONE, o.STAGE_FAILED) and \
+                    _claim_dataflow_notify(j["job_id"]):
+                _send_card(j.get("created_by", ""), _cfg_jz_chat(), result_card(j))
+
+        try:
+            o.run_to_completion(job, on_update=_on)
+        except Exception:
+            logger.error("[JZ] run_to_completion 异常 job=%s", job_id, exc_info=True)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return progress_card_v2(job) if reply_v2 else \
+        {"toast": {"type": "success", "content": "已下发，进度会推送到群里"}}
+
+
+def _h_retry_jiuzhang_transfer(action_val, open_id, chat_id, form_value):
+    """重试：重置为 NEW 后走同一条确认路径（含同一道审批门，不绕过）。"""
+    job_id = action_val.get("job_id", "") if isinstance(action_val, dict) else ""
+    from core.jiuzhang_transfer import orchestrator as o
+    job = o.get_job(job_id) if job_id else None
+    if not job:
+        return {"toast": {"type": "error", "content": "任务不存在或已过期"}}
+    job["stage"] = o.STAGE_NEW
+    job["error"] = job["error_detail"] = ""
+    job["notified"] = False
+    o._save(job)
+    return _h_confirm_jiuzhang_transfer({"job_id": job_id}, open_id, chat_id, form_value,
+                                        reply_v2=False)
+
+
 _ACTION_HANDLERS = {
     "mfu_region":         _h_mfu_region,
     "submit_ak_register": _h_submit_ak_register,
@@ -1463,6 +1555,9 @@ _ACTION_HANDLERS = {
     "confirm_transfer":   _h_confirm_transfer,
     "query_transfer_progress": _h_query_transfer_progress,
     "retry_transfer":     _h_retry_transfer,
+    "submit_jiuzhang_transfer":  _h_submit_jiuzhang_transfer,
+    "confirm_jiuzhang_transfer": _h_confirm_jiuzhang_transfer,
+    "retry_jiuzhang_transfer":   _h_retry_jiuzhang_transfer,
     "submit_ssh_transfer":  _h_submit_ssh_transfer,
     "confirm_ssh_transfer": _h_confirm_ssh_transfer,
     "retry_ssh_transfer":   _h_retry_ssh_transfer,
