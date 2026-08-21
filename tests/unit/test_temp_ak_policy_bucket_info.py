@@ -41,10 +41,16 @@ def test_write_only_still_cannot_list_objects():
 
 
 def test_bucket_info_statement_has_no_prefix_condition():
-    """桶级操作不带 prefix 参数，叠 oss:Prefix 会被服务端拒 —— 线上踩过。"""
+    """桶级操作不带 prefix 参数，叠 oss:Prefix 会被服务端拒 —— 线上踩过。
+
+    注意断言的是「没有 **oss:Prefix**」而不是「没有任何 Condition」——
+    2026-08-21 起这条叠了时间窗（见 test_bucket_info_now_carries_time_window）。
+    最初写成 `"Condition" not in info` 是把两件事混了。
+    """
+    import json as _j
     doc = _p(["write"])
     info = [s for s in doc["Statement"] if tuple(s["Action"]) == tuple(BUCKET_INFO_ACTIONS)][0]
-    assert "Condition" not in info
+    assert "oss:Prefix" not in _j.dumps(info)
     assert info["Resource"] == ["acs:oss:*:*:bkt"]
 
 
@@ -58,3 +64,24 @@ def test_every_combination_has_bucket_info(caps):
 def test_empty_caps_still_produces_nothing():
     """caps 为空仍是空策略（审批层有守卫会先拦，这里守住兜底行为不被这次修改带偏）。"""
     assert _p([])["Statement"] == []
+
+
+# ── Med-3b：桶信息语句必须叠时间窗 ──────────────────────────────────────────
+
+def test_bucket_info_now_carries_time_window():
+    """此前这条**没有任何 Condition**，凭证到期后外部方仍能调 GetBucketInfo/Stat/Acl，
+    直到清理任务当天硬删用户（最坏 ~24h）。与「泄漏也随到期自动失效」的设计宣称矛盾。"""
+    doc = _p(["write"])
+    info = [s for s in doc["Statement"] if tuple(s["Action"]) == tuple(BUCKET_INFO_ACTIONS)][0]
+    cond = info.get("Condition") or {}
+    assert "DateGreaterThan" in cond and "DateLessThan" in cond, "桶信息语句没有时间窗"
+
+
+def test_bucket_info_still_has_no_prefix_condition():
+    """时间窗可以叠，**oss:Prefix 绝不能叠** —— 桶级操作的请求不带 prefix 参数，
+    叠上去会被服务端判假拒绝，那正是 aa879f4 修的「拿了凭证访问不了桶」。"""
+    import json as _j
+    doc = _p(["read", "download", "write"])
+    info = [s for s in doc["Statement"] if tuple(s["Action"]) == tuple(BUCKET_INFO_ACTIONS)][0]
+    assert "oss:Prefix" not in _j.dumps(info)
+    assert "StringLike" not in info.get("Condition", {})

@@ -1,4 +1,4 @@
-"""临时 AK 发放 policy.py —— 严格对齐用户手动固化的权威模板（temp-ak-auto-tempak-nuoyiteng-7df6a7）。
+﻿"""临时 AK 发放 policy.py —— 严格对齐用户手动固化的权威模板（temp-ak-auto-tempak-nuoyiteng-7df6a7）。
 
 线上 bug 根因（本文件锁死不重现）：原实现把桶信息动作（GetBucketInfo/Stat/Acl）与 ListObjects
 塞进同一条 read 语句、且整条带了 oss:Prefix 的 StringLike 条件。GetBucket* 是桶级操作、请求不带
@@ -81,7 +81,7 @@ def test_read_only_yields_bucketinfo_plus_list():
     # 桶信息条：Action==三件套、Resource=桶、**完全无 Condition**（无 oss:Prefix、无时间窗）
     assert set(info["Action"]) == _BUCKET_INFO
     assert info["Resource"] == ["acs:oss:*:*:b"]
-    assert "Condition" not in info
+    assert "StringLike" not in info["Condition"]        # 有时间窗，但绝无 oss:Prefix
 
     # List 条：ListObjects + GetBucketMultipartUploads、Resource=桶、带时间窗 + oss:Prefix
     assert set(lst["Action"]) == {"oss:ListObjects", "oss:GetBucketMultipartUploads"}
@@ -115,7 +115,7 @@ def test_download_only_yields_bucketinfo_plus_getobject():
     assert info is not None and dl is not None
 
     assert set(info["Action"]) == _BUCKET_INFO
-    assert "Condition" not in info
+    assert "StringLike" not in info["Condition"]
 
     # 下载条：Resource 是 桶/前缀*（对象级），不是桶
     assert dl["Action"] == ["oss:GetObject"]
@@ -154,7 +154,7 @@ def test_write_only_gets_bucket_info_and_write_statements():
     assert len(doc["Statement"]) == 2           # 桶信息条 + 写条
     info = _bucket_info_stmt(doc)
     assert info is not None, "只勾上传的凭证拿不到桶信息 = 客户端探桶即 403（线上元客那单）"
-    assert "Condition" not in info              # 桶级操作不带 prefix，叠条件会被服务端拒
+    assert "StringLike" not in info["Condition"]   # 有时间窗，但桶级操作绝不叠 oss:Prefix
     assert info["Resource"] == ["acs:oss:*:*:b"]
     st = [x for x in doc["Statement"] if x is not info][0]
     assert set(st["Action"]) == {"oss:PutObject", "oss:AbortMultipartUpload", "oss:ListParts"}
@@ -179,7 +179,7 @@ def test_all_three_four_statements_in_order():
 
     # 顺序：桶信息 → List → 下载 → 写
     assert set(stmts[0]["Action"]) == _BUCKET_INFO
-    assert "Condition" not in stmts[0]
+    assert "StringLike" not in stmts[0]["Condition"]
     assert set(stmts[1]["Action"]) == {"oss:ListObjects", "oss:GetBucketMultipartUploads"}
     assert stmts[2]["Action"] == ["oss:GetObject"]
     assert set(stmts[3]["Action"]) == {"oss:PutObject", "oss:AbortMultipartUpload", "oss:ListParts"}
@@ -195,12 +195,17 @@ def test_all_three_no_delete():
 @pytest.mark.parametrize("caps", [["read"], ["download"], ["read", "download"],
                                   ["read", "download", "write"]])
 def test_bucketinfo_statement_never_carries_prefix_condition(caps):
-    """桶信息条【绝不】带 oss:Prefix / 任何 Condition —— 直接锁死线上 bug 根因。"""
+    """桶信息条【绝不】带 oss:Prefix —— 直接锁死线上 bug 根因。
+
+    【2026-08-21】这条原本还断言「没有任何 Condition」，那是把两件事混了：
+    真正的不变量是 **不能有 oss:Prefix**（桶级请求不带 prefix 参数，叠上去必被拒），
+    而时间窗是 Date 条件、与 prefix 无关。现已按设计叠上时间窗
+    （原先没有 → 凭证到期后仍可调，见 test_bucketinfo_carries_time_window）。
+    """
     info = _bucket_info_stmt(_doc(caps, prefix="team/data/"))
     assert info is not None
-    assert "Condition" not in info              # 无时间窗、更无 oss:Prefix
-    # 保险：即便将来加了 Condition，也绝不能出现 oss:Prefix
     assert "oss:Prefix" not in json.dumps(info)
+    assert "StringLike" not in (info.get("Condition") or {})
 
 
 @pytest.mark.parametrize("caps", [["read"], ["read", "download"],
@@ -248,22 +253,27 @@ def test_read_whole_bucket_no_prefix_condition():
     assert "StringLike" not in lst["Condition"]         # 整桶：不带 oss:Prefix
     # 但时间窗仍在
     assert "DateGreaterThan" in lst["Condition"]
-    # 整桶时桶信息条仍存在且无 Condition
+    # 整桶时桶信息条仍存在；它有时间窗但**绝无 oss:Prefix**
     info = _bucket_info_stmt(_doc(["read"], prefix=""))
-    assert "Condition" not in info
+    assert "StringLike" not in (info.get("Condition") or {})
+    assert "DateGreaterThan" in info["Condition"]
 
 
 # ── 时间窗 / IP：作用于 List/下载/写，不作用于桶信息条 ────────────────────────
 
-def test_time_window_on_conditioned_statements_only():
-    """有 Condition 的语句（List/下载/写）都带 Date*；桶信息条无 Condition。"""
+def test_time_window_on_every_statement():
+    """【2026-08-21 起】**每条语句**都带时间窗，桶信息条也不例外。
+
+    原先桶信息条无 Condition，于是凭证到期后外部方仍能调 GetBucketInfo/Stat/Acl，
+    直到清理任务当天 HOUR:35 硬删用户（最坏 ~24h，清理失败更久）——
+    与「泄漏也随到期自动失效」的设计宣称矛盾。
+    """
     doc = _doc(["read", "download", "write"])
     conditioned = [s for s in doc["Statement"] if "Condition" in s]
-    assert len(conditioned) == 3                        # List + 下载 + 写
+    assert len(conditioned) == 4                        # 桶信息 + List + 下载 + 写
     for s in conditioned:
         assert s["Condition"]["DateGreaterThan"]["acs:CurrentTime"] == policy.iso8601_bj(NB)
         assert s["Condition"]["DateLessThan"]["acs:CurrentTime"] == policy.iso8601_bj(EXP)
-    assert "Condition" not in _bucket_info_stmt(doc)
 
 
 def test_read_list_condition_is_and_of_date_prefix_ip():
@@ -274,13 +284,17 @@ def test_read_list_condition_is_and_of_date_prefix_ip():
     assert "StringLike" in cond and "IpAddress" in cond
 
 
-def test_source_ips_inject_ipaddress_on_conditioned_statements():
+def test_source_ips_inject_ipaddress_on_every_statement():
+    """【2026-08-21 起】IP 限制覆盖**所有**语句，含桶信息条。
+
+    这是变**严**不是变松：锁了出口 IP 却让 GetBucketInfo/Stat 能从任意 IP 调，
+    等于给了个绕过口子。IpAddress 限的是请求来源、与「桶级请求不带 prefix」无关，
+    不会重蹈 aa879f4 那个坑。
+    """
     doc = _doc(["read", "download", "write"], source_ips=["203.0.113.7"])
     for s in doc["Statement"]:
-        if "Condition" in s:
-            assert s["Condition"]["IpAddress"]["acs:SourceIp"] == ["203.0.113.7"]
-    # 桶信息条无 Condition，不该被塞 IP
-    assert "Condition" not in _bucket_info_stmt(doc)
+        assert s["Condition"]["IpAddress"]["acs:SourceIp"] == ["203.0.113.7"]
+    assert _bucket_info_stmt(doc)["Condition"]["IpAddress"]["acs:SourceIp"] == ["203.0.113.7"]
 
 
 def test_no_source_ips_no_ipaddress():

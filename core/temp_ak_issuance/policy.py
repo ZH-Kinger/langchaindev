@@ -1,7 +1,8 @@
-"""临时 AK 发放的 OSS 权限 policy 生成（时间区间条件变体）。
+﻿"""临时 AK 发放的 OSS 权限 policy 生成（时间区间条件变体）。
 
 权限模型（严格对齐用户手动固化的权威模板，与审批「权限设置」勾选项一一对应，三者正交）：
-  · 桶信息   → GetBucketInfo/GetBucketStat/GetBucketAcl，**独立成条、Resource=桶、无 Prefix、无时间窗**
+  · 桶信息   → GetBucketInfo/GetBucketStat/GetBucketAcl，**独立成条、Resource=桶、无 Prefix**，
+              叠时间窗（2026-08-21 起；此前无 Condition，导致到期后仍可调，见该处注释）
               （**caps 非空即给**；桶级操作不带 prefix，绝不叠 oss:Prefix 条件否则被拒→用户访问不了）。
   · read     → List（ListObjects + GetBucketMultipartUploads），Resource=桶 + oss:Prefix 条件，能看清单、不能下载。
   · download → 只给 **GetObject**，Resource=桶/前缀*，能下载对象内容。
@@ -73,10 +74,17 @@ def build_policy_with_window(
     # 只给三个只读的桶**元数据**动作（Info/Stat/Acl），不含 ListObjects，所以不会让 write-only
     # 的使用方看到桶里有什么 —— 权限模型的正交性没有被破坏。
     if caps:
+        # 叠时间窗（2026-08-21 起）：此前这条**没有任何 Condition**，于是凭证到期后
+        # 外部方仍能调 GetBucketInfo/Stat/Acl，直到清理任务当天 HOUR:35 硬删用户 ——
+        # 最坏 ~24h，清理失败更久。与「泄漏也随到期自动失效」的设计宣称矛盾。
+        #
+        # **只叠时间窗、绝不叠 oss:Prefix** —— 桶级操作的请求不带 prefix 参数，
+        # 叠上去会被服务端判假拒绝，那正是 aa879f4 修的那个「拿了凭证访问不了桶」。
         stmts.append({
             "Effect": "Allow",
             "Action": BUCKET_INFO_ACTIONS,
             "Resource": [base],
+            "Condition": _time_conditions(not_before, expire, source_ips),
         })
     if "read" in caps:
         cond = _time_conditions(not_before, expire, source_ips)
