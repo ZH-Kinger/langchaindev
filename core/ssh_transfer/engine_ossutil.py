@@ -1,4 +1,4 @@
-"""段2 新引擎：泰国服务器 **直连**新加坡 OSS 拉取（取代「SGP rsync 转发」）。
+﻿"""段2 新引擎：泰国服务器 **直连**新加坡 OSS 拉取（取代「SGP rsync 转发」）。
 
 ## 为什么换
 
@@ -146,16 +146,30 @@ WORK="ossutil cp -r {shlex.quote(src)} {shlex.quote(dest)} {_cp_flags()} --check
   echo $! > "$JD/stage2.pid"; }}
 sleep 3
 pid=$(cat "$JD/stage2.pid" 2>/dev/null || echo 0)
-kill -0 "$pid" 2>/dev/null && echo "LAUNCHED pid=$pid" || echo "LAUNCH_DEAD pid=$pid"
+# ⚠️ 先看 rc 再看进程活没活。小任务可能**比这个 sleep 还快跑完**（九章链实测 66 MiB /
+# 11 对象只用 0.9 秒），那时进程已正常退出、`kill -0` 必然失败 —— 只按存活判定会把
+# 「已经成功」误报成「起来即死」。而小任务正是大家用来验证链路的那种，
+# 误报会让人得出「这条链是坏的」的结论。rc 才是唯一权威来源。
+if [ -f "$JD/stage2.rc" ]; then
+  echo "ALREADY_DONE rc=$(cat "$JD/stage2.rc")"
+elif kill -0 "$pid" 2>/dev/null; then
+  echo "LAUNCHED pid=$pid"
+else
+  echo "LAUNCH_DEAD pid=$pid"
+fi
 '''
     rc, out, err = run_thai(script, timeout=90)
     if rc != 0:
         raise SshTransferError(f"泰国起 ossutil 失败(rc={rc})：{(err or out)[:300]}")
     if "LAUNCH_DEAD" in (out or ""):
         raise SshTransferError(f"泰国 ossutil 起来即退出：{(out or '')[:300]}")
-    if "ALREADY_RUNNING" not in (out or "") and "LAUNCHED" not in (out or ""):
+    if not any(k in (out or "") for k in ("LAUNCHED", "ALREADY_RUNNING", "ALREADY_DONE")):
         raise SshTransferError(f"泰国下发结果无法确认（既无 LAUNCHED 也无 ALREADY_RUNNING）：{(out or '')[:300]}")
-    logger.info("[SSHT-OSSUTIL] %s 段2 已下发 %s", job_id, (out or "").strip()[-80:])
+    if "ALREADY_DONE" in (out or ""):
+        # 跑得比下发校验还快。不当失败 —— 让 poll_stage() 去读 rc 定成败。
+        logger.info("[SSHT-OSSUTIL] %s 段2 下发即完成（小任务）%s", job_id, (out or "").strip()[-40:])
+    else:
+        logger.info("[SSHT-OSSUTIL] %s 段2 已下发 %s", job_id, (out or "").strip()[-80:])
 
 
 def poll_stage(job_id: str) -> dict:
