@@ -73,6 +73,17 @@ def _accepted_tokens() -> list:
                         getattr(settings, "FEISHU_CARD_VERIFICATION_TOKEN", "")) if t]
 
 
+def _app_id_of(data) -> str:
+    """从请求体里取 app_id（不是密钥）。**任何形状的畸形输入都必须安全返回**——
+    这条日志跑在 403 分支上，它自己再抛异常就会把 403 变成 500，
+    正是 test_non_dict_header_is_403_not_500 守着的那条线。"""
+    if not isinstance(data, dict):
+        return "?"
+    header = data.get("header")
+    header = header if isinstance(header, dict) else {}
+    return str(data.get("app_id") or header.get("app_id") or "?")[:40]
+
+
 def _token_source_hint(supplied: str) -> str:
     """判断收到的 token 是不是某个**已知**的 secret，只回名字、绝不回值。
 
@@ -260,10 +271,17 @@ def feishu_card_action():
     # 不是秘密）。事件订阅那条 card.action.trigger 走 /feishu/event、本来就过了同一把门，只有
     # 这条老式卡片回调路径此前是敞的。
     if not _token_verified(data):
+        _tok = _extract_request_token(data)
+        # app_id **不是密钥**（它本来就随每个请求发过来、也印在开放平台页面上），记它是为了
+        # 分辨「回调来自另一个应用」这种情况 —— 那时 token 当然对不上，而查配置永远查不出原因。
+        # token 只记 sha256 前 12 位：能和已知值比对，但日志里留不下可利用的材料。
+        import hashlib as _hl
         logger.warning(
-            "[card_action] invalid token has_token=%s src=%s keys=%s",
-            bool(_extract_request_token(data)),
-            _token_source_hint(_extract_request_token(data)),   # 临时诊断，见该函数注释
+            "[card_action] invalid token has_token=%s src=%s fp=%s app_id=%s keys=%s",
+            bool(_tok),
+            _token_source_hint(_tok),
+            _hl.sha256(_tok.encode("utf-8")).hexdigest()[:12] if _tok else "-",
+            _app_id_of(data),
             list(data.keys()),
         )
         return jsonify({"code": 1, "msg": "invalid token"}), 403
