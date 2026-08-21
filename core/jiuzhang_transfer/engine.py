@@ -175,7 +175,16 @@ WORK=$(echo {b64} | base64 -d)
 {{ nohup bash -c "$WORK; echo \\$? > \\"$JD/{STAGE_PULL}.rc\\"" > "$JD/{STAGE_PULL}.log" 2>&1 &
   echo $! > "$JD/{STAGE_PULL}.pid"; }}
 sleep 3
-kill -0 "$(cat "$JD/{STAGE_PULL}.pid" 2>/dev/null)" 2>/dev/null && echo LAUNCHED || echo LAUNCH_DEAD
+# ⚠️ 先看 rc 再看进程活没活。小任务可能**比这个 sleep 还快跑完**（实测 66 MiB / 11 对象
+# 只用了 0.9 秒），那时进程已正常退出、`kill -0` 必然失败 —— 只按存活判定会把
+# 「已经成功」误报成「起来即死」。而小任务正是大家用来验证链路的那种。
+if [ -f "$JD/{STAGE_PULL}.rc" ]; then
+  echo "ALREADY_DONE rc=$(cat "$JD/{STAGE_PULL}.rc")"
+elif kill -0 "$(cat "$JD/{STAGE_PULL}.pid" 2>/dev/null)" 2>/dev/null; then
+  echo LAUNCHED
+else
+  echo LAUNCH_DEAD
+fi
 '''
     rc, out, err = run(script, timeout=90)
     if rc != 0:
@@ -183,10 +192,14 @@ kill -0 "$(cat "$JD/{STAGE_PULL}.pid" 2>/dev/null)" 2>/dev/null && echo LAUNCHED
     out = out or ""
     if "LAUNCH_DEAD" in out:
         raise JiuzhangError(f"九章 ossutil 起来即退出：{out[:300]}")
-    if "LAUNCHED" not in out and "ALREADY_RUNNING" not in out:
+    if not any(k in out for k in ("LAUNCHED", "ALREADY_RUNNING", "ALREADY_DONE")):
         # 既无成功也无失败标记 = 结果不可知。当失败处理 ——「不知道起没起」比「以为起了」好排查。
         raise JiuzhangError(f"九章下发结果无法确认：{out[:300]}")
-    logger.info("[JZ] %s 已下发 %s → %s", job_id, src, dst)
+    if "ALREADY_DONE" in out:
+        # 跑得比下发校验还快。不当失败 —— 让 poll() 去读 rc 定成败，那是唯一的权威来源。
+        logger.info("[JZ] %s 下发即完成（小任务）%s", job_id, out.strip()[-40:])
+    else:
+        logger.info("[JZ] %s 已下发 %s → %s", job_id, src, dst)
 
 
 def poll(job_id: str) -> dict:

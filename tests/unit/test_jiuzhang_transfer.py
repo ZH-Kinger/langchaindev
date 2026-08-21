@@ -210,3 +210,22 @@ def test_intents_are_mutually_exclusive(text, jz, xw):
     assert m._is_ssh_transfer_intent(text) is xw, text
     assert not (m._is_jiuzhang_transfer_intent(text) and m._is_ssh_transfer_intent(text)), \
         f"「{text}」两条链都命中，目的机房会取决于代码书写顺序"
+
+
+def test_fast_job_not_mistaken_for_launch_failure(monkeypatch):
+    """小任务可能比下发校验里的 `sleep 3` 还快跑完（实测 66 MiB / 11 对象 = 0.9 秒）。
+
+    那时进程已正常退出、`kill -0` 必然失败。只按存活判定会把**已经成功**误报成
+    「起来即死」——而小任务正是大家用来验证链路的那种，这个 bug 会让人以为链路是坏的。
+    """
+    monkeypatch.setattr(engine, "run", lambda s, **k: (0, "ALREADY_DONE rc=0", ""))
+    engine.start_pull("jz-t", source_bucket="bkt", source_prefix="a/")   # 不抛即通过
+
+
+def test_launch_script_checks_rc_before_liveness():
+    """脚本里 rc 判定必须排在 kill -0 之前。"""
+    s = _script_for()
+    # 脚本里有两处 kill -0（幂等检查、下发后校验），取**最后**那处比
+    rc_check = s.rindex('if [ -f "$JD/pull.rc" ]')
+    last_kill = s.rindex("kill -0")
+    assert rc_check < last_kill, "下发后校验必须先看 rc、再看进程存活"
