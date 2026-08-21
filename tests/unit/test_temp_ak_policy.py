@@ -6,7 +6,8 @@ prefix 参数，被 oss:Prefix 条件卡死 → 拒绝 → 用户拿到凭证却
 
 修复后模型（build_policy_with_window，caps ⊆ {read,download,write}，三者正交）：
   · 桶信息条  → Action=[GetBucketInfo,GetBucketStat,GetBucketAcl]，Resource=[桶]，**无 Condition**
-               （无 oss:Prefix、无时间窗）。read 或 download 任一勾选即给。
+               （无 oss:Prefix、无时间窗）。**caps 非空即给**（2026-08-19 起；原为
+               「read/download 任一勾选」，漏了 write-only，见下方 test_write_only_* 的说明）。
   · List 条   → Action=[ListObjects,GetBucketMultipartUploads]，Resource=[桶]，
                Condition=时间窗 +（prefix 非空时）oss:Prefix StringLike[prefix, prefix+"*"]。read 勾选给。
   · 下载条    → Action=[GetObject]，Resource=[桶/前缀*]，Condition=时间窗��download 勾选给。
@@ -135,25 +136,38 @@ def test_download_object_arn_whole_bucket():
     assert dl["Resource"] == ["acs:oss:*:*:b/*"]
 
 
-# ── 单勾 write：只出写条、无 delete、且不出桶信息条 ─────────────────────────────
+# ── 单勾 write：写条 + 桶信息条，无 delete/get/list ────────────────────────────
+#
+# 【行为变更 2026-08-19】原先断言的是「write 不触发桶信息条」。那个边界**从未被验证过**：
+# 它是 aa879f4「对齐权威模板」时推出来的，而那份模板（tempak-nuoyiteng-7df6a7）是
+# read+write+download 全勾的，**根本不含 write-only 这个场景**。
+#
+# 线上「元客」是第一单 write-only，于是撞上了：策略里只有一条 PutObject，连 GetBucketInfo
+# 都没有 → ossutil / SDK / 控制台在上传前普遍先探一次桶 → 403 → 现场表现成
+# 「凭证发了但什么都干不了、策略里看不到任何路径」，被误判成「权限策略没建好」。
+#
+# 现在改成「勾了任何一项就给桶信息」。下面两条断言随之更新，但**正交性仍然守住**：
+# 桶信息只含三个只读元数据动作，不含 ListObjects —— 只勾上传的外部方看不到桶里有什么。
 
-def test_write_only_single_statement_no_bucketinfo():
+def test_write_only_gets_bucket_info_and_write_statements():
     doc = _doc(["write"], prefix="drop/")
-    assert len(doc["Statement"]) == 1           # 只有写条
-    st = doc["Statement"][0]
+    assert len(doc["Statement"]) == 2           # 桶信息条 + 写条
+    info = _bucket_info_stmt(doc)
+    assert info is not None, "只勾上传的凭证拿不到桶信息 = 客户端探桶即 403（线上元客那单）"
+    assert "Condition" not in info              # 桶级操作不带 prefix，叠条件会被服务端拒
+    assert info["Resource"] == ["acs:oss:*:*:b"]
+    st = [x for x in doc["Statement"] if x is not info][0]
     assert set(st["Action"]) == {"oss:PutObject", "oss:AbortMultipartUpload", "oss:ListParts"}
     assert st["Resource"] == ["acs:oss:*:*:b/drop/*"]
-    # write 不触发桶信息条
-    assert _bucket_info_stmt(doc) is None
 
 
 def test_write_only_no_delete_no_get_no_list():
+    """给桶元数据 ≠ 给列举/下载/删除。正交性不能被上面那个修复带偏。"""
     acts = _all_actions(_doc(["write"]))
     assert "oss:DeleteObject" not in acts
     assert "oss:DeleteMultipleObjects" not in acts
     assert "oss:GetObject" not in acts
-    assert "oss:ListObjects" not in acts
-    assert not (_BUCKET_INFO & acts)            # write 不给桶信息
+    assert "oss:ListObjects" not in acts        # ← 关键：看不到桶里有什么
 
 
 # ── 全勾 read+download+write：四条，顺序=桶信息/List/下载/写 ─────────────────────

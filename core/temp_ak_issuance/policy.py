@@ -2,7 +2,7 @@
 
 权限模型（严格对齐用户手动固化的权威模板，与审批「权限设置」勾选项一一对应，三者正交）：
   · 桶信息   → GetBucketInfo/GetBucketStat/GetBucketAcl，**独立成条、Resource=桶、无 Prefix、无时间窗**
-              （read/download 任一勾选即给；桶级操作不带 prefix，绝不叠 oss:Prefix 条件否则被拒→用户访问不了）。
+              （**caps 非空即给**；桶级操作不带 prefix，绝不叠 oss:Prefix 条件否则被拒→用户访问不了）。
   · read     → List（ListObjects + GetBucketMultipartUploads），Resource=桶 + oss:Prefix 条件，能看清单、不能下载。
   · download → 只给 **GetObject**，Resource=桶/前缀*，能下载对象内容。
   · write    → 只给 **PutObject/AbortMultipartUpload/ListParts**（上传/分片），**绝不含任何删除动作**。
@@ -65,9 +65,14 @@ def build_policy_with_window(
     obj_arn = permsync._obj_arn(base, prefix)
     stmts: list[dict] = []
 
-    # read 或 download 任一勾选，都给桶信息（能定位桶、看基本信息）。独立成条：Resource=桶、无 Prefix、无时间窗，
-    # 与用户权威模板一致（桶级操作不带 prefix 参数，绝不能叠 oss:Prefix 条件，否则被拒）。
-    if "read" in caps or "download" in caps:
+    # **勾了任何一项就给桶信息** —— 曾经写成「read 或 download 才给」，于是只勾"上传"的凭证
+    # 连 GetBucketInfo 都没有：ossutil / SDK / 控制台在上传前普遍会先探一次桶，直接 403，
+    # 表现就是「凭证发了但什么也干不了、策略里看不到任何路径」（线上「元客」那单即此）。
+    # 独立成条：Resource=桶、无 Prefix、无时间窗 —— 桶级操作不带 prefix 参数，叠 oss:Prefix 会被拒。
+    #
+    # 只给三个只读的桶**元数据**动作（Info/Stat/Acl），不含 ListObjects，所以不会让 write-only
+    # 的使用方看到桶里有什么 —— 权限模型的正交性没有被破坏。
+    if caps:
         stmts.append({
             "Effect": "Allow",
             "Action": BUCKET_INFO_ACTIONS,

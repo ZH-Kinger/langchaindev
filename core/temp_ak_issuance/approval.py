@@ -309,11 +309,11 @@ def parse_temp_ak_request(detail: dict[str, Any], payload: dict[str, Any], profi
         "reason": f"{p.subject_label}：{enterprise}" if enterprise else "",
         "note": note,
     }
-    _validate_spec(spec)
+    _validate_spec(spec, p)      # p = 该单所属账号档；探桶必须用它自己的凭证
     return spec
 
 
-def _validate_spec(spec: dict) -> None:
+def _validate_spec(spec: dict, profile=None) -> None:
     import time as _t
     if spec["platform"] == "volcano":
         raise orchestrator.TempAkError("平台=火山云 暂未支持（当前仅阿里云 OSS）；请改选阿里云或联系运维")
@@ -321,6 +321,10 @@ def _validate_spec(spec: dict) -> None:
         raise orchestrator.TempAkError("无法识别申请平台，请在审批表单选择阿里云")
     if not spec["bucket"]:
         raise orchestrator.TempAkError("申请目录缺少桶名（形如 oss://<桶>/<目录>/ 或 <桶>/<目录>/）")
+    # 桶确定不存在 → 拦下并说清最常见的成因（只填路径没填桶）。只拦确定性答案，见该函数说明。
+    _why = orchestrator.bucket_missing_reason(spec["bucket"], profile)
+    if _why:
+        raise orchestrator.TempAkError(_why)
     if not spec.get("caps"):
         raise orchestrator.TempAkError("权限设置未勾选任何项（read/download/write），未发放")
     if not spec["expire"]:

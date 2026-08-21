@@ -148,7 +148,7 @@ def probe_bucket_region(bucket: str, profile=None) -> str:
     region = ""
     if p.ak_id and p.ak_secret:
         try:
-            region = _probe_region_once(bucket, p.ak_id, p.ak_secret)
+            region, _code = _probe_region_once(bucket, p.ak_id, p.ak_secret)
         except Exception:
             logger.warning("[temp_ak] %s 探测桶 %s 地域失败，按未知处理", p.label, bucket,
                            exc_info=True)
@@ -169,8 +169,17 @@ def probe_bucket_region(bucket: str, profile=None) -> str:
     return region
 
 
-def _probe_region_once(bucket: str, ak: str, sk: str, *, timeout: int = 10) -> str:
-    """一次 GetBucketLocation。跨地域时 OSS 会拒绝并在响应里带上正确 endpoint，照样能捞出来。"""
+def _probe_region_once(bucket: str, ak: str, sk: str, *, timeout: int = 10) -> tuple:
+    """一次 GetBucketLocation，返回 `(裸 region, OSS 错误码)`。
+
+    **本模块唯一的出网点。** 地域探测和「桶存不存在」两件事都走它 —— 单测只要桩这一个
+    函数就能保证不出网（tests/conftest.py 的兜底即此）。多一个出网入口就多一个会被漏桩的坑，
+    而漏桩的后果是拿生产 AK 打真 API（这个坑本次已经踩过一次）。
+
+    成功 → `(region, "")`；失败 → `("", 错误码)`。错误码原样透出，调用方自己判断：
+    `NoSuchBucket` 是「确定不存在」，其余（AccessDenied / 网络问题）都只是「探不到」。
+    跨地域时 OSS 会拒绝但在响应里带上正确 endpoint，照样能捞出 region。
+    """
     import oss2
     from tools.aliyun.oss import region_from_endpoint
 
@@ -179,23 +188,24 @@ def _probe_region_once(bucket: str, ak: str, sk: str, *, timeout: int = 10) -> s
     probe = oss2.Bucket(auth, "https://oss-cn-hangzhou.aliyuncs.com", bucket,
                         connect_timeout=timeout)
     try:
-        return region_from_endpoint(probe.get_bucket_location().location)
+        return region_from_endpoint(probe.get_bucket_location().location), ""
     except oss2.exceptions.OssError as e:
         # 异地桶：正确 endpoint 在响应头或 body 的 <Endpoint> 里。
         headers = getattr(e, "headers", None) or {}
+        code = getattr(e, "code", "") or ""
         for k in ("x-oss-region", "X-Oss-Region"):
             if headers.get(k):
-                return region_from_endpoint(headers[k])
+                return region_from_endpoint(headers[k]), ""
         m = re.search(r"<Endpoint>\s*([^<]+?)\s*</Endpoint>", getattr(e, "body", "") or "")
         if m:
-            return region_from_endpoint(m.group(1).strip())
+            return region_from_endpoint(m.group(1).strip()), ""
         # 探不到的原因值得留痕，否则线上只看到「未知」却不知道是限流、无权限还是桶不存在。
         # **只记 status/code/request_id，绝不记 e.body** —— SignatureDoesNotMatch 的 body 里
         # 带 AccessKeyId 和 StringToSign，进日志就是凭证泄漏。
         logger.warning("[temp_ak] 探测桶 %s 地域未果：status=%s code=%s req_id=%s",
-                       bucket, getattr(e, "status", "?"), getattr(e, "code", "?"),
+                       bucket, getattr(e, "status", "?"), code or "?",
                        getattr(e, "request_id", "?"))
-        return ""     # 桶不存在 / 无权限 / 其它 —— 一律当探不到，**不猜**
+        return "", code   # 桶不存在 / 无权限 / 其它 —— 地域一律当探不到，**不猜**
 
 
 def resolve_bucket(display: str, profile=None) -> tuple[str, str]:
@@ -230,6 +240,37 @@ def resolve_bucket(display: str, profile=None) -> tuple[str, str]:
     # 这正是线上那单的成因 —— wuji-rl-dataset 不在表里，region 留空，凭证正文
     # 三行连接信息退化成「未知」，使用方随手用了默认 endpoint 拿到 403。
     return probe_bucket_region(display, p), display
+
+
+def bucket_missing_reason(bucket: str, profile=None) -> str:
+    """桶**确定不存在**时返回给用户的话；其余一律返回 ""（放行）。
+
+    为什么要有这个：申请人常只填路径不填桶（表单占位符长得像 `oss://桶/目录/`），
+    `_parse_directory` 就把第一段当成桶名。线上真发生过 —— 申请人填
+    `third-party-data/maxinsights/`，`third-party-data` 其实是 `wuji-bucket-hangzhou`
+    里的一个目录，于是策略指向一个不存在的桶，凭证是废的、但流程一路绿灯。
+
+    **只在 NoSuchBucket 这种确定性答案上拦**。权限不足 / 网络抖动 / 没配 AK 一律放行 ——
+    拦错了会挡住正常发放，而这条链的默认方向应该是「宁可发出去让人反馈，也别静默拒绝」。
+    （与 caps/审批那些门禁不同：那些拦的是越权，这条拦的是笔误。）
+    """
+    bucket = (bucket or "").strip()
+    if not bucket or not _BUCKET_NAME_RE.match(bucket):
+        return ""            # 形状就不合法的交给别的校验，这里不重复报
+    p = profile or accounts.default()
+    if not (p.ak_id and p.ak_secret):
+        return ""
+    try:
+        _region, code = _probe_region_once(bucket, p.ak_id, p.ak_secret)
+    except Exception:
+        return ""            # 探测本身炸了 —— 判断不了就别拦
+    if code != "NoSuchBucket":
+        # 能探到地域 = 桶存在；AccessDenied / 网络问题 = 探不到但不代表不存在。
+        # 只有 NoSuchBucket 是确定性答案，其余一律放行。
+        return ""
+    return (f"桶 `{bucket}` 不存在。常见原因：申请目录里**只填了路径没填桶名** —— "
+                f"比如填 `third-party-data/xxx/`，而 `third-party-data` 其实是桶里的一个目录。"
+                f"正确写法是 `oss://<桶名>/<目录>/`。")
 
 
 def _derive_user_name(spec: dict, instance_code: str, profile=None) -> str:

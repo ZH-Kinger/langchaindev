@@ -1521,7 +1521,22 @@ def _handle_card_trigger_sync(data: dict) -> dict:
     action_obj = event.get("action", {})
     action_val = action_obj.get("value") or {}
     form_value = action_obj.get("form_value") or {}
-    open_id    = event.get("operator", {}).get("operator_id", {}).get("open_id", "")
+    # ⚠️ operator 的形状按事件类型不同！`card.action.trigger` 是 `operator.open_id`（扁平），
+    # 而 `im.message.receive_v1` 那类是 `sender.sender_id.open_id`（多一层 *_id）。
+    # 早先这里只按后者取，于是卡片回调拿到的 open_id 恒为空 —— 而空 open_id 会被
+    # `_is_admin()` fail-closed 判成"不是管理员"，表现就是**管理员点自己的按钮也被拒**，
+    # 且日志里毫无线索（此前 happy path 一行不记）。两个位置都试，并记下命中的那个。
+    _op = event.get("operator") or {}
+    _op = _op if isinstance(_op, dict) else {}
+    _nested = _op.get("operator_id") or {}
+    _nested = _nested if isinstance(_nested, dict) else {}
+    open_id, _id_src = "", "none"
+    for _cand, _tag in ((_op.get("open_id"), "operator.open_id"),
+                        (_nested.get("open_id"), "operator.operator_id.open_id"),
+                        (event.get("open_id"), "event.open_id")):
+        if _cand:
+            open_id, _id_src = _cand, _tag
+            break
     chat_id    = event.get("context", {}).get("open_chat_id", "") or settings.FEISHU_CHAT_ID
     msg_id     = event.get("context", {}).get("open_message_id", "")
     action_name = action_val.get("action", "") if isinstance(action_val, dict) else ""
@@ -1540,6 +1555,6 @@ def _handle_card_trigger_sync(data: dict) -> dict:
     # 与「请求根本没到」完全同形 —— 排查时只能看到 2.0 回调进来过，之后一片空白。
     # open_id 不是秘密（组织内可见，本文件的门禁注释里也这么写），记它是为了能当场回答
     # 「点的人到底是不是配置里的管理员」——那正是超阈值确认最常见的卡点。
-    logger.info("[card] action=%s open_id=%s is_admin=%s", action_name, open_id or "-",
-                _is_admin(open_id))
+    logger.info("[card] action=%s open_id=%s(src=%s) is_admin=%s", action_name,
+                open_id or "-", _id_src, _is_admin(open_id))
     return _process_action(action_name, action_val, open_id, chat_id, form_value=form_value)

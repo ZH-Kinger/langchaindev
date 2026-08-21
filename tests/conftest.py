@@ -142,15 +142,16 @@ def _no_real_feishu_or_network(monkeypatch):
     # 桶名恰好真实存在时（wuji-sing）探测还会成功，把断言 `== ("", "wuji-sing")` 打红。
     # 这个坑是审计抓出来的，本机实测复现过（200 + 真 request-id）。
     #
-    # 桩最内层的 `_probe_region_once` 而不是 `probe_bucket_region`：缓存、region 校验、
-    # 账号隔离这些逻辑仍然要被测到，只把出网那一下换掉。要测探测本身的用例自行覆盖它。
+    # 桩最内层的 `_probe_region_once`：它是该模块**唯一的出网点**（地域探测与「桶存不存在」
+    # 两条路径都走它），所以一个桩就够。缓存、region 校验、账号隔离这些逻辑仍然被测到。
+    # 要测探测本身的用例自行覆盖它（见 test_temp_ak_region_probe.py 的做法）。
     try:
         from core.temp_ak_issuance import orchestrator as _tak_orch
 
         import os as _os
         if not _os.environ.get("DT_DISABLE_PROBE_GUARD"):     # 反向对照用，平时恒生效
             monkeypatch.setattr(_tak_orch, "_probe_region_once",
-                                lambda *a, **k: "", raising=False)
+                                lambda *a, **k: ("", ""), raising=False)
         _tak_orch._REGION_PROBE_CACHE.clear()   # 模块级缓存，跨文件会残留 → 顺序相关偶发
     except Exception:
         pass
