@@ -1,4 +1,4 @@
-"""SSH 迁移链编排：状态机 + Redis job + 轮询推进。
+﻿"""SSH 迁移链编排：状态机 + Redis job + 轮询推进。
 
 状态机：NEW → STAGE1(ossutil 杭州→SGP) → STAGE2(rsync SGP→泰国) → DONE | FAILED
 Redis: ssh:transfer:job:{job_id}  30 天 TTL。job_id = sgp-hash(源, 泰国目的根, 当天)。
@@ -118,7 +118,12 @@ def create_job_record(plan: paths.Plan, *, open_id: str = "",
 def estimate_source(plan: paths.Plan) -> tuple[int, int, bool]:
     """估算源前缀大小（字节, 对象数, ok）。走 SGP 上已配好的 ossutil du；SSH 不通/解析失败→ok=False。"""
     try:
-        return engine_ssh.estimate_source(plan.source_bucket, plan.source_prefix)
+        # 改走 OSS API：远端 `ossutil du` 受中转机 ~/.ossutilconfig 摆布（写死杭州，
+        # 异地桶 403），且线上实测 180s 数不完大前缀 → 估算失败 → 审批门 fail-safe 触发 →
+        # 普通成员发起的迁移一律要找管理员。API 路径不经中转机、超时可控、还能给出下界。
+        from tools.aliyun.oss import estimate_prefix
+        return estimate_prefix(plan.source_bucket, plan.source_prefix,
+                               max_seconds=int(getattr(settings, "SSH_ESTIMATE_TIMEOUT", 240) or 240))
     except Exception:
         logger.warning("[SSHT] 估算源大小失败 %s", plan.source_uri(), exc_info=True)
         return 0, 0, False

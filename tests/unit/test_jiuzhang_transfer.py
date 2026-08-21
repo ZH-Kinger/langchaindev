@@ -229,3 +229,44 @@ def test_launch_script_checks_rc_before_liveness():
     rc_check = s.rindex('if [ -f "$JD/pull.rc" ]')
     last_kill = s.rindex("kill -0")
     assert rc_check < last_kill, "下发后校验必须先看 rc、再看进程存活"
+
+
+# ── 估算：数不完时绝不返回一个"看起来完整"的偏小值 ──────────────────────────
+
+def test_estimate_timeout_returns_lower_bound_not_ok(monkeypatch):
+    """超时返回 (已数到的量, 数量, False)。
+
+    **绝不能返回 ok=True 配一个偏小的字节数** —— 那会让一个 10 TB 的迁移看起来只有
+    500 GB、悄悄低于审批阈值放行，而审批门要拦的正是这种。
+    """
+    import time as _t
+    from tools.aliyun import oss as ossmod
+
+    class _Obj:
+        def __init__(self, i):
+            self.key, self.size = f"k{i}", 1024
+
+    class _FakeIter:
+        def __init__(self, *a, **k):
+            pass
+        def __iter__(self):
+            for i in range(10000):
+                yield _Obj(i)
+
+    monkeypatch.setattr(ossmod, "_detect_region_endpoint", lambda *a, **k: "https://x.aliyuncs.com")
+    monkeypatch.setattr(ossmod, "region_from_endpoint", lambda e: "cn-hangzhou")
+    import sys, types
+    fake = types.ModuleType("oss2")
+    fake.ObjectIteratorV2 = _FakeIter
+    fake.Bucket = lambda *a, **k: object()
+    monkeypatch.setitem(sys.modules, "oss2", fake)
+    monkeypatch.setattr("utils.aliyun_client_factory.get_oss_auth", lambda *a, **k: (object(), None))
+    # 时间必须**递增**：把它钉成常量的话 deadline 也是常量，`now > deadline` 永远为假、
+    # 根本不会超时 —— 写这条测试时就先踩了一次。
+    ticks = iter([1000.0] + [1000.0 + i * 100 for i in range(1, 50)])
+    monkeypatch.setattr(_t, "time", lambda: next(ticks, 9e9))
+
+    total, count, ok = ossmod.estimate_prefix("b", "p/", max_seconds=1)
+    assert ok is False, "超时必须报 ok=False，否则审批门会被偏小值绕过"
+    assert count < 10000, "应当中途返回，不是数完"
+    assert total == count * 1024, "返回的是已数到的量（当下界用）"

@@ -1,4 +1,4 @@
-import os
+﻿import os
 import json
 from pathlib import Path
 from dotenv import load_dotenv
@@ -430,6 +430,9 @@ class Config:
     JIUZHANG_APPROVAL_TB   = os.environ.get("JIUZHANG_APPROVAL_TB", "")    # 留空回退 SSH_TRANSFER_APPROVAL_TB
     JIUZHANG_CHAT_ID       = os.environ.get("JIUZHANG_CHAT_ID", "")
 
+    # 估算超时（秒）。走 OSS API 列举，不再受中转机 ossutil 摆布。
+    # 数不完时返回**已数到的量 + ok=False**，审批门 fail-safe 触发（不会用偏小值放行）。
+    SSH_ESTIMATE_TIMEOUT   = os.environ.get("SSH_ESTIMATE_TIMEOUT", "240")
     SSH_TRANSFER_APPROVAL_TB = float(os.environ.get("SSH_TRANSFER_APPROVAL_TB", 1))
     SSH_TRANSFER_CHAT_ID   = os.environ.get("SSH_TRANSFER_CHAT_ID", "")
     # ── 段2 执行方式：ossutil(默认, 泰国直拉) / rsync(旧, SGP 转发) ─────────────

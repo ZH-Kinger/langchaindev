@@ -96,7 +96,12 @@ def create_job_record(plan, *, open_id: str = "") -> dict:
 
 def estimate_source(plan):
     try:
-        return engine.estimate_source(plan.source_bucket, plan.source_prefix)
+        # 与泰国链共用同一条 API 估算路径（见 tools.aliyun.oss.estimate_prefix 的说明）。
+        # engine.estimate_source（远端 ossutil du）保留作为回退，未接线。
+        from tools.aliyun.oss import estimate_prefix
+        return estimate_prefix(plan.source_bucket, plan.source_prefix,
+                               endpoint=getattr(settings, "JIUZHANG_OSS_ENDPOINT", ""),
+                               max_seconds=int(getattr(settings, "JIUZHANG_ESTIMATE_TIMEOUT", 240) or 240))
     except Exception:
         logger.warning("[JZ] 估算失败 %s", plan.source_uri(), exc_info=True)
         return 0, 0, False

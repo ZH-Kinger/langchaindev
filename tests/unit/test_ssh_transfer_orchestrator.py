@@ -104,16 +104,25 @@ def test_create_failed_goes_to_new_build(plan):
 # ── estimate_source（orchestrator 包一层，3 元组） ────────────────────────────
 
 def test_orch_estimate_source_passthrough(monkeypatch, plan):
-    monkeypatch.setattr(orch.engine_ssh, "estimate_source",
-                        lambda b, p: (999, 7, True))
+    """【改】估算改走 OSS API（tools.aliyun.oss.estimate_prefix），不再经中转机 ossutil du。
+
+    原因：远端 du 受中转机 ~/.ossutilconfig 摆布（写死杭州，异地桶 403），且线上实测
+    180s 数不完大前缀 → 估算失败 → 审批门 fail-safe → 普通成员发起一律要找管理员。
+    """
+    import tools.aliyun.oss as ossmod
+    monkeypatch.setattr(ossmod, "estimate_prefix",
+                        lambda b, p, **k: (999, 7, True))
     assert orch.estimate_source(plan) == (999, 7, True)
 
 
 def test_orch_estimate_source_exception_not_ok(monkeypatch, plan):
-    """引擎抛错（SSH 不通）→ (0,0,False)，交给 needs_approval fail-safe。"""
-    def boom(b, p):
-        raise RuntimeError("ssh down")
-    monkeypatch.setattr(orch.engine_ssh, "estimate_source", boom)
+    """估算抛错 → (0,0,False)，交给 needs_approval fail-safe（不放行未知大小的迁移）。"""
+    import tools.aliyun.oss as ossmod
+
+    def boom(b, p, **k):
+        raise RuntimeError("oss down")
+
+    monkeypatch.setattr(ossmod, "estimate_prefix", boom)
     assert orch.estimate_source(plan) == (0, 0, False)
 
 

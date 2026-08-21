@@ -1,4 +1,4 @@
-"""
+﻿"""
 阿里云 OSS 管理工具。
 
 凭证通过 STS AssumeRole 获取（utils.aliyun_client_factory），
@@ -309,6 +309,55 @@ def detect_bucket_region(open_id: str, bucket_name: str) -> str:
     return region_from_endpoint(_detect_region_endpoint(auth, bucket_name)) or \
         (settings.PAI_DSW_REGION_ID or "cn-hangzhou")
 
+
+
+def estimate_prefix(bucket: str, prefix: str, *, endpoint: str = "",
+                    max_seconds: int = 240, open_id: str = "") -> tuple:
+    """用 OSS API 列举统计前缀大小，返回 `(字节, 对象数, 数完了没)`。
+
+    为什么不用远端 `ossutil du`：那条路要 SSH 到中转机、受它的 `~/.ossutilconfig` 摆布
+    （写死某个地域，异地桶直接 403），而且超时了只能得到「失败」两个字。线上实测
+    `ossutil du` 在 180 秒内数不完一个大前缀，导致估算失败 → 审批门 fail-safe 触发 →
+    普通成员发起的迁移一律要找管理员，非常别扭。
+
+    **数不完时返回的是「已数到的量」+ `ok=False`，绝不返回一个看起来完整的偏小值。**
+    偏小值会让大迁移悄悄绕过审批阈值 —— 那正是审批门要拦的情况。调用方看到
+    `ok=False` 就该按「需审批」处理（`needs_approval(size_known=False)` 恒 True），
+    同时可以把已数到的量当作**下界**展示（「≥ 500 GiB」），比一句「估算失败」有用。
+    """
+    import time as _t
+    try:
+        import oss2
+    except ImportError:
+        logger.warning("[OSS] oss2 未安装，无法估算")
+        return 0, 0, False
+    from utils.aliyun_client_factory import get_oss_auth
+    auth, _ = get_oss_auth(open_id)
+    if auth is None:
+        return 0, 0, False
+    ep = endpoint or _endpoint_from_region(
+        region_from_endpoint(_detect_region_endpoint(auth, bucket)))
+    if not ep.startswith("http"):
+        ep = "https://" + ep
+    b = oss2.Bucket(auth, ep, bucket)
+
+    total = count = 0
+    deadline = _t.time() + max(10, max_seconds)
+    try:
+        for o in oss2.ObjectIteratorV2(b, prefix=prefix):
+            if o.key.endswith("/"):
+                continue                    # 目录占位对象，不是数据
+            total += o.size
+            count += 1
+            # 每 2000 个查一次时间：ObjectIteratorV2 一次拉 1000，逐个查 time() 是白开销
+            if count % 2000 == 0 and _t.time() > deadline:
+                logger.warning("[OSS] 估算 oss://%s/%s 超 %ds，已数 %d 个（当下界用）",
+                               bucket, prefix, max_seconds, count)
+                return total, count, False
+    except Exception:
+        logger.warning("[OSS] 估算 oss://%s/%s 失败", bucket, prefix, exc_info=True)
+        return total, count, False          # 半路失败同样只当下界
+    return total, count, True
 
 def _resolve_bucket(open_id: str, bucket_name: str, region: str = ""):
     """构造 oss2.Bucket：region 留空则自动探测地域（跨地域桶可用）。"""
