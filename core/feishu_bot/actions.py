@@ -1534,5 +1534,12 @@ def _handle_card_trigger_sync(data: dict) -> dict:
         else:
             action_name = "submit_gpu_request"
     if card_action_is_duplicate(action_name, open_id, msg_id, form_value, action_val):
+        logger.info("[card] 重复投递已忽略 action=%s", action_name)
         return {}
+    # 这条日志是 happy path 上唯一的痕迹。此前这里一行不记，于是「按钮点了没反应」在日志里
+    # 与「请求根本没到」完全同形 —— 排查时只能看到 2.0 回调进来过，之后一片空白。
+    # open_id 不是秘密（组织内可见，本文件的门禁注释里也这么写），记它是为了能当场回答
+    # 「点的人到底是不是配置里的管理员」——那正是超阈值确认最常见的卡点。
+    logger.info("[card] action=%s open_id=%s is_admin=%s", action_name, open_id or "-",
+                _is_admin(open_id))
     return _process_action(action_name, action_val, open_id, chat_id, form_value=form_value)
