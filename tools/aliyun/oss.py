@@ -286,6 +286,10 @@ def _detect_region_endpoint(auth, bucket_name: str):
                 return _endpoint_from_region(headers[key])
         import re
         body = getattr(e, "body", "") or ""
+        # oss2 的 e.body 是 bytes；str 正则 search 会 TypeError，异常再被上层吞掉，
+        # 表现成「跨地域桶探测不到地域」——同款问题在 temp_ak 那边刚炸过一次。
+        if isinstance(body, (bytes, bytearray)):
+            body = body.decode("utf-8", "replace")
         m = re.search(r"<Endpoint>\s*([^<]+?)\s*</Endpoint>", body)
         if m:
             ep = m.group(1).strip()

@@ -1,4 +1,4 @@
-# Changelog
+﻿# Changelog
 
 所有版本变更记录。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
@@ -7,6 +7,43 @@
 ## [Unreleased]
 
 ### Fixed
+
+- **临时 AK：只勾「上传」的凭证拿不到桶信息，客户端探桶即 403**（`core/temp_ak_issuance/policy.py`）
+
+  线上单（主体「元客」）：策略里只有一条 `PutObject` 语句，连 `GetBucketInfo` 都没有。
+  ossutil / SDK / 控制台在上传前普遍会先探一次桶 → 403 → 现场表现成「凭证发了但什么都
+  干不了、策略里看不到任何路径」，被误判成「权限策略没建好」。
+
+  根因不是写错了，是**那个边界从未被验证过**：桶信息语句的触发条件是 `aa879f4`
+  「对齐权威模板」时推出来的，而那份模板（`tempak-nuoyiteng-7df6a7`）是 read+write+download
+  三项全勾的，**根本不含 write-only 这个场景**。元客是第一单 write-only。
+
+  改成「勾了任何一项就给桶信息」。正交性仍然守住：桶信息只含三个只读元数据动作，
+  **不含 `ListObjects`** —— 只勾上传的外部方看不到桶里有什么。实测 7 种 caps 组合里
+  6 种生成的策略逐字节不变，只有 write 单选变了。
+
+- **临时 AK：桶名填成目录时静默发出废凭证**（`core/temp_ak_issuance/`）
+
+  线上单（主体「maxinsights」）：申请人填 `third-party-data/maxinsights/`，而
+  `third-party-data` 是 `wuji-bucket-hangzhou` 里的一个**目录**、不是桶。解析层把第一段
+  当成桶名，于是策略指向一个不存在的桶 —— 凭证是废的，但流程一路绿灯、评论正常下发。
+  （同类问题在 SSH 迁移链也出现过三次，见 `sgp-841b88a7b0dd` 等。）
+
+  新增 `bucket_missing_reason()`，**只在能确定「桶不存在」（`NoSuchBucket`）时拦**，
+  并在报错里直接点出最常见成因。权限不足 / 网络抖动 / 没配 AK 一律放行 —— 这条拦的是
+  **笔误**不是越权，拦错了会挡住正常发放，默认方向与 caps/审批那些门禁相反。
+
+  同时把 `_probe_region_once` 改成模块**唯一的出网点**（返回 `(region, 错误码)`），
+  地域探测与桶存在性检查共用 —— 多一个出网入口就多一个会被漏桩的坑，而漏桩的后果是
+  单测拿生产 AK 打真 API。
+
+  > ⚠️ **流程说明（留痕，别删）**：上面这两处改动实际包含在提交 `af3397d` 里，
+  > 而那条提交的信息只讲「卡片回调取不到操作人身份」，**完全没提 temp_ak 的改动**。
+  > 原因是当时用了 `git add -A` 而非逐文件挑，把不相干的改动裹了进去，
+  > 并因此**跳过了本项目「改动须经 auditor 审计通过才能 commit」的闸门**、直接随部署上线。
+  > 事后已补做审计。查 git 历史时请注意：`af3397d` 的实际内容大于它的提交信息。
+
+### Security
 
 - **临时 AK 凭证：桶不在映射表时实时探测地域**（`core/temp_ak_issuance/orchestrator.py`）
 

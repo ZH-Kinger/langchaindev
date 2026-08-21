@@ -1,4 +1,4 @@
-"""临时 AK 发放 grant 状态机 + Redis 记录 + 幂等 + 桶解析。
+﻿"""临时 AK 发放 grant 状态机 + Redis 记录 + 幂等 + 桶解析。
 
 grant 记录**绝不含 secret/token**（只存 ak_id 供方案 B 到期硬删定位）。
 grant_id = hash(审批实例)：一审批实例一凭证；已 ISSUED/REVOKED 幂等短路，不重发。
@@ -196,7 +196,14 @@ def _probe_region_once(bucket: str, ak: str, sk: str, *, timeout: int = 10) -> t
         for k in ("x-oss-region", "X-Oss-Region"):
             if headers.get(k):
                 return region_from_endpoint(headers[k]), ""
-        m = re.search(r"<Endpoint>\s*([^<]+?)\s*</Endpoint>", getattr(e, "body", "") or "")
+        # ⚠️ `e.body` 在 oss2 里是 **bytes**，不是 str。拿 str 正则去 search 会直接
+        # TypeError —— 而这个异常会被上层 except 吞掉、静默返回空，表现就是
+        # 「地域探测和桶存在性校验双双永不生效」。真机一试即崩，而单测里如果用 str
+        # 当假 body 就永远发现不了（本次正是这么漏的）。
+        body = getattr(e, "body", "") or ""
+        if isinstance(body, (bytes, bytearray)):
+            body = body.decode("utf-8", "replace")
+        m = re.search(r"<Endpoint>\s*([^<]+?)\s*</Endpoint>", body)
         if m:
             return region_from_endpoint(m.group(1).strip()), ""
         # 探不到的原因值得留痕，否则线上只看到「未知」却不知道是限流、无权限还是桶不存在。

@@ -148,17 +148,25 @@ def test_probe_parses_x_oss_region_header(monkeypatch):
     assert _REAL_PROBE_ONCE("b", "ak", "sk") == ("cn-shenzhen", "")
 
 
-def test_probe_parses_endpoint_in_body(monkeypatch):
-    """异地桶的另一种形态：正确 endpoint 在 body 的 <Endpoint> 里。"""
-    _install_fake_oss2(monkeypatch, exc=_FakeOssError(
-        body="<Error><Endpoint>oss-ap-southeast-1.aliyuncs.com</Endpoint></Error>"))
+@pytest.mark.parametrize("body", [
+    "<Error><Endpoint>oss-ap-southeast-1.aliyuncs.com</Endpoint></Error>",
+    b"<Error><Endpoint>oss-ap-southeast-1.aliyuncs.com</Endpoint></Error>",   # oss2 真实类型
+])
+def test_probe_parses_endpoint_in_body(monkeypatch, body):
+    """异地桶的另一种形态：正确 endpoint 在 body 的 <Endpoint> 里。
+
+    **必须同时测 bytes** —— oss2 的 `e.body` 是 bytes，拿 str 正则 search 会 TypeError，
+    而那个异常会被上层吞掉、静默返回空 → 地域探测与桶存在性校验双双永不生效。
+    最初这条只测了 str，于是真机一跑就崩、测试却全绿。
+    """
+    _install_fake_oss2(monkeypatch, exc=_FakeOssError(body=body))
     assert _REAL_PROBE_ONCE("b", "ak", "sk") == ("ap-southeast-1", "")
 
 
 def test_probe_returns_empty_when_nothing_parseable(monkeypatch):
     """桶不存在 / 无权限：headers 和 body 都没线索 → 返回 ""，**不猜**。"""
     _install_fake_oss2(monkeypatch, exc=_FakeOssError(
-        body="<Error><Code>NoSuchBucket</Code></Error>", code="NoSuchBucket"))
+        body=b"<Error><Code>NoSuchBucket</Code></Error>", code="NoSuchBucket"))
     assert _REAL_PROBE_ONCE("b", "ak", "sk") == ("", "NoSuchBucket")
 
 
