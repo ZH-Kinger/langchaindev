@@ -5,12 +5,12 @@
 prefix 参数，被 oss:Prefix 条件卡死 → 拒绝 → 用户拿到凭证却访问不了桶。
 
 修复后模型（build_policy_with_window，caps ⊆ {read,download,write}，三者正交）：
-  · 桶信息条  → Action=[GetBucketInfo,GetBucketStat,GetBucketAcl]，Resource=[桶]，**无 Condition**
+  · 桶信息条  → Action=[GetBucketInfo,GetBucketStat,GetBucketAcl,GetBucketLocation]，Resource=[桶]，**无 Condition**
                （无 oss:Prefix、无时间窗）。**caps 非空即给**（2026-08-19 起；原为
                「read/download 任一勾选」，漏了 write-only，见下方 test_write_only_* 的说明）。
   · List 条   → Action=[ListObjects,GetBucketMultipartUploads]，Resource=[桶]，
                Condition=时间窗 +（prefix 非空时）oss:Prefix StringLike[prefix, prefix+"*"]。read 勾选给。
-  · 下载条    → Action=[GetObject]，Resource=[桶/前缀*]，Condition=时间窗��download 勾选给。
+  · 下载条    → Action=[GetObject,GetObjectVersion]，Resource=[桶/前缀*]，Condition=时间窗��download 勾选给。
   · 写条      → Action=[PutObject,AbortMultipartUpload,ListParts]（无任何 delete），
                Resource=[桶/前缀*]，Condition=时间窗。write 勾选给。
 时间窗 = DateGreaterThan/DateLessThan on acs:CurrentTime（ISO8601 +08:00，AND）。
@@ -28,7 +28,10 @@ NB = datetime(2026, 8, 1, 0, 0, 0, tzinfo=_BJ).timestamp()
 EXP = datetime(2026, 8, 2, 0, 0, 0, tzinfo=_BJ).timestamp()
 
 # 桶信息动作三件套（就是当初被误塞进带 Prefix 的 List 语句、导致被拒的那三个）。
-_BUCKET_INFO = {"oss:GetBucketInfo", "oss:GetBucketStat", "oss:GetBucketAcl"}
+# GetBucketLocation：S3 兼容客户端建连先探地域（2026-09-23 加）
+_BUCKET_INFO = {
+    "oss:GetBucketInfo", "oss:GetBucketStat", "oss:GetBucketAcl", "oss:GetBucketLocation",
+}
 
 
 def _doc(caps, prefix="team/data/", **kw):
@@ -48,6 +51,26 @@ def _stmt_by_action(doc, action):
         if action in s["Action"]:
             return s
     return None
+
+
+def _download_family(actions):
+    """所有 `oss:GetObject` 前缀族动作（GetObject / GetObjectVersion / GetObjectAcl / ...）。
+
+    正交性断言必须按**前缀族**查，不能列精确串：DOWNLOAD_ACTIONS 每加一个动作，
+    精确串断言就多一个漏网之鱼（2026-09-23 加 GetObjectVersion 时就正好漏了）。
+    """
+    return {a for a in actions if a.startswith("oss:GetObject")}
+
+
+def _write_family(actions):
+    """写入族（Put* / Append* / Abort* / 任何 Delete* / ListParts）。
+
+    注意 `oss:GetBucketMultipartUploads` **不在**此列：它是桶级「列出进行中的分片上传」，
+    属 read 的 LIST_ACTIONS，按 `MultipartUpload` 子串一刀切会误伤。
+    """
+    return {a for a in actions
+            if a.startswith(("oss:Put", "oss:Delete", "oss:Append", "oss:Abort"))
+            or a == "oss:ListParts"}
 
 
 def _bucket_info_stmt(doc):
@@ -93,15 +116,23 @@ def test_read_only_yields_bucketinfo_plus_list():
 
 
 def test_read_only_list_stmt_has_no_getobject_and_no_bucketinfo_actions():
-    """List 条不含 GetObject（read 不能下载），也不含桶信息三件套（避免重现被拒 bug）。"""
+    """List 条不含**任何** oss:GetObject* 动作（read 不能下载），也不含桶信息四件套。"""
     lst = _list_stmt(_doc(["read"]))
-    assert "oss:GetObject" not in lst["Action"]
+    assert not _download_family(lst["Action"])
     assert not (_BUCKET_INFO & set(lst["Action"]))
 
 
 def test_read_only_no_getobject_anywhere():
-    assert "oss:GetObject" not in _all_actions(_doc(["read"]))
-    assert "oss:PutObject" not in _all_actions(_doc(["read"]))
+    """read 集里**没有任何** `oss:GetObject` 前缀族动作。
+
+    【2026-09-23 改成前缀族】原来写的是精确串 `"oss:GetObject" not in acts`，
+    `DOWNLOAD_ACTIONS` 新增 `oss:GetObjectVersion` 后这条**拦不住**它被误塞进 read 分支 ——
+    正交性（read/download/write 三者不串味）是这次改动唯一可能被破坏的不变量，
+    而当时没有任何测试能发现它。
+    """
+    acts = _all_actions(_doc(["read"]))
+    assert not _download_family(acts), f"read 里混进了下载动作：{sorted(_download_family(acts))}"
+    assert not _write_family(acts), f"read 里混进了写动作：{sorted(_write_family(acts))}"
 
 
 # ── 单勾 download：桶信息条 + GetObject条(Resource=桶/前缀*) ─────────────────────
@@ -118,7 +149,7 @@ def test_download_only_yields_bucketinfo_plus_getobject():
     assert "StringLike" not in info["Condition"]
 
     # 下载条：Resource 是 桶/前缀*（对象级），不是桶
-    assert dl["Action"] == ["oss:GetObject"]
+    assert dl["Action"] == ["oss:GetObject", "oss:GetObjectVersion"]
     assert dl["Resource"] == ["acs:oss:*:*:b/team/data/*"]
     assert dl["Resource"] != ["acs:oss:*:*:b"]
     assert dl["Condition"]["DateGreaterThan"]["acs:CurrentTime"] == policy.iso8601_bj(NB)
@@ -162,11 +193,15 @@ def test_write_only_gets_bucket_info_and_write_statements():
 
 
 def test_write_only_no_delete_no_get_no_list():
-    """给桶元数据 ≠ 给列举/下载/删除。正交性不能被上面那个修复带偏。"""
-    acts = _all_actions(_doc(["write"]))
-    assert "oss:DeleteObject" not in acts
-    assert "oss:DeleteMultipleObjects" not in acts
-    assert "oss:GetObject" not in acts
+    """给桶元数据 ≠ 给列举/下载/删除。正交性不能被上面那个修复带偏。
+
+    【2026-09-23 改成前缀族/整篇兜底】下载侧原来只查精确串 `oss:GetObject`，
+    新增的 `oss:GetObjectVersion` 从这条底下能直接溜进 write 集。
+    """
+    doc = _doc(["write"])
+    acts = _all_actions(doc)
+    assert "delete" not in json.dumps(doc).lower(), "write 集出现删除动作"
+    assert not _download_family(acts), f"write 里混进了下载动作：{sorted(_download_family(acts))}"
     assert "oss:ListObjects" not in acts        # ← 关键：看不到桶里有什么
 
 
@@ -181,13 +216,25 @@ def test_all_three_four_statements_in_order():
     assert set(stmts[0]["Action"]) == _BUCKET_INFO
     assert "StringLike" not in stmts[0]["Condition"]
     assert set(stmts[1]["Action"]) == {"oss:ListObjects", "oss:GetBucketMultipartUploads"}
-    assert stmts[2]["Action"] == ["oss:GetObject"]
+    assert stmts[2]["Action"] == ["oss:GetObject", "oss:GetObjectVersion"]
     assert set(stmts[3]["Action"]) == {"oss:PutObject", "oss:AbortMultipartUpload", "oss:ListParts"}
 
 
-def test_all_three_no_delete():
-    acts = _all_actions(_doc(["read", "download", "write"]))
-    assert "oss:DeleteObject" not in acts
+@pytest.mark.parametrize("caps", [["read"], ["download"], ["write"],
+                                  ["read", "download"], ["read", "write"],
+                                  ["download", "write"], ["read", "download", "write"]])
+def test_no_delete_action_anywhere_in_document(caps):
+    """整篇兜底：策略文档里**任何位置**都不许出现 "delete"（大小写不敏感）。
+
+    【2026-09-23 从 `"oss:DeleteObject" not in acts` 换成整篇扫】
+    原写法只挡住一个名字。版本控制桶的删除叫 `oss:DeleteObjectVersion`，批删叫
+    `oss:DeleteMultipleObjects`，还有 `oss:DeleteBucket*` —— 全都查不到。
+    发出去的是给外部方的凭证，误加任何一个删除动作的后果是别人的数据被删掉。
+    现有四个动作集里没有任何合法动作含 "delete"，桶名/前缀也由本用例自己控制，不会误伤。
+    """
+    doc = _doc(caps, prefix="team/data/")
+    flat = json.dumps(doc).lower()
+    assert "delete" not in flat, f"策略里出现删除动作：{json.dumps(doc, ensure_ascii=False)}"
 
 
 # ── 关键回归（防 bug 重现）───────────────────────────────────────────────────
@@ -219,18 +266,53 @@ def test_getbucket_info_actions_absent_from_prefixed_list_statement(caps):
                 and "oss:Prefix" in s["Condition"]["StringLike"]]
     assert prefixed, "read 非整桶时应有一条带 oss:Prefix 的 List 语句"
     for s in prefixed:
-        assert not (_BUCKET_INFO & set(s["Action"]))     # 桶信息三件套绝不在此
-        assert "oss:GetObject" not in s["Action"]
+        assert not (_BUCKET_INFO & set(s["Action"]))     # 桶信息四件套绝不在此
+        # 前缀族：GetBucketLocation / GetObjectVersion 这类新动作也不许溜进带 Prefix 的语句
+        assert not _download_family(s["Action"])
+        assert not [a for a in s["Action"] if a.startswith("oss:GetBucket")
+                    and a != "oss:GetBucketMultipartUploads"], (
+            f"带 oss:Prefix 条件的语句里出现桶级动作 {s['Action']} —— 桶级请求不带 prefix，必被拒")
 
 
 def test_module_action_sets_no_cross_contamination():
     assert "oss:DeleteObject" not in policy.WRITE_ACTIONS
     assert "oss:GetObject" not in policy.LIST_ACTIONS       # read 集不含下载
     assert "oss:ListObjects" not in policy.DOWNLOAD_ACTIONS
-    # 桶信息三件套独立成集，不混入 List（否则会被带上 oss:Prefix 而被拒）
+    # 桶信息四件套独立成集，不混入 List（否则会被带上 oss:Prefix 而被拒）
     for a in _BUCKET_INFO:
         assert a in policy.BUCKET_INFO_ACTIONS
         assert a not in policy.LIST_ACTIONS
+
+    # ── 2026-09-23 两个新动作各自的串味防线 ──────────────────────────────────
+    # GetObjectVersion 必须**只**待在 download 集：进了 read 就等于「只勾列举」的外部方
+    # 能带 version id 直接取对象内容；进了 write 就等于上传方能读回全桶历史版本。
+    assert "oss:GetObjectVersion" in policy.DOWNLOAD_ACTIONS
+    assert "oss:GetObjectVersion" not in policy.LIST_ACTIONS
+    assert "oss:GetObjectVersion" not in policy.WRITE_ACTIONS
+    assert "oss:GetObjectVersion" not in policy.BUCKET_INFO_ACTIONS
+    # GetBucketLocation 必须留在桶信息条里。混进 LIST_ACTIONS 就会被带上 oss:Prefix ——
+    # 桶级请求不带 prefix 参数 → 服务端判假拒绝 → 「拿了凭证访问不了桶」那个老坑原地重演
+    # （docs/collab/research/oss-least-privilege-proposal.md:7,86，线上真踩过）。
+    assert "oss:GetBucketLocation" in policy.BUCKET_INFO_ACTIONS
+    assert "oss:GetBucketLocation" not in policy.LIST_ACTIONS
+    assert "oss:GetBucketLocation" not in policy.DOWNLOAD_ACTIONS
+    assert "oss:GetBucketLocation" not in policy.WRITE_ACTIONS
+
+
+def test_no_action_set_contains_delete():
+    """四个模块级动作集**逐个**确认无删除动作（比文档扫描更早一层的防线）。"""
+    for name in ("BUCKET_INFO_ACTIONS", "LIST_ACTIONS", "DOWNLOAD_ACTIONS", "WRITE_ACTIONS"):
+        acts = getattr(policy, name)
+        assert not [a for a in acts if "delete" in a.lower()], f"{name} 含删除动作：{acts}"
+
+
+def test_list_objects_versions_never_granted():
+    """`oss:ListObjectVersions` 是真正的扩面（能枚举历史版本 + 被 delete marker 删掉的对象），
+    policy.py 的注释明令「别再补」—— 这里把它钉住，防止下次「顺手加一个」。"""
+    doc = _doc(["read", "download", "write"], prefix="team/data/")
+    assert "oss:ListObjectVersions" not in json.dumps(doc)
+    for name in ("BUCKET_INFO_ACTIONS", "LIST_ACTIONS", "DOWNLOAD_ACTIONS", "WRITE_ACTIONS"):
+        assert "oss:ListObjectVersions" not in getattr(policy, name)
 
 
 # ── caps 为空 → 空 Statement ─────────────────────────────────────────────────
@@ -312,6 +394,57 @@ def test_session_policy_within_limit_ok():
         not_before=NB, expire=EXP)
     assert len(json.dumps(doc, ensure_ascii=False)) <= policy.SESSION_POLICY_MAX
     assert doc["Version"] == "1"
+
+
+# OSS 桶名上限 63 字符；120 字符前缀 ≈ 线上「部门/项目/数据集/批次/」这类四段目录的现实长度。
+_MAX_BUCKET = "b" * 63
+_LONG_PREFIX = "seg-dir/" * 15          # 120 字符
+
+
+def test_session_policy_realistic_worst_case_within_limit():
+    """2048 余量回归：**现实最坏情况**（63 字符桶名 + 120 字符前缀 + 三 caps 全勾）仍要放得下。
+
+    原来只有 `test_session_policy_within_limit_ok`（桶名 "b" + 前缀 "team/data/"），离上限还有
+    七百多字符 —— 再加多少动作都不会红，等于没在看预算。2026-09-23 新增两个动作精确 +49 字符
+    （典型场景 1241→1290）。这条盯的是「下次再加动作、真吃光预算」时立刻红，
+    而不是等某个长前缀申请单在发放那一刻炸。
+
+    实测（2026-09-23）：此形状 1902 字符，余量 146。
+    审批路径恒 `source_ips=[]`（approval.py:308），所以这就是审批发放的最坏形状。
+    """
+    doc = policy.build_session_policy(
+        _MAX_BUCKET, prefix=_LONG_PREFIX, caps=["read", "download", "write"],
+        not_before=NB, expire=EXP)
+    size = len(json.dumps(doc, ensure_ascii=False))
+    assert size <= policy.SESSION_POLICY_MAX, (
+        f"现实最坏情况的 session policy {size} 字符已超 {policy.SESSION_POLICY_MAX} —— "
+        "长前缀申请单会在发放时抛 PolicyTooLargeError")
+
+
+def test_session_policy_budget_headroom_is_not_yet_exhausted():
+    """把余量本身写成数字断言：低于 100 字符就该在加动作时停下来想想，而不是等它爆。"""
+    doc = policy.build_policy_with_window(
+        _MAX_BUCKET, prefix=_LONG_PREFIX, caps=["read", "download", "write"],
+        not_before=NB, expire=EXP)
+    headroom = policy.SESSION_POLICY_MAX - len(json.dumps(doc, ensure_ascii=False))
+    assert headroom >= 100, (
+        f"2048 预算只剩 {headroom} 字符（每个新动作约 +25）。再加动作前先确认 STS 路径"
+        "（TEMP_AK_STS_MAX_SECONDS>0 时才走）能不能接受长前缀申请单直接发放失败")
+
+
+def test_session_policy_worst_case_with_source_ips_overflows_today():
+    """事实锁（非回归）：最坏形状**再加出口 IP 限制**就超 2048，走 STS 会直接抛。
+
+    实测 63 字符桶名 + 120 字符前缀 + 三 caps：无 IP 1902 / 一个 IP 2094 / 两个 IP 2158。
+    影响面很窄且 fail-loud：① 审批路径 `source_ips` 恒 `[]`（approval.py:308），只有 CLI
+    `--source-ip` 能设；② 线上 `TEMP_AK_STS_MAX_SECONDS=0`，根本不走 session policy；
+    ③ 真撞上时抛 `PolicyTooLargeError` 并提示「缩短目录或改方案 B」，不会静默发出弱凭证。
+    若将来压缩了策略体积（如合并语句），本用例会红 —— 那时把它改成 within-limit 断言即可。
+    """
+    with pytest.raises(policy.PolicyTooLargeError):
+        policy.build_session_policy(
+            _MAX_BUCKET, prefix=_LONG_PREFIX, caps=["read", "download", "write"],
+            not_before=NB, expire=EXP, source_ips=["203.0.113.7", "198.51.100.9"])
 
 
 def test_session_policy_too_large_raises():

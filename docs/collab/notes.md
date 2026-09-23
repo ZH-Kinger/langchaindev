@@ -682,3 +682,21 @@ dev 的默认反射是**先拉子 agent**、不是自己扛。下面的活**默�
   · **顺带修的既存缺陷**：`--rsync-path=sudo rsync` 裸展开会被拆词（方案 B 一开就必挂）；rsync 加 `-s/--secluded-args`（泰国侧 rsync 也是 3.2.7，已核）；`_start_stage` 缺段下发锁（段1 rc 落盘到状态写回有最长 60s 窗口，期间任何 refresh 都会再起一次段2）。
   · **泰国侧安全**：`~/.ossutilconfig` 权限 664（同机其他账号可读 AK/SK）→ 已收紧 600，内容未动、在跑的 ossutil 未受影响。
   · **未完**：并行 rsync 的 40 条旧用例重写中（clamp 32→10、settings 改存字符串两组已过）；`.env.example` 从来就没有 SSH 迁移链那批 key（既存遗漏）。
+
+- [2026-09-16 TESTER] 延期不得推迟生效时间（`extend_grant` not_before 单调）补测完成：新增 `tests/unit/test_temp_ak_extend_not_before.py` **25 例全绿**，全量 `pytest` **2364 passed / 4 skipped / 9 deselected / 1 xfailed，0 failed**（基线 2339 也全绿，无既存失败）。变异验证：把修复改回 `not_before = grant.get("not_before") or now` → **9 例转红**（含整链那条），而既有 `test_temp_ak_extend.py` 54 例**全程绿**——说明这个 bug 此前完全无覆盖。覆盖：回归本体/落盘记录/连续多次延期/更早 nb 取更早/空 nb 保原值/老数据回落 now/三条既有校验（含"校验用传入值、跑在 min 之前，畸形表单不被 min 救回"）/真实 policy 文档时间窗 + 当下有效/STS 两条路（重签发、转方案B）/extends 审计/**整链**（审批事件→parse→extend_grant→rewrite_ram_window→policy）。
+  · 报给 dev 的 3 个残留（**未改源码**）：① `elif original_nb:` 对「原 grant 无 not_before 或存成 0」的老数据不做钳制，仍会被推到未来（已写用例钉住现状）；② 延长分支只校验 `expire > now`、不比 `old_expire`，填成「新生效→原到期」会静默缩短有效期还记一条 extends；③ 钳制发生时无日志、`extends` 不记 not_before 变化，线上无法回溯。
+  · 环境：本机缺依赖（fakeredis/oss2/langchain/阿里 SDK 等）已 `pip install --user` 补齐才跑得起来（numpy 被 langchain 0.3.0 降到 1.26.4，已恢复 2.2.6 并复跑全绿）；**SSH 到 bot-new 被权限门拦下 → 无容器真机验收**，以进程内整链用例替代。
+
+- [2026-09-23 TESTER] temp_ak 审计 5 缺口补齐（T1-T5，只动 tests/）：正交性改前缀族断言（`oss:GetObject*` 家族，防 GetObjectVersion 串进 read/write）、delete 改整篇 json 扫、T3 三条动作集串味锁（含 GetBucketLocation 不得进 LIST_ACTIONS）、T4 2048 现实最坏情况（63 桶名+120 前缀+三 caps = 1902，余量 146）、T5 延期「未生效可挪档期 / 已生效仍钳制 / 新到期须晚于原到期且先于钳制」。全量 pytest **2504 passed, 4 skipped, 9 deselected, 1 xfailed**。顺带修一个测试侧真缺陷：`test_temp_ak_extend_not_before.py` 有两个同名 test 函数（后者覆盖前者、前一条静默不执行），已改名并新增 `tests/unit/test_suite_hygiene.py` 全仓重名自检。已知记账（Low，非阻塞）：最坏形状再加 `source_ips` 会超 2048 → STS 路径抛 PolicyTooLargeError（审批路径 source_ips 恒空 + 线上 TEMP_AK_STS_MAX_SECONDS=0，当前不可达，已写成事实锁）。
+
+[2026-09-23] [AUDITOR] temp_ak 复审（extend_grant 三改 + policy 注释 + T1-T5）：0 高 0 中 5 低，无阻塞。
+  窗口单调性收窄到位（结果恒 ⊆ 原窗口∪本次审批窗口，未生效场景=精确等于本次审批窗口）；
+  PolicyTooLargeError 全仓无 except、无「超限退化成无 session policy」分支 → T5 事实锁判断成立。
+  已修：policy.py 的「不扩大范围」改成「不扩大 Resource 范围，版本维度确有扩展」；
+  「无需延长」报错补「要缩短或前移窗口，请撤销后重新发放」。
+  待办(Low)：① test_temp_ak_policy.py:8-9,104 仍写「桶信息条无 Condition/无时间窗」（与 7462714 矛盾）；
+  ② test_suite_hygiene 漏 fixture/helper 重名且不扫 conftest.py（更严口径实测全仓 0 命中）；
+  ③ 类内方法重名未覆盖（今天零 class Test*）。
+  记账：approval.py:181 延期失败告警不传 profile → 1949 档告警落默认群（既存，本次改动使其更易触发）。
+  预算类事实锁：test_session_policy_worst_case_with_source_ips_overflows_today 锁的是「今天会超」，
+  将来压缩了策略体积它会因为改好了而变红，那时改成 within-limit 断言即可，不是回归。

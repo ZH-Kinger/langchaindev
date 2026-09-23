@@ -403,9 +403,25 @@ def extend_grant(grant: dict, not_before, expire, *, extend_instance: str = "") 
         raise TempAkError("新到期时间已过")
     if not_before and float(not_before) >= float(expire):
         raise TempAkError("新生效时间必须早于到期时间")
-    if not not_before:
-        not_before = grant.get("not_before") or now
     old_expire = grant.get("expire")
+    if float(expire) <= float(old_expire or 0):
+        # 表单填成「新生效日 → 原到期日」时，下面的钳制会把两端都压回原值 ——
+        # 一次完完全全的空操作，却记一条 extends、还给使用方发「有效期已延长」。
+        # 安全侧无害（只会更窄），但会让人以为延期成功了
+        raise TempAkError("新到期时间不晚于原到期时间，无需延长（要缩短或前移窗口，请撤销后重新发放）")
+    original_nb = grant.get("not_before")
+    # 老记录可能没有 not_before（或为 0）。按 now 兜底：grant 处于 ISSUED、当下有效，
+    # 用 now 只会让窗口更保守。不兜底的话这类记录会整条跳过钳制 —— 正是下面要消灭的症状
+    effective_nb = float(original_nb or now)
+    if not not_before:
+        not_before = effective_nb
+    elif effective_nb <= now:
+        # **已经生效的凭证：绝不能把生效时间推到未来。** 审批表单的 DateInterval 常被填成
+        # 「原到期日 → 新到期日」，直接采信会让 policy 的 DateGreaterThan 当场不成立 ——
+        # 使用方在延期通过的那一刻反而用不了了。往前挪（填了更早的生效时间）无害，保留。
+        not_before = min(float(not_before), effective_nb)
+    # else: 尚未生效的凭证允许整体挪档期 —— 一律钳制的话，
+    # 「10-01→10-31 改成 11-01→11-30」会被压成 10-01 生效，比最新审批批准的起点早一个月
     grant["not_before"] = float(not_before)
     grant["expire"] = float(expire)
 
@@ -420,8 +436,11 @@ def extend_grant(grant: dict, not_before, expire, *, extend_instance: str = "") 
         if grant["mode"] == issuer.RAM_MODE:
             grant["ak_id"] = creds.get("access_key_id", "")
 
+    # 生效时间也记进审计项：钳制真正发生时（表单填了未来的生效时间被压回去），
+    # 不记的话线上事后无法回溯「审批单写的是 11-01，实际窗口是 10-01」
     grant.setdefault("extends", []).append(
-        {"at": now, "old_expire": old_expire, "new_expire": grant["expire"]})
+        {"at": now, "old_expire": old_expire, "new_expire": grant["expire"],
+         "old_not_before": original_nb, "new_not_before": grant["not_before"]})
     if extend_instance:
         grant.setdefault("extend_instances", []).append(extend_instance)
     _save(grant)
